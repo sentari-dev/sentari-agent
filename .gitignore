@@ -1,0 +1,16 @@
+# Binaries
+sentari-agent
+sentari-agent-enterprise
+sentari-agent.exe
+sentari-agent-enterprise.exe
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
