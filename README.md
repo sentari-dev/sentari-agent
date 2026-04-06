@@ -2,6 +2,15 @@
 
 The Sentari agent scans endpoints for Python environments and packages. It is a single statically-linked binary with zero runtime dependencies — no Python, no package manager, no runtime required.
 
+## Quick install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.sh -o install.sh
+sudo bash install.sh --version 0.1.0 --server-url https://sentari.example.com:8000 --enroll-token YOUR_TOKEN
+```
+
+See [docs/INSTALLATION.md](docs/INSTALLATION.md) for the full step-by-step guide including fleet deployment via Ansible, air-gapped install, and Windows.
+
 ## What it does
 
 The agent walks the filesystem and extracts package metadata from:
