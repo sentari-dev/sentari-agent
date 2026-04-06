@@ -435,8 +435,10 @@ func (s *Scanner) discoverEnvironments(ctx context.Context) ([]discoveredEnv, []
 	rootDepth = mainRootDepth
 	s.cfg.MaxDepth = savedMaxDepth
 
-	// Add system package manager jobs (Linux only).
-	if runtime.GOOS == "linux" {
+	// Add system package manager jobs (Linux only, full-system scan).
+	// Only check when ScanRoot is / — otherwise the user is scanning a
+	// specific directory and doesn't want system-wide dpkg/rpm results.
+	if runtime.GOOS == "linux" && (cleanRoot == "/") {
 		if _, err := os.Stat("/var/lib/dpkg/status"); err == nil {
 			envs = append(envs, discoveredEnv{path: "/var/lib/dpkg", envType: EnvSystemDeb, name: "dpkg"})
 		}
