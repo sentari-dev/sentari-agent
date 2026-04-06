@@ -7,12 +7,11 @@ This guide walks you through installing the Sentari agent on your devices. The a
 ## Table of Contents
 
 1. [Before You Start](#before-you-start)
-2. [Quick Install (Single Device)](#quick-install-single-device)
-3. [Fleet Install (Multiple Devices)](#fleet-install-multiple-devices)
-4. [Windows Installation](#windows-installation)
+2. [Linux](#linux)
+3. [Windows](#windows)
+4. [macOS](#macos)
 5. [Verify the Installation](#verify-the-installation)
 6. [Troubleshooting](#troubleshooting)
-7. [Uninstall](#uninstall)
 
 ---
 
@@ -20,39 +19,39 @@ This guide walks you through installing the Sentari agent on your devices. The a
 
 You need three things from your Sentari administrator:
 
-1. **Server URL** — The address of your Sentari server (e.g., `https://sentari.yourcompany.com:8000`)
-2. **Enrollment token** — A one-time token that authorizes new agents to register. Found in the Sentari dashboard under **Settings > General > Enrollment Token**.
-3. **Agent version** — The version to install (e.g., `0.1.0`). Check the [Releases page](https://github.com/sentari-dev/sentari-agent/releases) for the latest version.
+1. **Server URL** -- The address of your Sentari server (e.g., `https://sentari.yourcompany.com:8000`)
+2. **Enrollment token** -- A one-time token that authorizes new agents to register. Found in the Sentari dashboard under **Settings > General > Enrollment Token**.
+3. **Agent version** -- The version to install (e.g., `0.1.0`). Check the [Releases page](https://github.com/sentari-dev/sentari-agent/releases) for the latest version.
 
 ### System requirements
 
-| | Linux | Windows |
-|---|---|---|
-| OS | RHEL/CentOS 7+, Ubuntu 18.04+, Debian 10+, SLES 15+ | Windows 10 / Server 2016+ |
-| Architecture | x86_64 (amd64) or ARM64 | x86_64 (amd64) |
-| Disk space | 50 MB (binary) + 500 MB (data) | Same |
-| Network | Outbound HTTPS to the Sentari server | Same |
-| Permissions | Root recommended for full filesystem scan | Administrator recommended |
-| Dependencies | **None** — single static binary | **None** — single static binary |
+| | Linux | Windows | macOS |
+|---|---|---|---|
+| OS | RHEL/CentOS 7+, Ubuntu 18.04+, Debian 10+, SLES 15+ | Windows 10 / Server 2016+ | macOS 12+ (Monterey) |
+| Architecture | x86_64 (amd64) or ARM64 | x86_64 (amd64) | x86_64 (amd64) or ARM64 (Apple Silicon) |
+| Disk space | 50 MB (binary) + 500 MB (data) | Same | Same |
+| Network | Outbound HTTPS to the Sentari server | Same | Same |
+| Permissions | Root recommended for full filesystem scan | Administrator recommended | Admin recommended for full scan |
+| Dependencies | **None** -- single static binary | **None** -- single static binary | **None** -- single static binary |
 
 ---
 
-## Quick Install (Single Device)
+## Linux
 
-### Step 1: Download and run the install script
+### Quick Install
 
-Open a terminal on the device and run:
+Open a terminal on the device and run (replace the three values with your own):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.sh | \
+  sudo bash -s -- --version 0.1.0 --server-url https://sentari.yourcompany.com:8000 --enroll-token YOUR_TOKEN
+```
+
+Or download and inspect the script first:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.sh -o install.sh
 chmod +x install.sh
-```
-
-### Step 2: Run the installer
-
-Replace the three values with your own:
-
-```bash
 sudo ./install.sh \
   --version 0.1.0 \
   --server-url https://sentari.yourcompany.com:8000 \
@@ -77,7 +76,7 @@ You should see output like:
 [3/7] Verifying checksum...
   OK — checksum verified
 [4/7] Installing binary...
-  sentari-agent 0.1.0 (enterprise)
+  Installed: /usr/local/bin/sentari-agent
 [5/7] Creating configuration...
 [6/7] Creating systemd service...
 [7/7] Starting the agent...
@@ -88,25 +87,18 @@ You should see output like:
 ============================================
 ```
 
-### Step 3: Verify it is running
+#### Install script options
 
-```bash
-sudo systemctl status sentari-agent
-```
+| Flag | Required | Default | Description |
+|---|---|---|---|
+| `--version` | Yes | -- | Agent version (e.g., `0.1.0`) |
+| `--server-url` | Yes (enterprise) | -- | Sentari server URL |
+| `--enroll-token` | Yes (enterprise) | -- | One-time enrollment token |
+| `--edition` | No | `enterprise` | `enterprise` or `oss` |
+| `--scan-interval` | No | `3600` | Seconds between scans |
+| `--scan-root` | No | `/` | Filesystem root to scan |
 
-You should see `active (running)`. The agent will perform its first scan immediately and then repeat on the configured interval (default: every hour).
-
-### Step 4: Check the Sentari dashboard
-
-Open your Sentari dashboard and go to **Fleet > Devices**. Your device should appear within a few minutes.
-
----
-
-## Fleet Install (Multiple Devices)
-
-For installing across many devices, use one of these methods:
-
-### Method A: Ansible (recommended)
+### Fleet Install (Ansible)
 
 **Step 1:** Copy the install script to your Ansible control node:
 
@@ -164,7 +156,7 @@ ansible-playbook -i inventory.ini deploy-sentari-agent.yml
 
 This installs the agent on every host in your inventory. Each device registers independently with the server using the enrollment token.
 
-### Method B: Shell script over SSH
+### Fleet Install (SSH)
 
 If you have a list of hostnames and SSH access:
 
@@ -178,7 +170,7 @@ db-prod-01.internal
 web-01.internal
 ```
 
-**Step 2:** Run the install script on each device:
+**Step 2:** Create and run the deployment script:
 
 ```bash
 #!/bin/bash
@@ -201,14 +193,12 @@ while read -r HOST; do
 done < devices.txt
 ```
 
-**Step 3:** Run it:
-
 ```bash
 chmod +x deploy-to-fleet.sh
 ./deploy-to-fleet.sh
 ```
 
-### Method C: Manual download (air-gapped environments)
+### Air-gapped Install
 
 For devices without internet access:
 
@@ -289,149 +279,26 @@ sudo systemctl enable --now sentari-agent
 sudo systemctl status sentari-agent
 ```
 
----
-
-## Windows Installation
-
-### Step 1: Download the binary
-
-Open PowerShell as Administrator and run:
-
-```powershell
-$VERSION = "0.1.0"
-$URL = "https://github.com/sentari-dev/sentari-agent/releases/download/v$VERSION/sentari-agent-windows-amd64.exe"
-$DEST = "C:\Program Files\Sentari"
-
-New-Item -ItemType Directory -Force -Path $DEST
-Invoke-WebRequest -Uri $URL -OutFile "$DEST\sentari-agent.exe"
-```
-
-### Step 2: Run a one-shot scan
-
-```powershell
-& "C:\Program Files\Sentari\sentari-agent.exe" `
-    --server-url "https://sentari.yourcompany.com:8000" `
-    --enroll-token "YOUR_ENROLLMENT_TOKEN" `
-    --upload
-```
-
-### Step 3: Install as a Windows service (for continuous scanning)
-
-Use the Windows installer script:
-
-```powershell
-# Download the installer
-$INSTALLER_URL = "https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/deploy/installer/windows/install.ps1"
-Invoke-WebRequest -Uri $INSTALLER_URL -OutFile install.ps1
-
-# Run it
-.\install.ps1 -ServerUrl "https://sentari.yourcompany.com:8000" -EnrollToken "YOUR_ENROLLMENT_TOKEN"
-```
-
-This creates a Windows service called `SentariAgent` that starts automatically.
-
----
-
-## Verify the Installation
-
-After installation, verify the agent is working correctly:
-
-### Check the service status
+### Managing the Service
 
 ```bash
-# Linux
+# Check status
 sudo systemctl status sentari-agent
 
-# Expected output:
-#   Active: active (running) since ...
-#   Main PID: 12345 (sentari-agent)
-```
-
-```powershell
-# Windows
-Get-Service SentariAgent
-
-# Expected output:
-#   Status   Name           DisplayName
-#   ------   ----           -----------
-#   Running  SentariAgent   Sentari Agent
-```
-
-### Check the logs
-
-```bash
-# Linux — follow logs in real time
+# Follow logs in real time
 sudo journalctl -u sentari-agent -f
 
-# You should see:
-#   Registering agent and obtaining certificates...
-#   Certificates saved to /var/lib/sentari/certs
-#   scan.started hostname=your-hostname
-#   scan.completed packages=142
-#   upload.success packages=142
+# Restart the agent
+sudo systemctl restart sentari-agent
+
+# Stop the agent
+sudo systemctl stop sentari-agent
+
+# Disable on boot
+sudo systemctl disable sentari-agent
 ```
 
-### Check the dashboard
-
-1. Open your Sentari dashboard
-2. Go to **Fleet > Devices**
-3. Your device should appear with its hostname, OS, and package count
-4. Click on the device to see the full package inventory
-
-### Check the certificate
-
-After successful registration, the agent has a certificate:
-
-```bash
-ls -la /var/lib/sentari/certs/
-# Should contain: ca.crt, device.crt, device.key, device_id
-```
-
----
-
-## Troubleshooting
-
-### "Registration failed: connection refused"
-
-The agent cannot reach the server. Check:
-- Is the server URL correct? (including the port)
-- Is there a firewall blocking outbound HTTPS?
-- If behind a proxy, configure it in `/etc/sentari/agent.conf`:
-
-```ini
-[proxy]
-https_proxy = http://proxy.yourcompany.com:3128
-```
-
-### "Registration failed: invalid enrollment token"
-
-The token is wrong or has been rotated. Get a new token from your Sentari administrator (Settings > General > Enrollment Token).
-
-### "scan.completed packages=0"
-
-The agent found no Python environments. This is normal if:
-- The device has no Python installed
-- Python is installed in a non-standard location — increase `max_depth` in the config
-- The agent doesn't have read access to the directories — run as root
-
-### Agent is not starting
-
-Check the logs:
-
-```bash
-sudo journalctl -u sentari-agent --no-pager -n 50
-```
-
-Common issues:
-- Binary is not executable: `sudo chmod +x /usr/local/bin/sentari-agent`
-- Config file syntax error: check `/etc/sentari/agent.conf`
-- Data directory permissions: `sudo chmod 700 /var/lib/sentari`
-
----
-
-## Uninstall
-
-### Linux
+### Uninstall
 
 ```bash
 # Stop and disable the service
@@ -448,15 +315,478 @@ sudo rm -rf /var/lib/sentari
 sudo systemctl daemon-reload
 ```
 
-### Windows
+---
+
+## Windows
+
+### Quick Install
+
+Open PowerShell as Administrator and run:
 
 ```powershell
-# If installed via install.ps1:
-.\uninstall.ps1
-
-# Or manually:
-Stop-Service SentariAgent
-sc.exe delete SentariAgent
-Remove-Item -Recurse "C:\Program Files\Sentari"
-Remove-Item -Recurse "C:\ProgramData\Sentari"
+irm https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -Version 0.1.0 -ServerURL https://sentari.yourcompany.com:8000 -EnrollToken YOUR_TOKEN
 ```
+
+Or download and inspect the script first:
+
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.ps1 -OutFile install.ps1
+Get-Content install.ps1  # Review the script
+.\install.ps1 -Version 0.1.0 -ServerURL https://sentari.yourcompany.com:8000 -EnrollToken YOUR_TOKEN
+```
+
+#### Install script parameters
+
+| Parameter | Required | Default | Description |
+|---|---|---|---|
+| `-Version` | Yes | -- | Agent version (e.g., `0.1.0`) |
+| `-ServerURL` | Yes | -- | Sentari server URL |
+| `-EnrollToken` | Yes | -- | One-time enrollment token |
+| `-Edition` | No | `enterprise` | `enterprise` or `oss` |
+| `-ScanInterval` | No | `3600` | Seconds between scans |
+| `-InstallDir` | No | `C:\Program Files\Sentari` | Installation directory |
+| `-ServiceName` | No | `SentariAgent` | Windows service name |
+
+### Fleet Install (GPO / SCCM)
+
+For deploying across many Windows machines, use Group Policy or SCCM to run the installer silently.
+
+**Option A: Group Policy startup script**
+
+1. Download `install.ps1` and the agent binary to a network share (e.g., `\\fileserver\sentari\`)
+2. Create a Group Policy Object (GPO) targeting the desired OUs
+3. Under **Computer Configuration > Policies > Windows Settings > Scripts > Startup**, add a PowerShell script:
+
+```powershell
+# GPO startup script — runs as SYSTEM
+powershell.exe -ExecutionPolicy Bypass -File "\\fileserver\sentari\install.ps1" `
+  -Version 0.1.0 `
+  -ServerURL https://sentari.yourcompany.com:8000 `
+  -EnrollToken YOUR_TOKEN
+```
+
+**Option B: SCCM/MECM application deployment**
+
+1. Create an Application in SCCM with the following install command:
+
+```
+powershell.exe -ExecutionPolicy Bypass -File install.ps1 -Version 0.1.0 -ServerURL https://sentari.yourcompany.com:8000 -EnrollToken YOUR_TOKEN
+```
+
+2. Set the detection rule to check for the existence of `C:\Program Files\Sentari\sentari-agent.exe`
+3. Deploy to the target device collection
+
+**Option C: PowerShell remoting**
+
+```powershell
+$devices = Get-Content devices.txt
+$version = "0.1.0"
+$serverUrl = "https://sentari.yourcompany.com:8000"
+$enrollToken = "YOUR_TOKEN"
+
+foreach ($device in $devices) {
+    Write-Host "--- Installing on $device ---"
+    Invoke-Command -ComputerName $device -ScriptBlock {
+        param($v, $s, $t)
+        irm https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.ps1 -OutFile C:\Windows\Temp\install.ps1
+        & C:\Windows\Temp\install.ps1 -Version $v -ServerURL $s -EnrollToken $t
+        Remove-Item C:\Windows\Temp\install.ps1
+    } -ArgumentList $version, $serverUrl, $enrollToken
+    Write-Host "--- Done: $device ---"
+}
+```
+
+### Air-gapped Install
+
+For machines without internet access:
+
+**Step 1:** On a machine with internet, download the binary and checksum:
+
+```powershell
+$VERSION = "0.1.0"
+Invoke-WebRequest -Uri "https://github.com/sentari-dev/sentari-agent/releases/download/v$VERSION/sentari-agent-windows-amd64.exe" -OutFile sentari-agent-windows-amd64.exe
+Invoke-WebRequest -Uri "https://github.com/sentari-dev/sentari-agent/releases/download/v$VERSION/SHA256SUMS.txt" -OutFile SHA256SUMS.txt
+```
+
+**Step 2:** Verify the checksum:
+
+```powershell
+$expected = (Get-Content SHA256SUMS.txt | Select-String 'sentari-agent-windows-amd64.exe') -replace '\s+.*',''
+$actual = (Get-FileHash sentari-agent-windows-amd64.exe -Algorithm SHA256).Hash
+if ($actual -eq $expected) { Write-Host "Checksum OK" } else { Write-Host "CHECKSUM MISMATCH" -ForegroundColor Red }
+```
+
+**Step 3:** Transfer the binary to the target machine (USB, network share, etc.)
+
+**Step 4:** On the target machine, install manually (PowerShell as Administrator):
+
+```powershell
+# Create directories
+$InstallDir = "C:\Program Files\Sentari"
+$ConfigDir = "$InstallDir\config"
+$DataDir = "C:\ProgramData\Sentari"
+
+New-Item -ItemType Directory -Force -Path $InstallDir, $ConfigDir, $DataDir | Out-Null
+
+# Copy binary
+Copy-Item sentari-agent-windows-amd64.exe "$InstallDir\sentari-agent.exe"
+
+# Write config
+@"
+[server]
+url = https://sentari.yourcompany.com:8000
+
+[scanner]
+scan_root = C:\
+max_depth = 12
+interval = 3600
+"@ | Set-Content "$ConfigDir\agent.conf" -Encoding UTF8
+
+# Write enrollment token (restricted permissions)
+Set-Content "$ConfigDir\enroll-token" -Value "YOUR_TOKEN" -NoNewline -Encoding UTF8
+$tokenAcl = Get-Acl "$ConfigDir\enroll-token"
+$tokenAcl.SetAccessRuleProtection($true, $false)
+$tokenAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM','FullControl','None','None','Allow')))
+$tokenAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators','FullControl','None','None','Allow')))
+Set-Acl "$ConfigDir\enroll-token" $tokenAcl
+
+# Restrict data directory ACL
+$acl = Get-Acl $DataDir
+$acl.SetAccessRuleProtection($true, $false)
+$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM','FullControl','ContainerInherit,ObjectInherit','None','Allow')))
+$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators','FullControl','ContainerInherit,ObjectInherit','None','Allow')))
+Set-Acl $DataDir $acl
+
+# Register service
+$binPath = "`"$InstallDir\sentari-agent.exe`" --serve --config `"$ConfigDir\agent.conf`" --enroll-token-file `"$ConfigDir\enroll-token`" --data-dir `"$DataDir`""
+New-Service -Name SentariAgent -BinaryPathName $binPath -DisplayName "Sentari Agent" -StartupType Automatic | Out-Null
+sc.exe failure SentariAgent reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
+
+# Start the service
+Start-Service SentariAgent
+```
+
+### Managing the Service
+
+```powershell
+# Check status
+Get-Service SentariAgent
+
+# View recent logs
+Get-EventLog -LogName Application -Source SentariAgent -Newest 20
+
+# Restart the agent
+Restart-Service SentariAgent
+
+# Stop the agent
+Stop-Service SentariAgent
+
+# Disable on boot
+Set-Service SentariAgent -StartupType Disabled
+```
+
+### Uninstall
+
+```powershell
+# Stop and remove the service
+Stop-Service SentariAgent -Force
+sc.exe delete SentariAgent
+
+# Remove files
+Remove-Item -Recurse -Force "C:\Program Files\Sentari"
+Remove-Item -Recurse -Force "C:\ProgramData\Sentari"
+
+# Remove from system PATH (optional)
+$path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+$path = ($path -split ';' | Where-Object { $_ -ne 'C:\Program Files\Sentari' }) -join ';'
+[System.Environment]::SetEnvironmentVariable('Path', $path, 'Machine')
+```
+
+---
+
+## macOS
+
+macOS support is intended for **development and testing** environments. For production fleet deployments, use Linux or Windows. There is no automated installer for macOS.
+
+### Install
+
+**Step 1:** Download the binary:
+
+```bash
+VERSION="0.1.0"
+
+# For Intel Macs:
+curl -LO "https://github.com/sentari-dev/sentari-agent/releases/download/v${VERSION}/sentari-agent-darwin-amd64"
+
+# For Apple Silicon (M1/M2/M3/M4):
+curl -LO "https://github.com/sentari-dev/sentari-agent/releases/download/v${VERSION}/sentari-agent-darwin-arm64"
+```
+
+**Step 2:** Verify the checksum:
+
+```bash
+curl -LO "https://github.com/sentari-dev/sentari-agent/releases/download/v${VERSION}/SHA256SUMS.txt"
+grep "sentari-agent-darwin" SHA256SUMS.txt | shasum -a 256 -c -
+```
+
+**Step 3:** Make it executable and run a one-shot scan:
+
+```bash
+chmod +x sentari-agent-darwin-*
+./sentari-agent-darwin-arm64 --scan --output scan-result.json
+```
+
+**Step 4 (optional):** Upload to a Sentari server:
+
+```bash
+./sentari-agent-darwin-arm64 \
+  --server-url https://sentari.yourcompany.com:8000 \
+  --enroll-token YOUR_TOKEN \
+  --upload
+```
+
+### Running as a launchd service (optional)
+
+If you want the agent to run continuously on macOS for testing purposes:
+
+**Step 1:** Install the binary:
+
+```bash
+sudo mkdir -p /usr/local/bin /etc/sentari /var/lib/sentari
+sudo cp sentari-agent-darwin-arm64 /usr/local/bin/sentari-agent
+sudo chmod +x /usr/local/bin/sentari-agent
+```
+
+**Step 2:** Create the config file:
+
+```bash
+sudo tee /etc/sentari/agent.conf > /dev/null <<EOF
+[server]
+url = https://sentari.yourcompany.com:8000
+
+[scanner]
+scan_root = /
+max_depth = 12
+interval = 3600
+EOF
+
+echo -n "YOUR_TOKEN" | sudo tee /etc/sentari/enroll-token > /dev/null
+sudo chmod 600 /etc/sentari/enroll-token
+```
+
+**Step 3:** Create a launchd plist:
+
+```bash
+sudo tee /Library/LaunchDaemons/com.sentari.agent.plist > /dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sentari.agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/sentari-agent</string>
+        <string>--serve</string>
+        <string>--config</string>
+        <string>/etc/sentari/agent.conf</string>
+        <string>--enroll-token-file</string>
+        <string>/etc/sentari/enroll-token</string>
+        <string>--data-dir</string>
+        <string>/var/lib/sentari</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/sentari-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/sentari-agent.log</string>
+</dict>
+</plist>
+EOF
+```
+
+**Step 4:** Load and start the service:
+
+```bash
+sudo launchctl load /Library/LaunchDaemons/com.sentari.agent.plist
+```
+
+### Uninstall
+
+```bash
+# If running as a launchd service:
+sudo launchctl unload /Library/LaunchDaemons/com.sentari.agent.plist
+sudo rm /Library/LaunchDaemons/com.sentari.agent.plist
+
+# Remove files
+sudo rm /usr/local/bin/sentari-agent
+sudo rm -rf /etc/sentari
+sudo rm -rf /var/lib/sentari
+sudo rm -f /var/log/sentari-agent.log
+```
+
+If you only downloaded the binary for one-shot scanning, simply delete the binary file.
+
+---
+
+## Verify the Installation
+
+After installation on any platform, verify the agent is working correctly:
+
+### Check the service status
+
+```bash
+# Linux
+sudo systemctl status sentari-agent
+```
+
+```powershell
+# Windows
+Get-Service SentariAgent
+```
+
+```bash
+# macOS (if using launchd)
+sudo launchctl list | grep sentari
+```
+
+### Check the logs
+
+```bash
+# Linux -- follow logs in real time
+sudo journalctl -u sentari-agent -f
+
+# You should see:
+#   Registering agent and obtaining certificates...
+#   Certificates saved to /var/lib/sentari/certs
+#   scan.started hostname=your-hostname
+#   scan.completed packages=142
+#   upload.success packages=142
+```
+
+```powershell
+# Windows
+Get-EventLog -LogName Application -Source SentariAgent -Newest 20
+```
+
+```bash
+# macOS (if using launchd)
+tail -f /var/log/sentari-agent.log
+```
+
+### Check the dashboard
+
+1. Open your Sentari dashboard
+2. Go to **Fleet > Devices**
+3. Your device should appear with its hostname, OS, and package count
+4. Click on the device to see the full package inventory
+
+### Check the certificate
+
+After successful registration, the agent has an mTLS certificate:
+
+```bash
+# Linux / macOS
+ls -la /var/lib/sentari/certs/
+# Should contain: ca.crt, device.crt, device.key, device_id
+```
+
+```powershell
+# Windows
+Get-ChildItem "C:\ProgramData\Sentari\certs"
+# Should contain: ca.crt, device.crt, device.key, device_id
+```
+
+---
+
+## Troubleshooting
+
+### Connection issues
+
+**"Registration failed: connection refused"**
+
+The agent cannot reach the server. Check:
+- Is the server URL correct? (including the port)
+- Is there a firewall blocking outbound HTTPS?
+- Can you reach the server from the device?
+
+```bash
+# Linux / macOS
+curl -v https://sentari.yourcompany.com:8000/health
+```
+
+```powershell
+# Windows
+Invoke-WebRequest -Uri https://sentari.yourcompany.com:8000/health -UseBasicParsing
+```
+
+If behind a proxy, configure it in the agent config:
+
+```ini
+[proxy]
+https_proxy = http://proxy.yourcompany.com:3128
+```
+
+### Authentication issues
+
+**"Registration failed: invalid enrollment token"**
+
+The token is wrong or has been rotated. Get a new token from your Sentari administrator (Settings > General > Enrollment Token).
+
+### Scanning issues
+
+**"scan.completed packages=0"**
+
+The agent found no Python environments. This is normal if:
+- The device has no Python installed
+- Python is installed in a non-standard location -- increase `max_depth` in the config
+- The agent doesn't have read access to the directories -- run as root/Administrator
+
+### Linux-specific
+
+**Agent is not starting:**
+
+```bash
+sudo journalctl -u sentari-agent --no-pager -n 50
+```
+
+Common issues:
+- Binary is not executable: `sudo chmod +x /usr/local/bin/sentari-agent`
+- Config file syntax error: check `/etc/sentari/agent.conf`
+- Data directory permissions: `sudo chmod 700 /var/lib/sentari`
+
+### Windows-specific
+
+**Service fails to start:**
+
+```powershell
+# Check Event Viewer
+Get-EventLog -LogName Application -Source SentariAgent -Newest 10
+```
+
+Common issues:
+- The install directory or binary was deleted -- reinstall
+- Config file syntax error: check `C:\Program Files\Sentari\config\agent.conf`
+- Port conflict: ensure no other service is using the same local port
+- Antivirus quarantined the binary: add an exclusion for `C:\Program Files\Sentari\`
+
+### macOS-specific
+
+**launchd service not starting:**
+
+```bash
+sudo launchctl list | grep sentari
+# If the "LastExitStatus" is non-zero, check the log:
+cat /var/log/sentari-agent.log
+```
+
+Common issues:
+- Binary not signed: macOS Gatekeeper may block unsigned binaries. Remove the quarantine attribute:
+  ```bash
+  sudo xattr -d com.apple.quarantine /usr/local/bin/sentari-agent
+  ```
+- Permissions: ensure `/var/lib/sentari` is writable

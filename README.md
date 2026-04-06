@@ -4,12 +4,29 @@ The Sentari agent scans endpoints for Python environments and packages. It is a 
 
 ## Quick install
 
+**Linux:**
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.sh -o install.sh
-sudo bash install.sh --version 0.1.0 --server-url https://sentari.example.com:8000 --enroll-token YOUR_TOKEN
+curl -fsSL https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.sh | \
+  sudo bash -s -- --version 0.1.0 --server-url https://sentari.example.com:8000 --enroll-token YOUR_TOKEN
 ```
 
-See [docs/INSTALLATION.md](docs/INSTALLATION.md) for the full step-by-step guide including fleet deployment via Ansible, air-gapped install, and Windows.
+**Windows** (PowerShell as Administrator):
+
+```powershell
+irm https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -Version 0.1.0 -ServerURL https://sentari.example.com:8000 -EnrollToken YOUR_TOKEN
+```
+
+**macOS** (manual):
+
+```bash
+curl -LO https://github.com/sentari-dev/sentari-agent/releases/download/v0.1.0/sentari-agent-darwin-amd64
+chmod +x sentari-agent-darwin-amd64
+./sentari-agent-darwin-amd64 --scan --output scan-result.json
+```
+
+See [docs/INSTALLATION.md](docs/INSTALLATION.md) for the full guide including fleet deployment (Ansible, GPO/SCCM, SSH), air-gapped install, and service management.
 
 ## What it does
 
