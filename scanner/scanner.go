@@ -392,10 +392,18 @@ func (s *Scanner) discoverEnvironments(ctx context.Context) ([]discoveredEnv, []
 	_ = walk(s.cfg.ScanRoot)
 
 	// Scan well-known version manager directories (pyenv, asdf) that may be
-	// too deep for the main walk to reach. Check both real user home dirs
-	// and any home-like directories under the scan root.
-	extraHomes := userHomeDirs()
-	// Also check directories directly under the scan root for version manager
+	// too deep for the main walk to reach.
+	//
+	// When the scan root is "/" (full system scan), also check the real user
+	// home directories via userHomeDirs(). When the scan root is a specific
+	// directory (e.g., /opt/app or a test temp dir), only check directories
+	// under the scan root — never escape to unrelated system paths.
+	var extraHomes []string
+	cleanRoot := filepath.Clean(s.cfg.ScanRoot)
+	if cleanRoot == "/" || (runtime.GOOS == "windows" && len(cleanRoot) <= 3) {
+		extraHomes = userHomeDirs()
+	}
+	// Check directories directly under the scan root for version manager
 	// patterns (handles cases where scan root is /home/user or similar).
 	if topEntries, err := os.ReadDir(s.cfg.ScanRoot); err == nil {
 		for _, e := range topEntries {
