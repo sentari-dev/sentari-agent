@@ -22,8 +22,8 @@ jobs:
           - goos: windows
             goarch: amd64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.23"
 
@@ -53,7 +53,7 @@ jobs:
             -o dist/sentari-agent-oss-${GOOS}-${GOARCH}${EXT} \
             ./cmd/sentari-agent/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: agent-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/sentari-agent*
@@ -66,9 +66,9 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
