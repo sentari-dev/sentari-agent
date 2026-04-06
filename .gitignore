@@ -1,8 +1,8 @@
-# Binaries
-sentari-agent
-sentari-agent-enterprise
-sentari-agent.exe
-sentari-agent-enterprise.exe
+# Binaries (at repo root only — don't match cmd/sentari-agent/ directory)
+/sentari-agent
+/sentari-agent-enterprise
+/sentari-agent.exe
+/sentari-agent-enterprise.exe
 dist/
 
 # IDE
