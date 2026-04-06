@@ -2,31 +2,42 @@
 
 The Sentari agent scans endpoints for Python environments and packages. It is a single statically-linked binary with zero runtime dependencies — no Python, no package manager, no runtime required.
 
-## Quick install
+## Quick start
 
-**Linux:**
+### Community Edition -- standalone scan, no server needed
+
+Download the binary and scan locally. Results are saved as JSON or CSV.
 
 ```bash
+# Linux / macOS
+curl -LO https://github.com/sentari-dev/sentari-agent/releases/download/v0.1.0/sentari-agent-oss-linux-amd64
+chmod +x sentari-agent-oss-linux-amd64
+./sentari-agent-oss-linux-amd64 --scan --output scan-result.json
+```
+
+```powershell
+# Windows (PowerShell)
+Invoke-WebRequest -Uri https://github.com/sentari-dev/sentari-agent/releases/download/v0.1.0/sentari-agent-oss-windows-amd64.exe -OutFile sentari-agent.exe
+.\sentari-agent.exe --scan --output scan-result.json
+```
+
+### Enterprise Edition -- fleet management with Sentari server
+
+Installs as a background service, registers with your Sentari server, and uploads scan results automatically. Requires a server URL and enrollment token from your administrator.
+
+```bash
+# Linux
 curl -fsSL https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.sh | \
   sudo bash -s -- --version 0.1.0 --server-url https://sentari.example.com:8000 --enroll-token YOUR_TOKEN
 ```
 
-**Windows** (PowerShell as Administrator):
-
 ```powershell
+# Windows (PowerShell as Administrator)
 irm https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.ps1 -OutFile install.ps1
 .\install.ps1 -Version 0.1.0 -ServerURL https://sentari.example.com:8000 -EnrollToken YOUR_TOKEN
 ```
 
-**macOS** (manual):
-
-```bash
-curl -LO https://github.com/sentari-dev/sentari-agent/releases/download/v0.1.0/sentari-agent-darwin-amd64
-chmod +x sentari-agent-darwin-amd64
-./sentari-agent-darwin-amd64 --scan --output scan-result.json
-```
-
-See [docs/INSTALLATION.md](docs/INSTALLATION.md) for the full guide including fleet deployment (Ansible, GPO/SCCM, SSH), air-gapped install, and service management.
+See [docs/INSTALLATION.md](docs/INSTALLATION.md) for the full guide including edition comparison, fleet deployment (Ansible, GPO/SCCM), air-gapped install, and service management.
 
 ## What it does
 

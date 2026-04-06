@@ -1,44 +1,135 @@
 # Sentari Agent — Installation Guide
 
-This guide walks you through installing the Sentari agent on your devices. The agent scans each device for Python environments and packages, then uploads the results to your Sentari server.
+This guide walks you through installing the Sentari agent on your devices.
 
 ---
 
 ## Table of Contents
 
-1. [Before You Start](#before-you-start)
-2. [Linux](#linux)
-3. [Windows](#windows)
-4. [macOS](#macos)
-5. [Verify the Installation](#verify-the-installation)
-6. [Troubleshooting](#troubleshooting)
+1. [Choose Your Edition](#choose-your-edition)
+2. [Community Edition (OSS)](#community-edition-oss)
+3. [Enterprise Edition](#enterprise-edition)
+4. [Verify the Installation](#verify-the-installation)
+5. [Troubleshooting](#troubleshooting)
 
 ---
 
-## Before You Start
+## Choose Your Edition
 
-You need three things from your Sentari administrator:
+The Sentari agent comes in two editions. Both use the same scanning engine and detect the same Python environments.
 
-1. **Server URL** -- The address of your Sentari server (e.g., `https://sentari.yourcompany.com:8000`)
-2. **Enrollment token** -- A one-time token that authorizes new agents to register. Found in the Sentari dashboard under **Settings > General > Enrollment Token**.
-3. **Agent version** -- The version to install (e.g., `0.1.0`). Check the [Releases page](https://github.com/sentari-dev/sentari-agent/releases) for the latest version.
+| | Community Edition (OSS) | Enterprise Edition |
+|---|---|---|
+| **Use case** | One-off audits, CI pipelines, local scans | Fleet-wide monitoring with a Sentari server |
+| **Server required** | No | Yes |
+| **Output** | JSON or CSV file saved locally | Uploaded to Sentari server automatically |
+| **Installation** | Download binary, run manually | Install script sets up a background service |
+| **Scheduled scanning** | No (run manually or via cron) | Yes (configurable interval, default 1 hour) |
+| **Offline scan queue** | No | Yes (queues locally, drains on reconnection) |
+| **mTLS encryption** | No | Yes (automatic certificate provisioning) |
+| **Audit trail** | No | Yes (SHA-256 hash-chained local log) |
+| **License** | Apache 2.0 (free) | Commercial (requires Sentari subscription) |
+| **Binary name** | `sentari-agent-oss-*` | `sentari-agent-*` |
 
-### System requirements
+**Not sure?** Start with the Community Edition -- it requires nothing except the binary. You can switch to Enterprise later by installing the Enterprise binary and pointing it at a server.
+
+### System requirements (both editions)
 
 | | Linux | Windows | macOS |
 |---|---|---|---|
 | OS | RHEL/CentOS 7+, Ubuntu 18.04+, Debian 10+, SLES 15+ | Windows 10 / Server 2016+ | macOS 12+ (Monterey) |
 | Architecture | x86_64 (amd64) or ARM64 | x86_64 (amd64) | x86_64 (amd64) or ARM64 (Apple Silicon) |
-| Disk space | 50 MB (binary) + 500 MB (data) | Same | Same |
-| Network | Outbound HTTPS to the Sentari server | Same | Same |
-| Permissions | Root recommended for full filesystem scan | Administrator recommended | Admin recommended for full scan |
+| Disk space | 50 MB (binary) | 50 MB (binary) | 50 MB (binary) |
+| Network | None (OSS) / Outbound HTTPS (Enterprise) | Same | Same |
+| Permissions | Root recommended for full filesystem scan | Administrator recommended | Admin recommended |
 | Dependencies | **None** -- single static binary | **None** -- single static binary | **None** -- single static binary |
 
 ---
 
-## Linux
+## Community Edition (OSS)
 
-### Quick Install
+The Community Edition is a standalone scanner. Download the binary, run it, and get a JSON or CSV report of all Python packages on the device. No server, no registration, no configuration.
+
+### Linux / macOS
+
+```bash
+# Download (replace linux-amd64 with your platform: linux-arm64, darwin-amd64, darwin-arm64)
+VERSION="0.1.0"
+curl -LO "https://github.com/sentari-dev/sentari-agent/releases/download/v${VERSION}/sentari-agent-oss-linux-amd64"
+chmod +x sentari-agent-oss-linux-amd64
+
+# Scan and save results as JSON
+./sentari-agent-oss-linux-amd64 --scan --output scan-result.json
+
+# Or output as CSV
+./sentari-agent-oss-linux-amd64 --scan --format csv --output packages.csv
+```
+
+### Windows
+
+```powershell
+# Download
+$VERSION = "0.1.0"
+Invoke-WebRequest -Uri "https://github.com/sentari-dev/sentari-agent/releases/download/v$VERSION/sentari-agent-oss-windows-amd64.exe" -OutFile sentari-agent.exe
+
+# Scan and save results
+.\sentari-agent.exe --scan --output scan-result.json
+```
+
+### What the output looks like
+
+The JSON output contains every discovered Python package:
+
+```json
+{
+  "device_id": "a1b2c3d4",
+  "hostname": "dev-laptop",
+  "os": "linux",
+  "scanned_at": "2026-04-06T12:00:00Z",
+  "packages": [
+    {
+      "name": "requests",
+      "version": "2.31.0",
+      "env_type": "pip",
+      "interpreter_version": "3.12.0",
+      "install_path": "/usr/lib/python3.12/site-packages/requests-2.31.0.dist-info",
+      "environment": "/usr/lib/python3.12"
+    }
+  ]
+}
+```
+
+### Running on a schedule (without Enterprise)
+
+Use cron to scan periodically and save results:
+
+```bash
+# Add to crontab (scan every 6 hours)
+echo "0 */6 * * * /usr/local/bin/sentari-agent-oss --scan --output /var/log/sentari/scan-\$(date +\%Y\%m\%d-\%H\%M).json" | sudo crontab -
+```
+
+### Building from source
+
+```bash
+git clone https://github.com/sentari-dev/sentari-agent.git
+cd sentari-agent
+CGO_ENABLED=0 go build -o sentari-agent-oss ./cmd/sentari-agent/
+```
+
+---
+
+## Enterprise Edition
+
+The Enterprise Edition connects to a Sentari server for centralized fleet management. It registers automatically via mTLS, uploads scan results, and runs as a background service with scheduled scanning.
+
+**You need from your Sentari administrator:**
+1. **Server URL** -- The address of your Sentari server (e.g., `https://sentari.yourcompany.com:8000`)
+2. **Enrollment token** -- A one-time token that authorizes new agents to register. Found in the Sentari dashboard under **Settings > General > Enrollment Token**.
+3. **Agent version** -- The version to install (e.g., `0.1.0`). Check the [Releases page](https://github.com/sentari-dev/sentari-agent/releases) for the latest version.
+
+### Linux
+
+#### Quick Install
 
 Open a terminal on the device and run (replace the three values with your own):
 
@@ -98,7 +189,7 @@ You should see output like:
 | `--scan-interval` | No | `3600` | Seconds between scans |
 | `--scan-root` | No | `/` | Filesystem root to scan |
 
-### Fleet Install (Ansible)
+#### Fleet Install (Ansible)
 
 **Step 1:** Copy the install script to your Ansible control node:
 
@@ -156,7 +247,7 @@ ansible-playbook -i inventory.ini deploy-sentari-agent.yml
 
 This installs the agent on every host in your inventory. Each device registers independently with the server using the enrollment token.
 
-### Fleet Install (SSH)
+#### Fleet Install (SSH)
 
 If you have a list of hostnames and SSH access:
 
@@ -198,7 +289,7 @@ chmod +x deploy-to-fleet.sh
 ./deploy-to-fleet.sh
 ```
 
-### Air-gapped Install
+#### Air-gapped Install
 
 For devices without internet access:
 
@@ -279,7 +370,7 @@ sudo systemctl enable --now sentari-agent
 sudo systemctl status sentari-agent
 ```
 
-### Managing the Service
+#### Managing the Service
 
 ```bash
 # Check status
@@ -298,7 +389,7 @@ sudo systemctl stop sentari-agent
 sudo systemctl disable sentari-agent
 ```
 
-### Uninstall
+#### Uninstall
 
 ```bash
 # Stop and disable the service
@@ -315,11 +406,9 @@ sudo rm -rf /var/lib/sentari
 sudo systemctl daemon-reload
 ```
 
----
+### Windows
 
-## Windows
-
-### Quick Install
+#### Quick Install
 
 Open PowerShell as Administrator and run:
 
@@ -348,7 +437,7 @@ Get-Content install.ps1  # Review the script
 | `-InstallDir` | No | `C:\Program Files\Sentari` | Installation directory |
 | `-ServiceName` | No | `SentariAgent` | Windows service name |
 
-### Fleet Install (GPO / SCCM)
+#### Fleet Install (GPO / SCCM)
 
 For deploying across many Windows machines, use Group Policy or SCCM to run the installer silently.
 
@@ -397,7 +486,7 @@ foreach ($device in $devices) {
 }
 ```
 
-### Air-gapped Install
+#### Air-gapped Install
 
 For machines without internet access:
 
@@ -467,7 +556,7 @@ sc.exe failure SentariAgent reset= 86400 actions= restart/5000/restart/10000/res
 Start-Service SentariAgent
 ```
 
-### Managing the Service
+#### Managing the Service
 
 ```powershell
 # Check status
@@ -486,7 +575,7 @@ Stop-Service SentariAgent
 Set-Service SentariAgent -StartupType Disabled
 ```
 
-### Uninstall
+#### Uninstall
 
 ```powershell
 # Stop and remove the service
@@ -503,13 +592,11 @@ $path = ($path -split ';' | Where-Object { $_ -ne 'C:\Program Files\Sentari' }) 
 [System.Environment]::SetEnvironmentVariable('Path', $path, 'Machine')
 ```
 
----
-
-## macOS
+### macOS
 
 macOS support is intended for **development and testing** environments. For production fleet deployments, use Linux or Windows. There is no automated installer for macOS.
 
-### Install
+#### Install
 
 **Step 1:** Download the binary:
 
@@ -546,7 +633,7 @@ chmod +x sentari-agent-darwin-*
   --upload
 ```
 
-### Running as a launchd service (optional)
+#### Running as a launchd service (optional)
 
 If you want the agent to run continuously on macOS for testing purposes:
 
@@ -615,7 +702,7 @@ EOF
 sudo launchctl load /Library/LaunchDaemons/com.sentari.agent.plist
 ```
 
-### Uninstall
+#### Uninstall
 
 ```bash
 # If running as a launchd service:
