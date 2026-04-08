@@ -236,7 +236,7 @@ url = ${SERVER_URL}
 
 [scanner]
 scan_root = ${SCAN_ROOT}
-max_depth = 12
+scan_max_depth = 12
 interval = ${SCAN_INTERVAL}
 CONF
 

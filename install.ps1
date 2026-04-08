@@ -233,7 +233,7 @@ url = $ServerURL
 
 [scanner]
 scan_root = C:\
-max_depth = 12
+scan_max_depth = 12
 interval = $ScanInterval
 "@
 

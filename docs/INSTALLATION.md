@@ -329,7 +329,7 @@ url = https://sentari.yourcompany.com:8000
 
 [scanner]
 scan_root = /
-max_depth = 12
+scan_max_depth = 12
 interval = 3600
 EOF
 
@@ -528,7 +528,7 @@ url = https://sentari.yourcompany.com:8000
 
 [scanner]
 scan_root = C:\
-max_depth = 12
+scan_max_depth = 12
 interval = 3600
 "@ | Set-Content "$ConfigDir\agent.conf" -Encoding UTF8
 
@@ -899,7 +899,7 @@ The token is wrong or has been rotated. Get a new token from your Sentari admini
 
 The agent found no Python environments. This is normal if:
 - The device has no Python installed
-- Python is installed in a non-standard location -- increase `max_depth` in the config
+- Python is installed in a non-standard location -- increase `scan_max_depth` in the config
 - The agent doesn't have read access to the directories -- run as root/Administrator
 
 ### Linux-specific
