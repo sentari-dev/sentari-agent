@@ -206,6 +206,8 @@ func main() {
 // runUpload performs a single drain-cache → scan → upload cycle.
 // Registration is handled once at startup (see main()).
 func runUpload(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.Cache, agentCfg config.AgentConfig, hostname, sbomOutPath, certDir string) error {
+	cycleStart := time.Now()
+
 	// Drain cached scans from previous offline runs (oldest first).
 	pending, err := scanCache.DequeuePending()
 	if err != nil {
@@ -295,6 +297,15 @@ func runUpload(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.
 		fmt.Fprintf(os.Stderr, "Purged %d old cache entries\n", purged)
 	}
 
+	// Success summary — emitted on stderr so operators tailing the log see
+	// heartbeat activity on every successful cycle. Without this line the
+	// daemon is silent on success and looks hung to administrators.
+	fmt.Fprintf(os.Stderr, "%s cycle ok: %d packages scanned and uploaded in %s\n",
+		time.Now().Format(time.RFC3339),
+		len(result.Packages),
+		time.Since(cycleStart).Round(time.Second),
+	)
+
 	return nil
 }
 
@@ -351,7 +362,14 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 		// Use crypto/rand for unpredictable timing — math/rand would make
 		// scan intervals predictable to a network observer.
 		jitter := cryptoJitter(scanInterval)
-		sleepTimer := time.NewTimer(scanInterval + jitter)
+		sleepDuration := scanInterval + jitter
+		nextCycleAt := time.Now().Add(sleepDuration)
+		fmt.Fprintf(os.Stderr, "%s sleeping for %s — next cycle at %s\n",
+			time.Now().Format(time.RFC3339),
+			sleepDuration.Round(time.Second),
+			nextCycleAt.Format(time.RFC3339),
+		)
+		sleepTimer := time.NewTimer(sleepDuration)
 
 		select {
 		case sig := <-sigCh:
