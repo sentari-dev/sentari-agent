@@ -594,20 +594,161 @@ $path = ($path -split ';' | Where-Object { $_ -ne 'C:\Program Files\Sentari' }) 
 
 ### macOS
 
-macOS support is intended for **development and testing** environments. For production fleet deployments, use Linux or Windows. There is no automated installer for macOS.
+macOS is supported via an `install-macos.sh` script that mirrors the Linux and Windows installers. It configures the agent as a **launchd system daemon** so it runs in the background across reboots, with automatic restart on failure. Both **Intel Macs** and **Apple Silicon** (M1/M2/M3/M4) are supported.
 
-#### Install
+> **Note on unsigned binaries.** The macOS binaries are not currently signed with an Apple Developer ID. The installer strips the Gatekeeper `com.apple.quarantine` attribute so the daemon can start without user interaction — this is the supported way for administrators to approve internally-distributed binaries. A signed `.pkg` installer is on the roadmap (see [ROADMAP.md](../ROADMAP.md)).
 
-**Step 1:** Download the binary:
+#### Quick Install
+
+One command — downloads the right binary for your architecture, verifies the checksum, writes the config, and registers the launchd daemon:
 
 ```bash
-VERSION="0.1.0"
+curl -fsSL https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install-macos.sh | sudo bash -s -- \
+  --version 0.1.1 \
+  --server-url https://sentari.yourcompany.com:8000 \
+  --enroll-token YOUR_TOKEN
+```
 
-# For Intel Macs:
-curl -LO "https://github.com/sentari-dev/sentari-agent/releases/download/v${VERSION}/sentari-agent-darwin-amd64"
+Or download first, inspect, then run:
 
-# For Apple Silicon (M1/M2/M3/M4):
+```bash
+curl -LO https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install-macos.sh
+chmod +x install-macos.sh
+sudo ./install-macos.sh \
+  --version 0.1.1 \
+  --server-url https://sentari.yourcompany.com:8000 \
+  --enroll-token YOUR_TOKEN
+```
+
+#### Install script options
+
+| Flag | Required | Description |
+|---|---|---|
+| `--version` | Yes | Agent version to install (e.g., `0.1.1`) |
+| `--server-url` | Yes (enterprise) | Sentari server URL |
+| `--enroll-token` | Yes (enterprise) | One-time enrollment token from your Sentari admin |
+| `--edition` | No | `enterprise` (default) or `oss` |
+| `--scan-interval` | No | Seconds between scans (default: `3600`) |
+| `--scan-root` | No | Filesystem root to scan (default: `/`) |
+
+The installer writes these locations:
+
+| Path | Purpose |
+|---|---|
+| `/usr/local/bin/sentari-agent` | Binary |
+| `/etc/sentari/agent.conf` | Config (server URL, scanner settings) |
+| `/etc/sentari/enroll-token` | Enrollment token, mode 600, root only |
+| `/var/lib/sentari/` | Data dir (SQLite cache, audit log, mTLS certs) |
+| `/Library/LaunchDaemons/dev.sentari.agent.plist` | launchd daemon definition |
+| `/var/log/sentari-agent.log` | stdout + stderr log |
+
+#### Fleet Install (Ansible)
+
+For enterprise deployment across many Macs, use Ansible to push the installer:
+
+```yaml
+# Inventory: a macOS group with the hosts you want to manage
+# ansible-playbook -i inventory.yml install-sentari.yml --ask-become-pass
+
+- name: Install Sentari agent on macOS fleet
+  hosts: macos
+  become: true
+  vars:
+    sentari_version: "0.1.1"
+    sentari_server_url: "https://sentari.yourcompany.com:8000"
+    sentari_enroll_token: "{{ lookup('env', 'SENTARI_ENROLL_TOKEN') }}"
+  tasks:
+    - name: Download install script
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install-macos.sh"
+        dest: /tmp/install-macos.sh
+        mode: "0755"
+
+    - name: Run installer
+      ansible.builtin.command:
+        cmd: >
+          /tmp/install-macos.sh
+          --version {{ sentari_version }}
+          --server-url {{ sentari_server_url }}
+          --enroll-token {{ sentari_enroll_token }}
+        creates: /usr/local/bin/sentari-agent
+
+    - name: Clean up install script
+      ansible.builtin.file:
+        path: /tmp/install-macos.sh
+        state: absent
+```
+
+#### Fleet Install (Jamf / Intune / Kandji)
+
+Most MDM products support running shell scripts as a policy. Upload `install-macos.sh` as the policy script and pass the installer flags as arguments. Example for **Jamf Pro**:
+
+1. **Settings → Computer Management → Scripts**: upload `install-macos.sh`
+2. Set **Script Parameter 4** to the version (e.g., `0.1.1`)
+3. Set **Script Parameter 5** to the server URL
+4. Set **Script Parameter 6** to the enrollment token
+5. Wrap the script call in a tiny bootstrap:
+   ```bash
+   #!/bin/bash
+   exec /usr/local/sentari/install-macos.sh \
+     --version "$4" \
+     --server-url "$5" \
+     --enroll-token "$6"
+   ```
+6. Create a **Policy** that runs the script on your target scope
+
+The same pattern applies to Intune (Shell scripts), Kandji (Custom Scripts), and Addigy (Custom Facts).
+
+#### Managing the daemon
+
+```bash
+# Check status
+sudo launchctl print system/dev.sentari.agent
+
+# Follow logs in real-time
+sudo tail -f /var/log/sentari-agent.log
+
+# Restart the daemon
+sudo launchctl kickstart -k system/dev.sentari.agent
+
+# Stop (unload) the daemon
+sudo launchctl bootout system/dev.sentari.agent
+
+# Manually run a one-shot scan (outside the daemon)
+sudo /usr/local/bin/sentari-agent \
+  --config /etc/sentari/agent.conf \
+  --data-dir /var/lib/sentari \
+  --upload
+```
+
+#### Uninstall
+
+```bash
+# Stop and unload the daemon
+sudo launchctl bootout system/dev.sentari.agent 2>/dev/null || true
+
+# Remove files
+sudo rm -f /Library/LaunchDaemons/dev.sentari.agent.plist
+sudo rm -f /usr/local/bin/sentari-agent
+sudo rm -rf /etc/sentari
+sudo rm -rf /var/lib/sentari
+sudo rm -f /var/log/sentari-agent.log
+```
+
+#### Manual install (no installer script)
+
+If you prefer to inspect and deploy each step yourself, follow this path — it's what the installer script automates:
+
+**Step 1:** Download the binary for your architecture:
+
+```bash
+VERSION="0.1.1"
+
+# Apple Silicon (M1/M2/M3/M4)
 curl -LO "https://github.com/sentari-dev/sentari-agent/releases/download/v${VERSION}/sentari-agent-darwin-arm64"
+
+# Intel Macs
+curl -LO "https://github.com/sentari-dev/sentari-agent/releases/download/v${VERSION}/sentari-agent-darwin-amd64"
 ```
 
 **Step 2:** Verify the checksum:
@@ -617,106 +758,34 @@ curl -LO "https://github.com/sentari-dev/sentari-agent/releases/download/v${VERS
 grep "sentari-agent-darwin" SHA256SUMS.txt | shasum -a 256 -c -
 ```
 
-**Step 3:** Make it executable and run a one-shot scan:
+**Step 3:** Strip Gatekeeper quarantine and install:
 
 ```bash
-chmod +x sentari-agent-darwin-*
-./sentari-agent-darwin-arm64 --scan --output scan-result.json
+xattr -d com.apple.quarantine sentari-agent-darwin-arm64 2>/dev/null || true
+sudo mkdir -p /usr/local/bin /etc/sentari /var/lib/sentari
+sudo install -m 755 sentari-agent-darwin-arm64 /usr/local/bin/sentari-agent
 ```
 
-**Step 4 (optional):** Upload to a Sentari server:
+**Step 4:** Write the config and token, then the launchd plist, then load it — the full sequence is embedded in [`install-macos.sh`](../install-macos.sh). Read the script; every step is commented.
+
+#### One-shot scans (no daemon)
+
+If you only want to run an ad-hoc scan without registering a persistent daemon — for example on a developer's laptop or for one-time auditing — skip the installer entirely:
 
 ```bash
+VERSION="0.1.1"
+curl -LO "https://github.com/sentari-dev/sentari-agent/releases/download/v${VERSION}/sentari-agent-darwin-arm64"
+chmod +x sentari-agent-darwin-arm64
+xattr -d com.apple.quarantine sentari-agent-darwin-arm64 2>/dev/null || true
+
 ./sentari-agent-darwin-arm64 \
   --server-url https://sentari.yourcompany.com:8000 \
   --enroll-token YOUR_TOKEN \
+  --data-dir /tmp/sentari-agent \
   --upload
 ```
 
-#### Running as a launchd service (optional)
-
-If you want the agent to run continuously on macOS for testing purposes:
-
-**Step 1:** Install the binary:
-
-```bash
-sudo mkdir -p /usr/local/bin /etc/sentari /var/lib/sentari
-sudo cp sentari-agent-darwin-arm64 /usr/local/bin/sentari-agent
-sudo chmod +x /usr/local/bin/sentari-agent
-```
-
-**Step 2:** Create the config file:
-
-```bash
-sudo tee /etc/sentari/agent.conf > /dev/null <<EOF
-[server]
-url = https://sentari.yourcompany.com:8000
-
-[scanner]
-scan_root = /
-max_depth = 12
-interval = 3600
-EOF
-
-echo -n "YOUR_TOKEN" | sudo tee /etc/sentari/enroll-token > /dev/null
-sudo chmod 600 /etc/sentari/enroll-token
-```
-
-**Step 3:** Create a launchd plist:
-
-```bash
-sudo tee /Library/LaunchDaemons/com.sentari.agent.plist > /dev/null <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.sentari.agent</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/sentari-agent</string>
-        <string>--serve</string>
-        <string>--config</string>
-        <string>/etc/sentari/agent.conf</string>
-        <string>--enroll-token-file</string>
-        <string>/etc/sentari/enroll-token</string>
-        <string>--data-dir</string>
-        <string>/var/lib/sentari</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/var/log/sentari-agent.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/sentari-agent.log</string>
-</dict>
-</plist>
-EOF
-```
-
-**Step 4:** Load and start the service:
-
-```bash
-sudo launchctl load /Library/LaunchDaemons/com.sentari.agent.plist
-```
-
-#### Uninstall
-
-```bash
-# If running as a launchd service:
-sudo launchctl unload /Library/LaunchDaemons/com.sentari.agent.plist
-sudo rm /Library/LaunchDaemons/com.sentari.agent.plist
-
-# Remove files
-sudo rm /usr/local/bin/sentari-agent
-sudo rm -rf /etc/sentari
-sudo rm -rf /var/lib/sentari
-sudo rm -f /var/log/sentari-agent.log
-```
-
-If you only downloaded the binary for one-shot scanning, simply delete the binary file.
+When done, delete the binary and `/tmp/sentari-agent/`. Nothing is installed system-wide.
 
 ---
 
@@ -738,7 +807,7 @@ Get-Service SentariAgent
 
 ```bash
 # macOS (if using launchd)
-sudo launchctl list | grep sentari
+sudo launchctl print system/dev.sentari.agent
 ```
 
 ### Check the logs
@@ -866,9 +935,9 @@ Common issues:
 **launchd service not starting:**
 
 ```bash
-sudo launchctl list | grep sentari
-# If the "LastExitStatus" is non-zero, check the log:
-cat /var/log/sentari-agent.log
+sudo launchctl print system/dev.sentari.agent
+# If the "last exit code" is non-zero, check the log:
+sudo tail -f /var/log/sentari-agent.log
 ```
 
 Common issues:
