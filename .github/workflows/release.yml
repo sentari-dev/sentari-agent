@@ -40,7 +40,7 @@ jobs:
           EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
           VERSION="${GITHUB_REF_NAME#v}"
           go build -tags enterprise \
-            -ldflags="-s -w -X main.version=$VERSION" \
+            -ldflags="-s -w -X github.com/sentari-dev/sentari-agent/scanner.Version=$VERSION" \
             -o dist/sentari-agent-${GOOS}-${GOARCH}${EXT} \
             ./cmd/sentari-agent/
 
@@ -53,7 +53,7 @@ jobs:
           EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
           VERSION="${GITHUB_REF_NAME#v}"
           go build \
-            -ldflags="-s -w -X main.version=$VERSION" \
+            -ldflags="-s -w -X github.com/sentari-dev/sentari-agent/scanner.Version=$VERSION" \
             -o dist/sentari-agent-oss-${GOOS}-${GOARCH}${EXT} \
             ./cmd/sentari-agent/
 

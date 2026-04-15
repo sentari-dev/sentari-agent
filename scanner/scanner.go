@@ -193,14 +193,27 @@ func userHomeDirs() []string {
 		dirs = append(dirs, home)
 	}
 
-	// On Linux, scan all home directories if running as a privileged user.
-	// The agent commonly runs as root via systemd on managed fleets.
-	if runtime.GOOS == "linux" {
-		if entries, err := os.ReadDir("/home"); err == nil {
+	// On Linux/macOS, scan all home directories if running as a privileged
+	// user. The agent commonly runs as root via systemd (Linux) or launchd
+	// (macOS) on managed fleets. Without this, os.UserHomeDir() returns
+	// /var/root on macOS and the scanner misses all user-local venvs.
+	homeBases := []string{}
+	switch runtime.GOOS {
+	case "linux":
+		homeBases = append(homeBases, "/home")
+	case "darwin":
+		homeBases = append(homeBases, "/Users")
+	}
+	for _, base := range homeBases {
+		if entries, err := os.ReadDir(base); err == nil {
 			for _, entry := range entries {
 				if entry.IsDir() {
-					candidate := filepath.Join("/home", entry.Name())
-					dirs = append(dirs, candidate)
+					name := entry.Name()
+					// Skip macOS system accounts and hidden directories.
+					if name == "Shared" || name == "Guest" || strings.HasPrefix(name, ".") {
+						continue
+					}
+					dirs = append(dirs, filepath.Join(base, name))
 				}
 			}
 		}
