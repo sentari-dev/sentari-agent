@@ -106,6 +106,38 @@ func (s *Scanner) Run(ctx context.Context) (*ScanResult, error) {
 		result.Errors = append(result.Errors, res.errors...)
 	}
 
+	// macOS TCC warning: when running as root (launchd daemon) with a full
+	// system scan, TCC silently blocks access to ~/Documents, ~/Desktop,
+	// and ~/Downloads unless the binary has Full Disk Access. The scanner
+	// sees these directories as empty — no permission error, just missing
+	// packages. Warn operators so they know to grant FDA.
+	if runtime.GOOS == "darwin" && os.Getuid() == 0 && filepath.Clean(s.cfg.ScanRoot) == "/" {
+		for _, home := range userHomeDirs() {
+			docsDir := filepath.Join(home, "Documents")
+			if info, err := os.Stat(docsDir); err == nil && info.IsDir() {
+				entries, _ := os.ReadDir(docsDir)
+				if len(entries) == 0 {
+					// A user home with an empty Documents/ is almost certainly
+					// TCC blocking access, not a genuinely empty directory.
+					msg := fmt.Sprintf(
+						"macOS TCC: %s appears empty (likely blocked by Transparency, Consent, and Control). "+
+							"Grant Full Disk Access to /usr/local/bin/sentari-agent in "+
+							"System Settings → Privacy & Security → Full Disk Access "+
+							"to scan Python environments in user project folders.",
+						docsDir,
+					)
+					fmt.Fprintln(os.Stderr, "WARNING: "+msg)
+					result.Errors = append(result.Errors, ScanError{
+						Path:      docsDir,
+						EnvType:   "tcc",
+						Error:     msg,
+						Timestamp: time.Now().UTC(),
+					})
+				}
+			}
+		}
+	}
+
 	return result, nil
 }
 

@@ -620,6 +620,55 @@ sudo ./install-macos.sh \
   --enroll-token YOUR_TOKEN
 ```
 
+#### Full Disk Access (required)
+
+macOS 13+ (Ventura and later) uses **Transparency, Consent, and Control (TCC)** to restrict access to user directories like `~/Documents`, `~/Desktop`, and `~/Downloads` — even for processes running as root. Without Full Disk Access, the agent sees these directories as empty and **silently misses all Python virtualenvs** in your project folders.
+
+The agent detects this condition and logs a warning:
+
+```
+WARNING: macOS TCC: /Users/jane/Documents appears empty (likely blocked by
+Transparency, Consent, and Control). Grant Full Disk Access to
+/usr/local/bin/sentari-agent in System Settings → Privacy & Security →
+Full Disk Access to scan Python environments in user project folders.
+```
+
+**For individual Macs (manual):**
+
+1. Open **System Settings → Privacy & Security → Full Disk Access**
+2. Click the **+** button (unlock with your password if prompted)
+3. Navigate to `/usr/local/bin/sentari-agent` and click **Open**
+4. Restart the daemon: `sudo launchctl kickstart -k system/dev.sentari.agent`
+
+> **Tip:** If Finder doesn't show `/usr/local/bin`, press **Cmd+Shift+G** and type the path directly.
+
+**For Mac fleets (MDM-managed):**
+
+Deploy the TCC configuration profile at [`deploy/macos/sentari-agent-tcc.mobileconfig`](../deploy/macos/sentari-agent-tcc.mobileconfig) via your MDM. This pre-approves Full Disk Access for the agent binary so users never see a prompt or need to change settings manually.
+
+| MDM | How to deploy |
+|---|---|
+| **Jamf Pro** | Computers → Configuration Profiles → Upload → select `sentari-agent-tcc.mobileconfig` → scope to your target group |
+| **Microsoft Intune** | Devices → macOS → Configuration profiles → Create → Custom → upload `.mobileconfig` |
+| **Kandji** | Library → Profiles → Add Profile → upload `.mobileconfig` |
+| **Mosyle** | Management → Profiles → Add new → upload `.mobileconfig` |
+| **Manual (no MDM)** | `sudo profiles install -path deploy/macos/sentari-agent-tcc.mobileconfig` |
+
+The profile uses **path-based identification** (`/usr/local/bin/sentari-agent`) because the binary is not code-signed with an Apple Developer ID. When a signed `.pkg` installer is available (see [ROADMAP.md](../ROADMAP.md)), the profile will be updated to use code-signing identity for stricter matching.
+
+To verify the profile is installed:
+
+```bash
+sudo profiles show -type configuration | grep sentari
+# Expected: dev.sentari.agent.tcc
+```
+
+To remove the profile:
+
+```bash
+sudo profiles remove -identifier dev.sentari.agent.tcc
+```
+
 #### Install script options
 
 | Flag | Required | Description |
@@ -941,8 +990,9 @@ sudo tail -f /var/log/sentari-agent.log
 ```
 
 Common issues:
-- Binary not signed: macOS Gatekeeper may block unsigned binaries. Remove the quarantine attribute:
+- **TCC blocking access to ~/Documents**: the agent logs a warning starting with `macOS TCC:`. Grant Full Disk Access to `/usr/local/bin/sentari-agent` in System Settings → Privacy & Security, or deploy the `sentari-agent-tcc.mobileconfig` profile via MDM. See the [Full Disk Access](#full-disk-access-required) section above.
+- **Binary not signed**: macOS Gatekeeper may block unsigned binaries. The installer strips the quarantine attribute automatically. If you downloaded the binary manually:
   ```bash
   sudo xattr -d com.apple.quarantine /usr/local/bin/sentari-agent
   ```
-- Permissions: ensure `/var/lib/sentari` is writable
+- **Permissions**: ensure `/var/lib/sentari` is writable by root
