@@ -240,6 +240,14 @@ func parseDistInfo(distInfoPath, envPath string) (PackageRecord, error) {
 		}
 	}
 
+	// Extract license info from the full METADATA content.
+	if metadataBytes, err := os.ReadFile(metadataPath); err == nil {
+		raw, spdx, tier := ExtractLicenseFromMetadata(string(metadataBytes))
+		pkg.LicenseRaw = raw
+		pkg.LicenseSPDX = spdx
+		pkg.LicenseTier = tier
+	}
+
 	return pkg, nil
 }
 
@@ -292,6 +300,14 @@ func parseEggInfo(eggInfoPath, envPath string) (PackageRecord, error) {
 		} else {
 			pkg.Name = base
 		}
+	}
+
+	// Extract license info from the full PKG-INFO content.
+	if pkgInfoBytes, err := os.ReadFile(pkgInfoPath); err == nil {
+		raw, spdx, tier := ExtractLicenseFromMetadata(string(pkgInfoBytes))
+		pkg.LicenseRaw = raw
+		pkg.LicenseSPDX = spdx
+		pkg.LicenseTier = tier
 	}
 
 	return pkg, nil
