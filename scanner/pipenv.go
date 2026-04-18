@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -62,18 +63,35 @@ func scanPipenvEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 
 	lockModTime := getFileModTime(pipfileLockPath)
 
+	// Locate site-packages for license metadata lookup.
+	// Pipenv may use a .venv in the project directory.
+	sitePackagesDir := findSitePackages(filepath.Join(envPath, ".venv"))
+
 	// Process default + develop packages.
 	addPackages := func(entries map[string]pipfileLockEntry) {
 		for name, entry := range entries {
 			version := stripVersionPrefix(entry.Version)
-			packages = append(packages, PackageRecord{
+			pkg := PackageRecord{
 				Name:        name,
 				Version:     version,
 				InstallPath: pipfileLockPath,
 				InstallDate: lockModTime,
 				EnvType:     EnvPipenv,
 				Environment: envPath,
-			})
+			}
+
+			// Try to extract license from installed METADATA in site-packages.
+			if sitePackagesDir != "" {
+				metadataPath := filepath.Join(sitePackagesDir, name+"-"+version+".dist-info", "METADATA")
+				if metaBytes, err := os.ReadFile(metadataPath); err == nil {
+					raw, spdx, tier := ExtractLicenseFromMetadata(string(metaBytes))
+					pkg.LicenseRaw = raw
+					pkg.LicenseSPDX = spdx
+					pkg.LicenseTier = tier
+				}
+			}
+
+			packages = append(packages, pkg)
 		}
 	}
 
