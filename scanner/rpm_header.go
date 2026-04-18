@@ -6,6 +6,7 @@ import "encoding/binary"
 const (
 	rpmTagVersion = 1001
 	rpmTagRelease = 1002
+	rpmTagLicense = 1014
 	rpmTypeString = 6 // RPM_STRING_TYPE
 
 	// rpmdb.sqlite header blob starts with nindex + hsize (no file magic).
@@ -13,19 +14,25 @@ const (
 	rpmEntrySize      = 16 // tag(4) + type(4) + offset(4) + count(4)
 )
 
-// parseRPMHeaderVersion parses a raw RPM header blob as stored in the
-// rpmdb.sqlite Packages table and returns "version-release" (e.g. "3.12.0-1").
-// The blob format is big-endian:
+// parseRPMHeaderVersion parses a raw RPM header blob and returns
+// "version-release" (e.g. "3.12.0-1"). Returns "" if parsing fails.
+func parseRPMHeaderVersion(blob []byte) string {
+	version, _ := parseRPMHeader(blob)
+	return version
+}
+
+// parseRPMHeader parses a raw RPM header blob as stored in the rpmdb.sqlite
+// Packages table and returns (version, license). The blob format is big-endian:
 //
 //	[0:4]  nindex  — number of index entries
 //	[4:8]  hsize   — size of the data store in bytes
 //	[8:]   nindex × 16-byte index entries (tag, type, offset, count)
 //	       followed by the data store
 //
-// Returns an empty string if parsing fails or the version tag is absent.
-func parseRPMHeaderVersion(blob []byte) string {
+// Returns empty strings if parsing fails or the tags are absent.
+func parseRPMHeader(blob []byte) (string, string) {
 	if len(blob) < rpmBlobHeaderSize {
-		return ""
+		return "", ""
 	}
 
 	nindex := int(binary.BigEndian.Uint32(blob[0:4]))
@@ -35,17 +42,17 @@ func parseRPMHeaderVersion(blob []byte) string {
 	// tags.  Cap at 10 000 to prevent integer overflow on 32-bit platforms
 	// (nindex * rpmEntrySize could wrap) and billion-iteration loops on 64-bit.
 	if nindex <= 0 || nindex > 10000 {
-		return ""
+		return "", ""
 	}
 
 	indexEnd := rpmBlobHeaderSize + nindex*rpmEntrySize
 	if len(blob) < indexEnd {
-		return ""
+		return "", ""
 	}
 
 	storeStart := indexEnd
 
-	var version, release string
+	var version, release, license string
 
 	for i := 0; i < nindex; i++ {
 		base := rpmBlobHeaderSize + i*rpmEntrySize
@@ -57,7 +64,7 @@ func parseRPMHeaderVersion(blob []byte) string {
 		if typ != rpmTypeString {
 			continue
 		}
-		if tag != rpmTagVersion && tag != rpmTagRelease {
+		if tag != rpmTagVersion && tag != rpmTagRelease && tag != rpmTagLicense {
 			continue
 		}
 
@@ -83,14 +90,18 @@ func parseRPMHeaderVersion(blob []byte) string {
 			version = s
 		case rpmTagRelease:
 			release = s
+		case rpmTagLicense:
+			license = s
 		}
 	}
 
-	if version == "" {
-		return ""
+	versionStr := ""
+	if version != "" {
+		versionStr = version
+		if release != "" {
+			versionStr = version + "-" + release
+		}
 	}
-	if release != "" {
-		return version + "-" + release
-	}
-	return version
+
+	return versionStr, license
 }

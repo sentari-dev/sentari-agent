@@ -3,6 +3,7 @@ package scanner
 import (
 	"bufio"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -47,6 +48,7 @@ func scanDebianViaStatusFile() ([]PackageRecord, []ScanError) {
 
 		if line == "" {
 			if currentPkg.Name != "" && isPythonPackage(currentPkg.Name) {
+				extractDebLicense(&currentPkg)
 				packages = append(packages, currentPkg)
 			}
 			currentPkg = PackageRecord{}
@@ -62,6 +64,7 @@ func scanDebianViaStatusFile() ([]PackageRecord, []ScanError) {
 
 	// Handle last entry (no trailing blank line).
 	if currentPkg.Name != "" && isPythonPackage(currentPkg.Name) {
+		extractDebLicense(&currentPkg)
 		packages = append(packages, currentPkg)
 	}
 
@@ -75,6 +78,23 @@ func scanDebianViaStatusFile() ([]PackageRecord, []ScanError) {
 	}
 
 	return packages, errors
+}
+
+// extractDebLicense reads the Debian copyright file for a package and populates
+// license fields. Sets tier to "unknown" if the copyright file is missing or empty.
+func extractDebLicense(pkg *PackageRecord) {
+	copyrightPath := filepath.Join("/usr/share/doc", pkg.Name, "copyright")
+	if data, err := os.ReadFile(copyrightPath); err == nil {
+		rawLic := ExtractLicenseFromDebCopyright(string(data))
+		if rawLic != "" {
+			pkg.LicenseRaw = rawLic
+			pkg.LicenseSPDX, pkg.LicenseTier = NormalizeLicense(rawLic)
+		} else {
+			pkg.LicenseTier = "unknown"
+		}
+	} else {
+		pkg.LicenseTier = "unknown"
+	}
 }
 
 // isPythonPackage returns true if the package name is Python-related.
