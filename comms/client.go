@@ -429,6 +429,31 @@ func (c *Client) PollConfig() (*AgentConfig, error) {
 	return &cfg, nil
 }
 
+// FetchLicenseMap fetches the latest license mapping table from the server.
+// Returns nil if the server version is not newer than currentVersion.
+func (c *Client) FetchLicenseMap(currentVersion int) (*scanner.LicenseMap, error) {
+	resp, err := c.httpClient.Get(c.serverURL + "/api/v1/agent/license-map")
+	if err != nil {
+		return nil, fmt.Errorf("license-map fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("license-map fetch: status %d", resp.StatusCode)
+	}
+
+	var m scanner.LicenseMap
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize)).Decode(&m); err != nil {
+		return nil, fmt.Errorf("license-map decode: %w", err)
+	}
+
+	if m.Version <= currentVersion {
+		return nil, nil // no update needed
+	}
+
+	return &m, nil
+}
+
 // truncateBytes returns s as a string, truncated to maxLen bytes with an
 // ellipsis marker appended if truncation occurred.  Used to prevent server
 // error bodies (which may contain stack traces or internal details) from
