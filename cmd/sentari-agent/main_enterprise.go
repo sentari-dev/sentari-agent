@@ -191,9 +191,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load cached license map from disk (if available).
+	// Load cached license map from disk (if available).  The cache
+	// holds a signed envelope; LoadVerifiedOverlayFromFile re-verifies
+	// the signature on every load so disk tampering cannot silently
+	// reclassify licenses.  Failures fall through to the compiled-in
+	// defaults; no stale/invalid overlay is ever applied.
 	licenseCachePath := filepath.Join(dataDir, "license_map.json")
-	if scanner.LoadOverlayFromFile(licenseCachePath) {
+	if scanner.LoadVerifiedOverlayFromFile(licenseCachePath) {
 		fmt.Fprintf(os.Stderr, "Loaded cached license map (version %d)\n", scanner.MapVersion())
 	}
 
@@ -214,13 +218,18 @@ func main() {
 func runUpload(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.Cache, agentCfg config.AgentConfig, hostname, sbomOutPath, certDir, dataDir string) error {
 	cycleStart := time.Now()
 
-	// Refresh license map from server before scanning.
-	if lm, err := client.FetchLicenseMap(scanner.MapVersion()); err != nil {
+	// Refresh license map from server before scanning.  The response
+	// is a signed envelope (ADR 0001); FetchLicenseMap verifies it and
+	// returns the raw envelope bytes so we can cache them for offline
+	// re-verification next startup.  On any verification failure we
+	// keep serving the previously-cached overlay — never apply
+	// unverified data.
+	if lm, envelope, err := client.FetchLicenseMap(scanner.MapVersion()); err != nil {
 		fmt.Fprintf(os.Stderr, "License-map refresh failed (using cached): %v\n", err)
 	} else if lm != nil {
 		scanner.ApplyOverlay(*lm)
 		cachePath := filepath.Join(dataDir, "license_map.json")
-		if err := scanner.SaveOverlayToFile(cachePath, *lm); err != nil {
+		if err := scanner.SaveVerifiedEnvelopeToFile(cachePath, envelope); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to cache license map: %v\n", err)
 		}
 		fmt.Fprintf(os.Stderr, "License map updated to version %d\n", lm.Version)

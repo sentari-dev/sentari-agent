@@ -429,29 +429,45 @@ func (c *Client) PollConfig() (*AgentConfig, error) {
 	return &cfg, nil
 }
 
-// FetchLicenseMap fetches the latest license mapping table from the server.
-// Returns nil if the server version is not newer than currentVersion.
-func (c *Client) FetchLicenseMap(currentVersion int) (*scanner.LicenseMap, error) {
+// FetchLicenseMap fetches the latest license mapping table from the
+// server.  The response is a signed envelope (ADR 0001); this function
+// reads the raw bytes, verifies the ed25519 signature against a pinned
+// public key, and returns the verified LicenseMap plus the raw
+// envelope bytes so the caller can persist them for offline re-use.
+//
+// Returns (nil, nil, nil) when the server's version is not newer than
+// currentVersion — no update needed, no error.
+func (c *Client) FetchLicenseMap(currentVersion int) (*scanner.LicenseMap, []byte, error) {
 	resp, err := c.httpClient.Get(c.serverURL + "/api/v1/agent/license-map")
 	if err != nil {
-		return nil, fmt.Errorf("license-map fetch: %w", err)
+		return nil, nil, fmt.Errorf("license-map fetch: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("license-map fetch: status %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("license-map fetch: status %d", resp.StatusCode)
 	}
 
-	var m scanner.LicenseMap
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize)).Decode(&m); err != nil {
-		return nil, fmt.Errorf("license-map decode: %w", err)
+	// Read the full envelope bytes (capped) so we can both verify the
+	// signature AND cache the envelope for later re-verification.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, scanner.MaxMapPayloadBytes+1))
+	if err != nil {
+		return nil, nil, fmt.Errorf("license-map read: %w", err)
+	}
+	if len(body) > scanner.MaxMapPayloadBytes {
+		return nil, nil, fmt.Errorf("license-map fetch: response exceeds size cap")
+	}
+
+	m, err := scanner.VerifyMapEnvelope(body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("license-map verify: %w", err)
 	}
 
 	if m.Version <= currentVersion {
-		return nil, nil // no update needed
+		return nil, nil, nil // no update needed
 	}
 
-	return &m, nil
+	return m, body, nil
 }
 
 // truncateBytes returns s as a string, truncated to maxLen bytes with an

@@ -10,7 +10,6 @@ package scanner
 
 import (
 	"encoding/json"
-	"os"
 	"strings"
 	"sync"
 )
@@ -133,29 +132,11 @@ func MapVersion() int {
 	return mapVersion
 }
 
-// LoadOverlayFromFile loads a cached license map overlay from disk.
-// Returns false if the file doesn't exist or is invalid.
-func LoadOverlayFromFile(path string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	var m LicenseMap
-	if err := json.Unmarshal(data, &m); err != nil {
-		return false
-	}
-	ApplyOverlay(m)
-	return true
-}
-
-// SaveOverlayToFile persists a license map to disk for offline use.
-func SaveOverlayToFile(path string, m LicenseMap) error {
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
-}
+// Cached license-map overlays are loaded and persisted only as signed
+// envelopes — see scanner/signed_map.go (LoadVerifiedOverlayFromFile,
+// SaveVerifiedEnvelopeToFile).  Unsigned load/save helpers used to live
+// here in v0.12-pre and were removed in ADR 0001 to prevent accidental
+// bypass of signature verification.
 
 // ExtractLicenseFromMetadata parses a Python METADATA or PKG-INFO file content
 // and returns (rawLicense, spdxID, tier).
