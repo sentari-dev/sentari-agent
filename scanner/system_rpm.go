@@ -63,14 +63,21 @@ func scanRpmViaDatabase() ([]PackageRecord, []ScanError) {
 		if err := rows.Scan(&name, &blob); err != nil {
 			continue
 		}
-		version := parseRPMHeaderVersion(blob)
+		version, license := parseRPMHeader(blob)
 		if version == "" {
 			version = "unknown"
 		}
-		packages = append(packages, PackageRecord{
+		pkg := PackageRecord{
 			Name:    name,
 			Version: version,
-		})
+		}
+		if license != "" {
+			pkg.LicenseRaw = license
+			pkg.LicenseSPDX, pkg.LicenseTier = NormalizeLicense(license)
+		} else {
+			pkg.LicenseTier = "unknown"
+		}
+		packages = append(packages, pkg)
 	}
 
 	if err := rows.Err(); err != nil {

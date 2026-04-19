@@ -191,8 +191,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Load cached license map from disk (if available).  The cache
+	// holds a signed envelope; LoadVerifiedOverlayFromFile re-verifies
+	// the signature on every load so disk tampering cannot silently
+	// reclassify licenses.  Failures fall through to the compiled-in
+	// defaults; no stale/invalid overlay is ever applied.
+	licenseCachePath := filepath.Join(dataDir, "license_map.json")
+	if scanner.LoadVerifiedOverlayFromFile(licenseCachePath) {
+		fmt.Fprintf(os.Stderr, "Loaded cached license map (version %d)\n", scanner.MapVersion())
+	}
+
 	if *uploadFlag {
-		if err := runUpload(client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir); err != nil {
+		if err := runUpload(client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir); err != nil {
 			fmt.Fprintf(os.Stderr, "Upload failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -200,13 +210,30 @@ func main() {
 	}
 
 	// --serve: daemon loop
-	runServe(client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir)
+	runServe(client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir)
 }
 
 // runUpload performs a single drain-cache → scan → upload cycle.
 // Registration is handled once at startup (see main()).
-func runUpload(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.Cache, agentCfg config.AgentConfig, hostname, sbomOutPath, certDir string) error {
+func runUpload(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.Cache, agentCfg config.AgentConfig, hostname, sbomOutPath, certDir, dataDir string) error {
 	cycleStart := time.Now()
+
+	// Refresh license map from server before scanning.  The response
+	// is a signed envelope (ADR 0001); FetchLicenseMap verifies it and
+	// returns the raw envelope bytes so we can cache them for offline
+	// re-verification next startup.  On any verification failure we
+	// keep serving the previously-cached overlay — never apply
+	// unverified data.
+	if lm, envelope, err := client.FetchLicenseMap(scanner.MapVersion()); err != nil {
+		fmt.Fprintf(os.Stderr, "License-map refresh failed (using cached): %v\n", err)
+	} else if lm != nil {
+		scanner.ApplyOverlay(*lm)
+		cachePath := filepath.Join(dataDir, "license_map.json")
+		if err := scanner.SaveVerifiedEnvelopeToFile(cachePath, envelope); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to cache license map: %v\n", err)
+		}
+		fmt.Fprintf(os.Stderr, "License map updated to version %d\n", lm.Version)
+	}
 
 	// Drain cached scans from previous offline runs (oldest first).
 	pending, err := scanCache.DequeuePending()
@@ -317,7 +344,7 @@ func runUpload(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.
 // server returns a different scan_interval, the agent applies it immediately
 // for the next sleep. This lets administrators change the scan frequency via the
 // system_config table without restarting agents.
-func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.Cache, agentCfg config.AgentConfig, hostname, sbomOutPath, certDir string) {
+func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.Cache, agentCfg config.AgentConfig, hostname, sbomOutPath, certDir, dataDir string) {
 	scanInterval := time.Duration(agentCfg.Scanner.Interval) * time.Second
 	if scanInterval <= 0 {
 		scanInterval = 3600 * time.Second
@@ -327,7 +354,7 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	for {
-		if err := runUpload(client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir); err != nil {
+		if err := runUpload(client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir); err != nil {
 			fmt.Fprintf(os.Stderr, "Cycle error: %v\n", err)
 		}
 

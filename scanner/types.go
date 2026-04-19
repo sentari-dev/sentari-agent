@@ -33,6 +33,9 @@ type PackageRecord struct {
 	InstallerUser      string `json:"installer_user,omitempty"`
 	InstallDate        string `json:"install_date,omitempty"`
 	Environment        string `json:"environment"`
+	LicenseRaw         string `json:"license_raw"`
+	LicenseSPDX        string `json:"license_spdx"`
+	LicenseTier        string `json:"license_tier"`
 }
 
 // ScanError records a non-fatal error encountered during scanning. The scanner

@@ -78,11 +78,16 @@ func parseCondaPackageMetadata(metadataPath, envPath string) (PackageRecord, err
 		return PackageRecord{}, err
 	}
 
+	raw, spdx, tier := ExtractLicenseFromCondaJSON(data)
+
 	return PackageRecord{
 		Name:        metadata.Name,
 		Version:     metadata.Version,
 		InstallPath: metadataPath,
 		InstallDate: getFileModTime(metadataPath),
+		LicenseRaw:  raw,
+		LicenseSPDX: spdx,
+		LicenseTier: tier,
 	}, nil
 }
 

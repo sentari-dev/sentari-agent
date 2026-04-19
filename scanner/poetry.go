@@ -33,6 +33,10 @@ func scanPoetryEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 	lockModTime := getFileModTime(poetryLockPath)
 	interpreterVersion := getPoetryInterpreterVersion(envPath)
 
+	// Locate site-packages for license metadata lookup.
+	// Poetry typically uses a .venv in the project directory.
+	sitePackagesDir := findSitePackages(filepath.Join(envPath, ".venv"))
+
 	// Parse [[package]] sections from the TOML file.
 	// Each section has name = "..." and version = "..." lines.
 	var inPackage bool
@@ -40,7 +44,7 @@ func scanPoetryEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 
 	flushPackage := func() {
 		if currentName != "" && currentVersion != "" {
-			packages = append(packages, PackageRecord{
+			pkg := PackageRecord{
 				Name:               currentName,
 				Version:            currentVersion,
 				InstallPath:        envPath,
@@ -48,7 +52,20 @@ func scanPoetryEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 				InterpreterVersion: interpreterVersion,
 				InstallDate:        lockModTime,
 				Environment:        envPath,
-			})
+			}
+
+			// Try to extract license from installed METADATA in site-packages.
+			if sitePackagesDir != "" {
+				metadataPath := filepath.Join(sitePackagesDir, currentName+"-"+currentVersion+".dist-info", "METADATA")
+				if metaBytes, err := os.ReadFile(metadataPath); err == nil {
+					raw, spdx, tier := ExtractLicenseFromMetadata(string(metaBytes))
+					pkg.LicenseRaw = raw
+					pkg.LicenseSPDX = spdx
+					pkg.LicenseTier = tier
+				}
+			}
+
+			packages = append(packages, pkg)
 		}
 		currentName = ""
 		currentVersion = ""
