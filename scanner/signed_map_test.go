@@ -1,4 +1,4 @@
-// Tests for the signed license-map verification primitive (ADR 0001).
+// Tests for the signed license-map verification primitive.
 //
 // Covers:
 //   - Canonical JSON matches the Python canonicalizer bit-for-bit on

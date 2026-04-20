@@ -2,12 +2,90 @@ package scanner
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// pipScanner discovers global pip installs by matching site-packages
+// directories during the shared walk.  Venvs have their own scanner
+// (venvScanner) because they also need dangling-symlink detection and
+// a different EnvType tag on emitted packages.
+type pipScanner struct{}
+
+func (pipScanner) EnvType() string { return EnvPip }
+
+func (pipScanner) Match(dirPath, base string) MatchResult {
+	if base != "site-packages" {
+		return MatchResult{}
+	}
+	return MatchResult{
+		Matched:  true,
+		Terminal: true, // don't descend into site-packages itself
+		Env: Environment{
+			EnvType: EnvPip,
+			Path:    dirPath,
+			Name:    "global",
+		},
+	}
+}
+
+func (pipScanner) Scan(_ context.Context, env Environment) ([]PackageRecord, []ScanError) {
+	return scanPipEnvironment(env.Path)
+}
+
+// venvScanner discovers virtualenvs by matching pyvenv.cfg and rejects
+// dangling venvs (whose base interpreter has been uninstalled) with a
+// warning instead of queueing them.  Venv-tagged packages share the pip
+// parser but are re-tagged with EnvVenv in Scan().
+type venvScanner struct{}
+
+func (venvScanner) EnvType() string { return EnvVenv }
+
+func (venvScanner) Match(dirPath, base string) MatchResult {
+	pyvenvCfg := filepath.Join(dirPath, "pyvenv.cfg")
+	if _, err := os.Stat(pyvenvCfg); err != nil {
+		return MatchResult{}
+	}
+	if reason := isVenvDangling(dirPath, pyvenvCfg); reason != "" {
+		return MatchResult{
+			Terminal: true,
+			Warning: &ScanError{
+				Path:      dirPath,
+				EnvType:   EnvVenv,
+				Error:     reason,
+				Timestamp: time.Now().UTC(),
+			},
+		}
+	}
+	return MatchResult{
+		Matched:  true,
+		Terminal: true, // don't descend into a venv
+		Env: Environment{
+			EnvType: EnvVenv,
+			Path:    dirPath,
+			Name:    base,
+		},
+	}
+}
+
+func (venvScanner) Scan(_ context.Context, env Environment) ([]PackageRecord, []ScanError) {
+	pkgs, errs := scanPipEnvironment(env.Path)
+	// scanPipEnvironment tags every record as EnvPip; override to EnvVenv
+	// so the server distinguishes global pip from venv-scoped packages.
+	for i := range pkgs {
+		pkgs[i].EnvType = EnvVenv
+	}
+	return pkgs, errs
+}
+
+func init() {
+	Register(pipScanner{})
+	Register(venvScanner{})
+}
 
 // scanPipEnvironment scans a pip/venv environment for installed packages
 // by parsing .dist-info/METADATA and .egg-info/PKG-INFO files.

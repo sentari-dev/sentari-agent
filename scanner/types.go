@@ -67,13 +67,6 @@ type Config struct {
 	MaxWorkers int    // Max concurrent environment scanners (default: 8)
 }
 
-// discoveredEnv is an internal type representing a found Python environment.
-type discoveredEnv struct {
-	path    string  // Path to scan (site-packages dir, conda-meta dir, lockfile, etc.)
-	envType EnvType // Type of environment
-	name    string  // Human-readable name (directory basename)
-}
-
 // readFileBounded reads a file into memory only if its size is within maxSize.
 // This prevents OOM from maliciously crafted or corrupted metadata files.
 func readFileBounded(path string, maxSize int64) ([]byte, error) {

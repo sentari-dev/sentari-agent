@@ -3,6 +3,7 @@
 package scanner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,13 +11,21 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// discoverWindowsRegistryEnvs discovers Python installations registered in the
-// Windows Registry. The official Python installer always writes entries under
-// HKLM\SOFTWARE\Python\PythonCore\<version>\InstallPath (machine-wide) and
-// HKCU\...\PythonCore\<version>\InstallPath (per-user). This bypasses the
-// filesystem depth limit that would otherwise miss deep AppData installs.
-func discoverWindowsRegistryEnvs() ([]discoveredEnv, []ScanError) {
-	var envs []discoveredEnv
+// windowsRegistryScanner discovers Python installations registered in the
+// Windows Registry.  The official Python installer writes entries under
+// HKLM\SOFTWARE\Python\PythonCore\<version>\InstallPath (machine-wide)
+// and HKCU\...\PythonCore\<version>\InstallPath (per-user).  Reading the
+// registry bypasses the filesystem depth limit that would otherwise miss
+// deep AppData installs.
+//
+// Emitted Environments carry EnvType=EnvPip (these are standard global
+// Python site-packages, not venvs) and Scan() delegates to the pip parser.
+type windowsRegistryScanner struct{}
+
+func (windowsRegistryScanner) EnvType() string { return envWindowsRegistry }
+
+func (windowsRegistryScanner) DiscoverAll(_ context.Context) ([]Environment, []ScanError) {
+	var envs []Environment
 	var errs []ScanError
 	seen := make(map[string]bool)
 
@@ -44,25 +53,30 @@ func discoverWindowsRegistryEnvs() ([]discoveredEnv, []ScanError) {
 				if err != nil || installPath == "" {
 					continue
 				}
-
-				// The primary site-packages location for an official Python install.
 				sitePackages := filepath.Join(installPath, "Lib", "site-packages")
-				if info, serr := os.Stat(sitePackages); serr == nil && info.IsDir() {
-					key := strings.ToLower(filepath.Clean(sitePackages))
-					if !seen[key] {
-						seen[key] = true
-						envs = append(envs, discoveredEnv{
-							path:    sitePackages,
-							envType: EnvPip,
-							name:    "python-" + ver,
-						})
-					}
+				info, serr := os.Stat(sitePackages)
+				if serr != nil || !info.IsDir() {
+					continue
 				}
+				key := strings.ToLower(filepath.Clean(sitePackages))
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				envs = append(envs, Environment{
+					EnvType: EnvPip, // tag emitted packages as pip
+					Path:    sitePackages,
+					Name:    "python-" + ver,
+				})
 			}
 		}
 	}
 
 	return envs, errs
+}
+
+func (windowsRegistryScanner) Scan(_ context.Context, env Environment) ([]PackageRecord, []ScanError) {
+	return scanPipEnvironment(env.Path)
 }
 
 // readRegistryInstallPath reads the default string value from

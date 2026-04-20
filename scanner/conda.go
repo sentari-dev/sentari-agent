@@ -1,12 +1,44 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// condaScanner discovers conda environments by matching directories that
+// contain a conda-meta subdirectory (the canonical conda env marker).
+type condaScanner struct{}
+
+func (condaScanner) EnvType() string { return EnvConda }
+
+func (condaScanner) Match(dirPath, _ string) MatchResult {
+	condaMeta := filepath.Join(dirPath, "conda-meta")
+	info, err := os.Stat(condaMeta)
+	if err != nil || !info.IsDir() {
+		return MatchResult{}
+	}
+	return MatchResult{
+		Matched:  true,
+		Terminal: true, // don't descend into a conda env
+		Env: Environment{
+			EnvType: EnvConda,
+			Path:    dirPath,
+			Name:    filepath.Base(dirPath),
+		},
+	}
+}
+
+func (condaScanner) Scan(_ context.Context, env Environment) ([]PackageRecord, []ScanError) {
+	return scanCondaEnvironment(env.Path)
+}
+
+func init() {
+	Register(condaScanner{})
+}
 
 // condaPackageMetadata represents the structure of a conda package metadata file.
 // Conda stores one JSON file per package in envs/<name>/conda-meta/.

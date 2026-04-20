@@ -1,12 +1,44 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// pipenvScanner discovers pipenv projects by matching directories that
+// contain a Pipfile.lock.  Non-terminal for the same monorepo reason as
+// poetry.
+type pipenvScanner struct{}
+
+func (pipenvScanner) EnvType() string { return EnvPipenv }
+
+func (pipenvScanner) Match(dirPath, base string) MatchResult {
+	lock := filepath.Join(dirPath, "Pipfile.lock")
+	if _, err := os.Stat(lock); err != nil {
+		return MatchResult{}
+	}
+	return MatchResult{
+		Matched:  true,
+		Terminal: false,
+		Env: Environment{
+			EnvType: EnvPipenv,
+			Path:    dirPath,
+			Name:    base,
+		},
+	}
+}
+
+func (pipenvScanner) Scan(_ context.Context, env Environment) ([]PackageRecord, []ScanError) {
+	return scanPipenvEnvironment(env.Path)
+}
+
+func init() {
+	Register(pipenvScanner{})
+}
 
 // pipfileLockData represents the top-level structure of a Pipfile.lock.
 type pipfileLockData struct {

@@ -2,11 +2,48 @@ package scanner
 
 import (
 	"bufio"
+	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
+
+// debScanner discovers system-installed Python packages on Debian/Ubuntu
+// by reading /var/lib/dpkg/status directly.  It's a RootScanner because
+// the dpkg database is a single fixed file, not something the walker
+// would find by pattern-matching directories.
+type debScanner struct{}
+
+func (debScanner) EnvType() string { return EnvSystemDeb }
+
+func (debScanner) DiscoverAll(ctx context.Context) ([]Environment, []ScanError) {
+	if runtime.GOOS != "linux" {
+		return nil, nil
+	}
+	// Gate on full-system scan: a scoped run under /opt/app or a tempdir
+	// shouldn't inherit every system-wide Python package from dpkg.
+	if !IsFullSystemScan(ctx) {
+		return nil, nil
+	}
+	if _, err := os.Stat("/var/lib/dpkg/status"); err != nil {
+		return nil, nil // dpkg absent → not a Debian-family host
+	}
+	return []Environment{{
+		EnvType: EnvSystemDeb,
+		Path:    "/var/lib/dpkg",
+		Name:    "dpkg",
+	}}, nil
+}
+
+func (debScanner) Scan(_ context.Context, _ Environment) ([]PackageRecord, []ScanError) {
+	return scanDebianPackages()
+}
+
+func init() {
+	Register(debScanner{})
+}
 
 // scanDebianPackages scans system-installed Python packages on Debian/Ubuntu
 // by parsing /var/lib/dpkg/status directly — no binary invocation.

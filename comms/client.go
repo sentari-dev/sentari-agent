@@ -58,13 +58,23 @@ type ProxyConfig struct {
 }
 
 // RegisterResponse is the server response to a registration request.
-// Sprint 3: the server issues a real mTLS device certificate on registration.
+// The server issues a real mTLS device certificate on registration and
+// piggybacks the license-map signing pubkey on the same response so the
+// agent can verify signed /license-map envelopes without an operator-
+// supplied pin.  Trust for both the cert and the pubkey rides on the
+// same TLS fingerprint the agent pinned at bootstrap.
 type RegisterResponse struct {
 	DeviceID   string `json:"device_id"`
 	CACert     string `json:"ca_cert"`     // PEM CA certificate — pin for subsequent connections
 	DeviceCert string `json:"device_cert"` // PEM device certificate
 	DeviceKey  string `json:"device_key"`  // Deprecated: unused since CSR-based registration; kept for backward compat.
-	Message    string `json:"message"`
+	// License-map signing — base64-encoded raw 32-byte ed25519 pubkey
+	// and the matching key_id the server will set on signed envelopes.
+	// Empty when the server could not load/generate its signing key
+	// (logged server-side; agent treats license-map as unavailable).
+	LicenseMapPubKey string `json:"license_map_pubkey"`
+	LicenseMapKeyID  string `json:"license_map_key_id"`
+	Message          string `json:"message"`
 }
 
 // AgentConfig is the configuration received from the server during polling.
@@ -364,6 +374,65 @@ func CertsExist(certDir string) bool {
 	return true
 }
 
+// licenseMapTrustFile is the on-disk filename where the agent persists
+// the server's license-map signing pubkey, discovered at register time.
+// Stored in the same directory as the mTLS certs because trust for
+// both is anchored to the same TLS-fingerprint bootstrap.
+const licenseMapTrustFile = "license_map_trust.json"
+
+// LicenseMapTrust is the persisted shape of the trusted key learned
+// during /register.  KeyID identifies which pinned entry envelopes
+// set; PubKeyB64 is the raw 32-byte ed25519 public key, base64-encoded
+// (the same encoding the agent's scanner/trustkeys.go consumes).
+type LicenseMapTrust struct {
+	KeyID     string `json:"key_id"`
+	PubKeyB64 string `json:"pubkey_b64"`
+}
+
+// SaveLicenseMapTrust persists the pubkey returned by /register to
+// certDir/license_map_trust.json.  Absent/empty key just writes nothing
+// and returns nil — the agent treats license-map as unavailable.
+func SaveLicenseMapTrust(certDir, keyID, pubKeyB64 string) error {
+	if keyID == "" || pubKeyB64 == "" {
+		return nil
+	}
+	if err := os.MkdirAll(certDir, 0700); err != nil {
+		return fmt.Errorf("create cert dir: %w", err)
+	}
+	data, err := json.Marshal(LicenseMapTrust{KeyID: keyID, PubKeyB64: pubKeyB64})
+	if err != nil {
+		return fmt.Errorf("marshal trust record: %w", err)
+	}
+	path := filepath.Join(certDir, licenseMapTrustFile)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("write %s: %w", licenseMapTrustFile, err)
+	}
+	return nil
+}
+
+// LoadLicenseMapTrust returns the persisted pubkey, or (nil, nil) if
+// no trust file exists yet (fresh install pre-register).  Any decode
+// error returns (nil, err) so callers can log and continue without
+// license-map verification.
+func LoadLicenseMapTrust(certDir string) (*LicenseMapTrust, error) {
+	path := filepath.Join(certDir, licenseMapTrustFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", licenseMapTrustFile, err)
+	}
+	var trust LicenseMapTrust
+	if err := json.Unmarshal(data, &trust); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", licenseMapTrustFile, err)
+	}
+	if trust.KeyID == "" || trust.PubKeyB64 == "" {
+		return nil, fmt.Errorf("%s: key_id and pubkey_b64 both required", licenseMapTrustFile)
+	}
+	return &trust, nil
+}
+
 // SaveDeviceID persists the server-assigned device UUID to a file so the agent
 // can include it in subsequent scan uploads.
 func SaveDeviceID(certDir, deviceID string) error {
@@ -430,10 +499,10 @@ func (c *Client) PollConfig() (*AgentConfig, error) {
 }
 
 // FetchLicenseMap fetches the latest license mapping table from the
-// server.  The response is a signed envelope (ADR 0001); this function
-// reads the raw bytes, verifies the ed25519 signature against a pinned
-// public key, and returns the verified LicenseMap plus the raw
-// envelope bytes so the caller can persist them for offline re-use.
+// server.  The response is a signed envelope; this function reads the
+// raw bytes, verifies the ed25519 signature against a pinned public
+// key, and returns the verified LicenseMap plus the raw envelope bytes
+// so the caller can persist them for offline re-use.
 //
 // Returns (nil, nil, nil) when the server's version is not newer than
 // currentVersion — no update needed, no error.
