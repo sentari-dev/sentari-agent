@@ -430,10 +430,10 @@ func (c *Client) PollConfig() (*AgentConfig, error) {
 }
 
 // FetchLicenseMap fetches the latest license mapping table from the
-// server.  The response is a signed envelope (ADR 0001); this function
-// reads the raw bytes, verifies the ed25519 signature against a pinned
-// public key, and returns the verified LicenseMap plus the raw
-// envelope bytes so the caller can persist them for offline re-use.
+// server.  The response is a signed envelope; this function reads the
+// raw bytes, verifies the ed25519 signature against a pinned public
+// key, and returns the verified LicenseMap plus the raw envelope bytes
+// so the caller can persist them for offline re-use.
 //
 // Returns (nil, nil, nil) when the server's version is not newer than
 // currentVersion — no update needed, no error.

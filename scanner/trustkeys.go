@@ -1,4 +1,4 @@
-// Pinned ed25519 public keys for server-pushed signed data (ADR 0001).
+// Pinned ed25519 public keys for server-pushed signed data.
 //
 // Production agent builds ship with one or more base64-encoded raw
 // ed25519 public keys compiled in via the pinnedMapPubKeys slice
@@ -25,7 +25,7 @@ import (
 // production release workflow regenerates this slice from the server's
 // deployed signing-key material and injects it at build time.  For
 // v0.12 the slice is empty and all trust is sourced from the dev env
-// override below — see ADR 0001 §§ Consequences and Implementation.
+// override below.
 var pinnedMapPubKeys = []pinnedKey{
 	// {KeyID: "primary", B64: "…32-byte raw pubkey, base64-encoded…"},
 }

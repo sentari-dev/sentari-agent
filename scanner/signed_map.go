@@ -1,4 +1,4 @@
-// Signed license-map verification (ADR 0001).
+// Signed license-map verification.
 //
 // The agent fetches license-map updates from the server as signed
 // envelopes — {payload, signature, key_id} — and verifies the ed25519

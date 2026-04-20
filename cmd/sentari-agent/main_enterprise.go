@@ -219,11 +219,11 @@ func runUpload(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.
 	cycleStart := time.Now()
 
 	// Refresh license map from server before scanning.  The response
-	// is a signed envelope (ADR 0001); FetchLicenseMap verifies it and
-	// returns the raw envelope bytes so we can cache them for offline
-	// re-verification next startup.  On any verification failure we
-	// keep serving the previously-cached overlay — never apply
-	// unverified data.
+	// is a signed envelope; FetchLicenseMap verifies it and returns
+	// the raw envelope bytes so we can cache them for offline re-
+	// verification next startup.  On any verification failure we keep
+	// serving the previously-cached overlay — never apply unverified
+	// data.
 	if lm, envelope, err := client.FetchLicenseMap(scanner.MapVersion()); err != nil {
 		fmt.Fprintf(os.Stderr, "License-map refresh failed (using cached): %v\n", err)
 	} else if lm != nil {

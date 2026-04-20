@@ -135,8 +135,8 @@ func MapVersion() int {
 // Cached license-map overlays are loaded and persisted only as signed
 // envelopes — see scanner/signed_map.go (LoadVerifiedOverlayFromFile,
 // SaveVerifiedEnvelopeToFile).  Unsigned load/save helpers used to live
-// here in v0.12-pre and were removed in ADR 0001 to prevent accidental
-// bypass of signature verification.
+// here in v0.12-pre; they were removed to prevent accidental bypass of
+// signature verification.
 
 // ExtractLicenseFromMetadata parses a Python METADATA or PKG-INFO file content
 // and returns (rawLicense, spdxID, tier).
