@@ -4,7 +4,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -173,8 +175,36 @@ func main() {
 		if err := comms.SaveDeviceID(certDir, regResp.DeviceID); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to persist device_id: %v\n", err)
 		}
+		// Persist the server's license-map signing pubkey so subsequent
+		// scan cycles can verify signed /license-map envelopes without
+		// an operator-supplied pin.  Trust is anchored at the same TLS-
+		// fingerprint bootstrap the cert issuance relies on.
+		if err := comms.SaveLicenseMapTrust(
+			certDir,
+			regResp.LicenseMapKeyID,
+			regResp.LicenseMapPubKey,
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to persist license-map trust: %v\n", err)
+		}
 		logAudit(auditLog,"agent.registered", fmt.Sprintf("device_id=%s", regResp.DeviceID))
 		fmt.Fprintf(os.Stderr, "Certificates saved to %s\n", certDir)
+	}
+
+	// Load the persisted license-map trust (learned at register time)
+	// and register it with the scanner so envelope verification can
+	// find a pubkey under the matching key_id.  A missing or invalid
+	// trust file is non-fatal: the agent just won't fetch/apply
+	// license-map overlays, it'll fall back to the compiled-in defaults.
+	if trust, err := comms.LoadLicenseMapTrust(certDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not load license-map trust: %v\n", err)
+	} else if trust != nil {
+		if raw, err := base64.StdEncoding.DecodeString(trust.PubKeyB64); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: license-map pubkey is not valid base64: %v\n", err)
+		} else if len(raw) != ed25519.PublicKeySize {
+			fmt.Fprintf(os.Stderr, "Warning: license-map pubkey has wrong length (%d)\n", len(raw))
+		} else {
+			scanner.RegisterTrustedMapKey(trust.KeyID, ed25519.PublicKey(raw))
+		}
 	}
 
 	// Build mTLS client using the saved certificates.
