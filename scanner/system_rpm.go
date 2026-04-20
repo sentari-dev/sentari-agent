@@ -1,12 +1,49 @@
 package scanner
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"runtime"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// rpmScanner discovers system-installed Python packages on RHEL/Fedora
+// by querying /var/lib/rpm/rpmdb.sqlite directly.  Like debScanner, its
+// source is a fixed OS path → RootScanner.
+type rpmScanner struct{}
+
+func (rpmScanner) EnvType() string { return EnvSystemRpm }
+
+func (rpmScanner) DiscoverAll(ctx context.Context) ([]Environment, []ScanError) {
+	if runtime.GOOS != "linux" {
+		return nil, nil
+	}
+	// Same scope gate as debScanner — scoped runs shouldn't pull in every
+	// system-wide Python from the rpmdb.
+	if !IsFullSystemScan(ctx) {
+		return nil, nil
+	}
+	if _, err := os.Stat("/var/lib/rpm"); err != nil {
+		return nil, nil
+	}
+	return []Environment{{
+		EnvType: EnvSystemRpm,
+		Path:    "/var/lib/rpm",
+		Name:    "rpm",
+	}}, nil
+}
+
+func (rpmScanner) Scan(_ context.Context, _ Environment) ([]PackageRecord, []ScanError) {
+	return scanRpmPackages()
+}
+
+func init() {
+	Register(rpmScanner{})
+}
 
 // scanRpmPackages scans system-installed Python packages on RHEL/CentOS/Fedora
 // by reading the RPM SQLite database directly — no binary invocation.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -225,7 +226,7 @@ func TestScannerDotVenvNotSkipped(t *testing.T) {
 
 	found := false
 	for _, env := range envs {
-		if env.envType == EnvVenv && filepath.Base(env.path) == ".venv" {
+		if env.EnvType == EnvVenv && filepath.Base(env.Path) == ".venv" {
 			found = true
 			break
 		}
@@ -290,7 +291,7 @@ func TestScannerVenvDiscovery(t *testing.T) {
 
 	types := make(map[EnvType]bool)
 	for _, env := range envs {
-		types[env.envType] = true
+		types[env.EnvType] = true
 	}
 
 	if !types[EnvVenv] {
@@ -720,19 +721,25 @@ func TestParseRPMHeaderVersion(t *testing.T) {
 }
 
 func TestDiscoverWindowsRegistryEnvsNoOp(t *testing.T) {
-	// On non-Windows platforms this must return (nil, nil) without panicking.
-	envs, errs := discoverWindowsRegistryEnvs()
-	if len(envs) != 0 || len(errs) != 0 {
-		t.Errorf("expected empty result on non-Windows, got %d envs %d errs", len(envs), len(errs))
+	// On non-Windows platforms the registry scanner must return (nil, nil)
+	// without panicking.  On Windows this will exercise the real registry
+	// lookup and may return real envs — the invariant we care about is
+	// that DiscoverAll doesn't crash on an unsupported OS.
+	envs, errs := windowsRegistryScanner{}.DiscoverAll(context.Background())
+	if runtime.GOOS != "windows" {
+		if len(envs) != 0 || len(errs) != 0 {
+			t.Errorf("expected empty result on non-Windows, got %d envs %d errs", len(envs), len(errs))
+		}
 	}
 }
 
-func TestScanEnvironmentVenvEnvType(t *testing.T) {
-	// Ensure packages scanned from a venv environment are tagged EnvVenv,
-	// not the default EnvPip that scanPipEnvironment sets.
+func TestVenvScannerScanTagsPackagesAsEnvVenv(t *testing.T) {
+	// After the plugin-registry refactor, venv scanning goes through
+	// venvScanner.Scan — which must tag every produced package as EnvVenv
+	// even though the underlying parser (scanPipEnvironment) defaults to
+	// EnvPip.
 	tmpDir := t.TempDir()
 
-	// Create a minimal venv with pyvenv.cfg and a .dist-info package.
 	os.WriteFile(filepath.Join(tmpDir, "pyvenv.cfg"), []byte("home = /usr/bin\nversion = 3.11.0\n"), 0644)
 	sitePkgs := filepath.Join(tmpDir, "lib", "python3.11", "site-packages")
 	os.MkdirAll(sitePkgs, 0755)
@@ -740,15 +747,15 @@ func TestScanEnvironmentVenvEnvType(t *testing.T) {
 	os.MkdirAll(distInfo, 0755)
 	os.WriteFile(filepath.Join(distInfo, "METADATA"), []byte("Metadata-Version: 2.1\nName: mypkg\nVersion: 1.0.0\n"), 0644)
 
-	cfg := Config{ScanRoot: tmpDir, MaxDepth: 4, MaxWorkers: 1}
-	s := NewScanner(cfg)
-
-	result := s.scanEnvironment(discoveredEnv{path: tmpDir, envType: EnvVenv, name: "testvenv"})
-
-	if len(result.packages) == 0 {
+	pkgs, _ := venvScanner{}.Scan(context.Background(), Environment{
+		EnvType: EnvVenv,
+		Path:    tmpDir,
+		Name:    "testvenv",
+	})
+	if len(pkgs) == 0 {
 		t.Fatal("expected at least one package from venv scan")
 	}
-	for _, pkg := range result.packages {
+	for _, pkg := range pkgs {
 		if pkg.EnvType != EnvVenv {
 			t.Errorf("expected EnvType=%q, got %q for package %s", EnvVenv, pkg.EnvType, pkg.Name)
 		}
@@ -850,10 +857,10 @@ func TestDiscoverSkipsDanglingVenv(t *testing.T) {
 	// The healthy venv must be discovered.
 	found := false
 	for _, e := range envs {
-		if e.path == healthyVenv {
+		if e.Path == healthyVenv {
 			found = true
 		}
-		if e.path == danglingVenv {
+		if e.Path == danglingVenv {
 			t.Error("dangling venv should NOT be in discovered environments")
 		}
 	}

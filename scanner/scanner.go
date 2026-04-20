@@ -15,14 +15,16 @@ import (
 // Version is set at build time via -ldflags.
 var Version = "dev"
 
-// Scanner discovers Python environments and extracts package metadata.
-type Scanner struct {
+// Runner discovers Python environments and extracts package metadata by
+// driving the registered Scanner plugins (see registry.go).  It owns the
+// filesystem walk, the bounded worker pool, and the ScanResult assembly.
+type Runner struct {
 	cfg Config
 }
 
-// NewScanner creates a scanner with the given configuration.
+// NewRunner creates a scan runner with the given configuration.
 // Zero values for MaxDepth default to 12, and MaxWorkers default to 8.
-func NewScanner(cfg Config) *Scanner {
+func NewRunner(cfg Config) *Runner {
 	if cfg.MaxDepth <= 0 {
 		cfg.MaxDepth = 12
 	}
@@ -35,8 +37,14 @@ func NewScanner(cfg Config) *Scanner {
 			cfg.ScanRoot = "C:\\"
 		}
 	}
-	return &Scanner{cfg: cfg}
+	return &Runner{cfg: cfg}
 }
+
+// NewScanner is a deprecated alias for NewRunner kept for backwards-compat
+// with pre-registry callers.  New code should call NewRunner.
+//
+// Deprecated: use NewRunner.
+func NewScanner(cfg Config) *Runner { return NewRunner(cfg) }
 
 // scanJobResult collects packages and errors from a single environment scan.
 type scanJobResult struct {
@@ -44,10 +52,16 @@ type scanJobResult struct {
 	errors   []ScanError
 }
 
+
 // Run performs a full scan of the device. It walks the filesystem from
 // ScanRoot up to MaxDepth, discovers Python environments, and dispatches
 // environment-specific parsers via a bounded worker pool.
-func (s *Scanner) Run(ctx context.Context) (*ScanResult, error) {
+func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
+	// Plumb the configured scan root through to scanners that care about
+	// scope (dpkg, rpm — see IsFullSystemScan).  Scanners that don't
+	// ignore it.
+	ctx = WithScanRoot(ctx, r.cfg.ScanRoot)
+
 	result := &ScanResult{
 		DeviceID:     GetDeviceID(),
 		Hostname:     getHostname(),
@@ -60,7 +74,7 @@ func (s *Scanner) Run(ctx context.Context) (*ScanResult, error) {
 	}
 
 	// Phase 1: discover all Python environments on the filesystem.
-	envs, discoveryErrors := s.discoverEnvironments(ctx)
+	envs, discoveryErrors := r.discoverEnvironments(ctx)
 	result.Errors = append(result.Errors, discoveryErrors...)
 
 	if len(envs) == 0 {
@@ -68,11 +82,11 @@ func (s *Scanner) Run(ctx context.Context) (*ScanResult, error) {
 	}
 
 	// Phase 2: scan each environment in parallel using a bounded worker pool.
-	jobs := make(chan discoveredEnv, len(envs))
+	jobs := make(chan Environment, len(envs))
 	results := make(chan scanJobResult, len(envs))
 
 	var wg sync.WaitGroup
-	for i := 0; i < s.cfg.MaxWorkers; i++ {
+	for i := 0; i < r.cfg.MaxWorkers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -81,7 +95,7 @@ func (s *Scanner) Run(ctx context.Context) (*ScanResult, error) {
 				case <-ctx.Done():
 					return
 				default:
-					res := s.scanEnvironment(env)
+					res := r.scanEnvironment(ctx, env)
 					results <- res
 				}
 			}
@@ -111,7 +125,7 @@ func (s *Scanner) Run(ctx context.Context) (*ScanResult, error) {
 	// and ~/Downloads unless the binary has Full Disk Access. The scanner
 	// sees these directories as empty — no permission error, just missing
 	// packages. Warn operators so they know to grant FDA.
-	if runtime.GOOS == "darwin" && os.Getuid() == 0 && filepath.Clean(s.cfg.ScanRoot) == "/" {
+	if runtime.GOOS == "darwin" && os.Getuid() == 0 && filepath.Clean(r.cfg.ScanRoot) == "/" {
 		for _, home := range userHomeDirs() {
 			docsDir := filepath.Join(home, "Documents")
 			if info, err := os.Stat(docsDir); err == nil && info.IsDir() {
@@ -141,41 +155,20 @@ func (s *Scanner) Run(ctx context.Context) (*ScanResult, error) {
 	return result, nil
 }
 
-// scanEnvironment dispatches to the correct environment-specific parser.
-func (s *Scanner) scanEnvironment(env discoveredEnv) scanJobResult {
-	var pkgs []PackageRecord
-	var errs []ScanError
-
-	switch env.envType {
-	case EnvPip, EnvVenv:
-		pkgs, errs = scanPipEnvironment(env.path)
-		// scanPipEnvironment always tags packages as EnvPip.
-		// Override with the actual discovered env type so that venvs
-		// are correctly reported as "venv" to the server.
-		if env.envType == EnvVenv {
-			for i := range pkgs {
-				pkgs[i].EnvType = EnvVenv
-			}
-		}
-	case EnvConda:
-		pkgs, errs = scanCondaEnvironment(env.path)
-	case EnvPoetry:
-		pkgs, errs = scanPoetryEnvironment(env.path)
-	case EnvPipenv:
-		pkgs, errs = scanPipenvEnvironment(env.path)
-	case EnvSystemDeb:
-		pkgs, errs = scanDebianPackages()
-	case EnvSystemRpm:
-		pkgs, errs = scanRpmPackages()
-	default:
-		errs = append(errs, ScanError{
-			Path:      env.path,
-			EnvType:   env.envType,
-			Error:     fmt.Sprintf("unknown environment type: %s", env.envType),
+// scanEnvironment looks up the scanner that produced env and delegates to
+// its Scan method.  This is the sole dispatch path after the Sprint 13
+// plugin-registry refactor — there are no switch arms over EnvType.
+func (r *Runner) scanEnvironment(ctx context.Context, env Environment) scanJobResult {
+	s := scannerFor(env.EnvType)
+	if s == nil {
+		return scanJobResult{errors: []ScanError{{
+			Path:      env.Path,
+			EnvType:   env.EnvType,
+			Error:     fmt.Sprintf("no scanner registered for env_type %q", env.EnvType),
 			Timestamp: time.Now().UTC(),
-		})
+		}}}
 	}
-
+	pkgs, errs := s.Scan(ctx, env)
 	return scanJobResult{packages: pkgs, errors: errs}
 }
 
@@ -264,18 +257,29 @@ func userHomeDirs() []string {
 }
 
 // discoverEnvironments walks the filesystem from ScanRoot and identifies
-// Python environment locations by looking for marker files and directories.
-// Discovery is single-threaded because directory traversal is I/O-bound on
-// a single disk; parallelism is used in the scanning phase instead.
-func (s *Scanner) discoverEnvironments(ctx context.Context) ([]discoveredEnv, []ScanError) {
-	var envs []discoveredEnv
+// Python environment locations by consulting the registered MarkerScanners.
+// Each directory the walker visits is offered to every marker scanner in
+// registration order; a scanner that matches contributes an Environment
+// (and optionally a Warning) and may ask the walker not to descend.
+//
+// Discovery is single-threaded — directory traversal is I/O-bound on a
+// single disk, and parallelism is used in the scanning phase instead.
+// The RootScanners (dpkg, rpm, Windows registry) are invoked after the
+// walk completes.
+func (r *Runner) discoverEnvironments(ctx context.Context) ([]Environment, []ScanError) {
+	var envs []Environment
 	var errs []ScanError
 	seen := make(map[string]bool)
+
+	// Snapshot the marker scanners once — registration is init()-only
+	// so the set can't change during a run, but a slice snapshot keeps
+	// the hot path out of the registry RWMutex.
+	markers := markerScanners()
 
 	// rootDepth is used by the walk closure to calculate depth relative to the
 	// current walk root. It is updated before each extra-root walk so that
 	// version-manager directories get a full MaxDepth budget of their own.
-	rootDepth := strings.Count(filepath.Clean(s.cfg.ScanRoot), string(os.PathSeparator))
+	rootDepth := strings.Count(filepath.Clean(r.cfg.ScanRoot), string(os.PathSeparator))
 
 	// Directories that are never useful and slow down scanning.
 	skipDirs := map[string]bool{
@@ -303,7 +307,7 @@ func (s *Scanner) discoverEnvironments(ctx context.Context) ([]discoveredEnv, []
 
 		// Enforce max depth.
 		currentDepth := strings.Count(filepath.Clean(path), string(os.PathSeparator)) - rootDepth
-		if currentDepth > s.cfg.MaxDepth {
+		if currentDepth > r.cfg.MaxDepth {
 			return nil
 		}
 
@@ -315,90 +319,28 @@ func (s *Scanner) discoverEnvironments(ctx context.Context) ([]discoveredEnv, []
 			return nil
 		}
 
-		// Check for pyvenv.cfg → venv / virtualenv.
-		pyvenvCfg := filepath.Join(path, "pyvenv.cfg")
-		if _, err := os.Stat(pyvenvCfg); err == nil {
-			// Verify the venv isn't broken (dangling symlink to an
-			// uninstalled interpreter).  A venv whose base Python has
-			// been removed is useless — skip it and record a warning.
-			if reason := isVenvDangling(path, pyvenvCfg); reason != "" {
-				errs = append(errs, ScanError{
-					Path:      path,
-					EnvType:   EnvVenv,
-					Error:     reason,
-					Timestamp: time.Now().UTC(),
-				})
-				return nil // Skip this venv entirely.
+		// Offer this directory to every registered MarkerScanner.
+		// Matches queue an Environment; warnings are surfaced as ScanErrors;
+		// any Terminal=true vote stops descent into path.
+		terminal := false
+		for _, m := range markers {
+			res := m.Match(path, base)
+			if res.Warning != nil {
+				errs = append(errs, *res.Warning)
 			}
-
-			key := resolveKey(path)
-			if !seen[key] {
-				seen[key] = true
-				envs = append(envs, discoveredEnv{
-					path:    path,
-					envType: EnvVenv,
-					name:    base,
-				})
+			if res.Matched {
+				key := resolveKey(res.Env.Path)
+				if !seen[key] {
+					seen[key] = true
+					envs = append(envs, res.Env)
+				}
 			}
-			return nil // Don't recurse into venvs.
-		}
-
-		// Check for conda-meta directory.
-		condaMeta := filepath.Join(path, "conda-meta")
-		if info, err := os.Stat(condaMeta); err == nil && info.IsDir() {
-			key := resolveKey(condaMeta)
-			if !seen[key] {
-				seen[key] = true
-				envs = append(envs, discoveredEnv{
-					path:    path,
-					envType: EnvConda,
-					name:    base,
-				})
-			}
-			return nil // Don't recurse into conda envs.
-		}
-
-		// Check for poetry.lock.
-		poetryLock := filepath.Join(path, "poetry.lock")
-		if _, err := os.Stat(poetryLock); err == nil {
-			key := resolveKey(poetryLock)
-			if !seen[key] {
-				seen[key] = true
-				envs = append(envs, discoveredEnv{
-					path:    path,
-					envType: EnvPoetry,
-					name:    base,
-				})
-			}
-			// Don't return — a project can have poetry.lock AND subdirs to scan.
-		}
-
-		// Check for Pipfile.lock.
-		pipfileLock := filepath.Join(path, "Pipfile.lock")
-		if _, err := os.Stat(pipfileLock); err == nil {
-			key := resolveKey(pipfileLock)
-			if !seen[key] {
-				seen[key] = true
-				envs = append(envs, discoveredEnv{
-					path:    path,
-					envType: EnvPipenv,
-					name:    base,
-				})
+			if res.Terminal {
+				terminal = true
 			}
 		}
-
-		// Check for site-packages (global pip).
-		if base == "site-packages" {
-			key := resolveKey(path)
-			if !seen[key] {
-				seen[key] = true
-				envs = append(envs, discoveredEnv{
-					path:    path,
-					envType: EnvPip,
-					name:    "global",
-				})
-			}
-			return nil // Don't recurse into site-packages.
+		if terminal {
+			return nil
 		}
 
 		// Recurse into subdirectories.
@@ -434,7 +376,7 @@ func (s *Scanner) discoverEnvironments(ctx context.Context) ([]discoveredEnv, []
 		return nil
 	}
 
-	_ = walk(s.cfg.ScanRoot)
+	_ = walk(r.cfg.ScanRoot)
 
 	// Scan well-known version manager directories (pyenv, asdf) that may be
 	// too deep for the main walk to reach.
@@ -444,32 +386,32 @@ func (s *Scanner) discoverEnvironments(ctx context.Context) ([]discoveredEnv, []
 	// directory (e.g., /opt/app or a test temp dir), only check directories
 	// under the scan root — never escape to unrelated system paths.
 	var extraHomes []string
-	cleanRoot := filepath.Clean(s.cfg.ScanRoot)
+	cleanRoot := filepath.Clean(r.cfg.ScanRoot)
 	if cleanRoot == "/" || (runtime.GOOS == "windows" && len(cleanRoot) <= 3) {
 		extraHomes = userHomeDirs()
 	}
 	// Check directories directly under the scan root for version manager
 	// patterns (handles cases where scan root is /home/user or similar).
-	if topEntries, err := os.ReadDir(s.cfg.ScanRoot); err == nil {
+	if topEntries, err := os.ReadDir(r.cfg.ScanRoot); err == nil {
 		for _, e := range topEntries {
 			if e.IsDir() {
-				extraHomes = append(extraHomes, filepath.Join(s.cfg.ScanRoot, e.Name()))
+				extraHomes = append(extraHomes, filepath.Join(r.cfg.ScanRoot, e.Name()))
 			}
 		}
 	}
 	// Also check the scan root itself.
-	extraHomes = append(extraHomes, s.cfg.ScanRoot)
+	extraHomes = append(extraHomes, r.cfg.ScanRoot)
 	// Walk each extra root with its own depth budget. We set rootDepth to the
 	// depth of the extra root itself so that MaxDepth is measured from the
-	// extra root, not from s.cfg.ScanRoot. Version manager directories like
+	// extra root, not from r.cfg.ScanRoot. Version manager directories like
 	// .pyenv/versions/3.12.0/lib/python3.12/site-packages are 4+ levels deep,
 	// so we use a minimum effective MaxDepth of 8 for extra roots regardless
 	// of the configured MaxDepth — the caller's shallow MaxDepth is intended
 	// to limit the main walk, not these explicit well-known paths.
 	mainRootDepth := rootDepth
-	savedMaxDepth := s.cfg.MaxDepth
-	if s.cfg.MaxDepth < 8 {
-		s.cfg.MaxDepth = 8
+	savedMaxDepth := r.cfg.MaxDepth
+	if r.cfg.MaxDepth < 8 {
+		r.cfg.MaxDepth = 8
 	}
 	for _, home := range extraHomes {
 		for _, extra := range extraScanRoots(home) {
@@ -478,25 +420,25 @@ func (s *Scanner) discoverEnvironments(ctx context.Context) ([]discoveredEnv, []
 		}
 	}
 	rootDepth = mainRootDepth
-	s.cfg.MaxDepth = savedMaxDepth
+	r.cfg.MaxDepth = savedMaxDepth
 
-	// Add system package manager jobs (Linux only, full-system scan).
-	// Only check when ScanRoot is / — otherwise the user is scanning a
-	// specific directory and doesn't want system-wide dpkg/rpm results.
-	if runtime.GOOS == "linux" && (cleanRoot == "/") {
-		if _, err := os.Stat("/var/lib/dpkg/status"); err == nil {
-			envs = append(envs, discoveredEnv{path: "/var/lib/dpkg", envType: EnvSystemDeb, name: "dpkg"})
+	// Invoke every RootScanner.  System-database scanners (dpkg, rpm)
+	// gate themselves on a full-system scan inside DiscoverAll to avoid
+	// polluting a scoped tempdir run with host-wide packages.  The
+	// Windows-registry scanner fires unconditionally — registry lookup
+	// is cheap and its results are tagged with real site-packages paths
+	// under InstallPath, so a scoped scan still gets correct output.
+	for _, rs := range rootScanners() {
+		rEnvs, rErrs := rs.DiscoverAll(ctx)
+		for _, env := range rEnvs {
+			key := resolveKey(env.Path)
+			if !seen[key] {
+				seen[key] = true
+				envs = append(envs, env)
+			}
 		}
-		if _, err := os.Stat("/var/lib/rpm"); err == nil {
-			envs = append(envs, discoveredEnv{path: "/var/lib/rpm", envType: EnvSystemRpm, name: "rpm"})
-		}
+		errs = append(errs, rErrs...)
 	}
-
-	// Add Windows Registry-discovered Python installations.
-	// Returns (nil, nil) on non-Windows — see system_others.go.
-	regEnvs, regErrs := discoverWindowsRegistryEnvs()
-	envs = append(envs, regEnvs...)
-	errs = append(errs, regErrs...)
 
 	return envs, errs
 }

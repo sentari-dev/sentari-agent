@@ -2,11 +2,43 @@ package scanner
 
 import (
 	"bufio"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// poetryScanner discovers poetry projects by matching directories that
+// contain a poetry.lock file.  Non-terminal: a monorepo can have a
+// top-level poetry.lock and per-subproject envs worth descending into.
+type poetryScanner struct{}
+
+func (poetryScanner) EnvType() string { return EnvPoetry }
+
+func (poetryScanner) Match(dirPath, base string) MatchResult {
+	poetryLock := filepath.Join(dirPath, "poetry.lock")
+	if _, err := os.Stat(poetryLock); err != nil {
+		return MatchResult{}
+	}
+	return MatchResult{
+		Matched:  true,
+		Terminal: false,
+		Env: Environment{
+			EnvType: EnvPoetry,
+			Path:    dirPath,
+			Name:    base,
+		},
+	}
+}
+
+func (poetryScanner) Scan(_ context.Context, env Environment) ([]PackageRecord, []ScanError) {
+	return scanPoetryEnvironment(env.Path)
+}
+
+func init() {
+	Register(poetryScanner{})
+}
 
 // scanPoetryEnvironment parses a poetry.lock file to extract package metadata.
 // poetry.lock uses TOML format with [[package]] array-of-tables entries.
