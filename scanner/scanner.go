@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // Version is set at build time via -ldflags.
@@ -455,10 +458,11 @@ func (r *Runner) discoverEnvironments(ctx context.Context) ([]Environment, []Sca
 //     is a dangling symlink.  os.Lstat succeeds on a symlink even if the
 //     target is gone, but os.Stat (which follows symlinks) will fail.
 func isVenvDangling(venvPath, pyvenvCfgPath string) string {
-	// Check 1: pyvenv.cfg "home" key.
-	if f, err := os.Open(pyvenvCfgPath); err == nil {
-		defer f.Close()
-		scn := bufio.NewScanner(f)
+	// Check 1: pyvenv.cfg "home" key.  Use safeio — a hostile venv
+	// might ship pyvenv.cfg as a symlink to /etc/shadow specifically
+	// to poison the dangling-check's error message with file contents.
+	if data, err := safeio.ReadFile(pyvenvCfgPath, maxPyvenvCfgSize); err == nil {
+		scn := bufio.NewScanner(bytes.NewReader(data))
 		for scn.Scan() {
 			line := strings.TrimSpace(scn.Text())
 			if strings.HasPrefix(line, "home") {

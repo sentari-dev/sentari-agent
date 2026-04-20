@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // condaScanner discovers conda environments by matching directories that
@@ -93,14 +95,11 @@ func scanCondaEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 	return packages, errors
 }
 
-// maxMetadataFileSize is the upper bound for metadata files the scanner will
-// read into memory. Files larger than this are skipped to prevent OOM from
-// maliciously crafted or corrupted metadata.
-const maxMetadataFileSize = 10 << 20 // 10 MiB
-
 // parseCondaPackageMetadata parses a conda package metadata JSON file.
+// Reads through safeio so a symlinked conda-meta/*.json (unusual, but
+// possible in a compromised env) can't exfiltrate the symlink target.
 func parseCondaPackageMetadata(metadataPath, envPath string) (PackageRecord, error) {
-	data, err := readFileBounded(metadataPath, maxMetadataFileSize)
+	data, err := safeio.ReadFile(metadataPath, maxCondaMetadataSize)
 	if err != nil {
 		return PackageRecord{}, err
 	}
@@ -140,7 +139,7 @@ func getCondaInterpreterVersion(condaMetaPath string, entries []os.DirEntry) str
 				return trimmed[:idx]
 			}
 			// Fallback: try reading the JSON file for exact version.
-			data, err := readFileBounded(filepath.Join(condaMetaPath, name), maxMetadataFileSize)
+			data, err := safeio.ReadFile(filepath.Join(condaMetaPath, name), maxCondaMetadataSize)
 			if err == nil {
 				var meta condaPackageMetadata
 				if json.Unmarshal(data, &meta) == nil && meta.Version != "" {

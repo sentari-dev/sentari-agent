@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // pipenvScanner discovers pipenv projects by matching directories that
@@ -71,7 +73,7 @@ func scanPipenvEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 
 	pipfileLockPath := filepath.Join(envPath, "Pipfile.lock")
 
-	data, err := readFileBounded(pipfileLockPath, maxMetadataFileSize)
+	data, err := safeio.ReadFile(pipfileLockPath, maxLockFileSize)
 	if err != nil {
 		errors = append(errors, ScanError{
 			Path:      envPath,
@@ -115,7 +117,7 @@ func scanPipenvEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 			// Try to extract license from installed METADATA in site-packages.
 			if sitePackagesDir != "" {
 				metadataPath := filepath.Join(sitePackagesDir, name+"-"+version+".dist-info", "METADATA")
-				if metaBytes, err := os.ReadFile(metadataPath); err == nil {
+				if metaBytes, err := safeio.ReadFile(metadataPath, maxPipMetadataSize); err == nil {
 					raw, spdx, tier := ExtractLicenseFromMetadata(string(metaBytes))
 					pkg.LicenseRaw = raw
 					pkg.LicenseSPDX = spdx
