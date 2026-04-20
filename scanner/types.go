@@ -4,9 +4,45 @@
 package scanner
 
 import (
-	"fmt"
-	"os"
 	"time"
+)
+
+// Per-file-type size caps.  Every metadata parse must go through
+// scanner/safeio.ReadFile (symlink-refusing) with one of these as the
+// limit.  Caps reflect the realistic p99 size of each format in the
+// wild; a malicious package cannot force us to read a larger file.
+const (
+	// METADATA / PKG-INFO — RFC 822-style package metadata.
+	// Real-world files are usually <50 KiB; 1 MiB is generous.
+	maxPipMetadataSize int64 = 1 << 20
+
+	// conda-meta/*.json — package manifest.  10 MiB retained from
+	// the pre-safeio constant because some conda packages ship
+	// very large dependency graphs.
+	maxCondaMetadataSize int64 = 10 << 20
+
+	// Pipfile.lock / poetry.lock — lockfiles.  4 MiB covers even
+	// very large monorepo dependency graphs.
+	maxLockFileSize int64 = 4 << 20
+
+	// pyproject.toml — poetry scanner reads this for interpreter
+	// version.  Small config file.
+	maxPyprojectSize int64 = 1 << 20
+
+	// /var/lib/dpkg/status — Debian package list.  Can be large
+	// on systems with thousands of packages; 64 MiB is conservative.
+	maxDpkgStatusSize int64 = 64 << 20
+
+	// /usr/share/doc/<pkg>/copyright — Debian copyright file.  This
+	// is the primary symlink-exfil target and must stay small to
+	// bound the damage of any bypass.
+	maxDebCopyrightSize int64 = 4 << 20
+
+	// pyvenv.cfg — tiny ini-style config file.
+	maxPyvenvCfgSize int64 = 64 << 10
+
+	// .egg-link files — legacy editable-install pointers.
+	maxEggLinkSize int64 = 64 << 10
 )
 
 // EnvType identifies the type of Python environment a package was found in.
@@ -67,15 +103,3 @@ type Config struct {
 	MaxWorkers int    // Max concurrent environment scanners (default: 8)
 }
 
-// readFileBounded reads a file into memory only if its size is within maxSize.
-// This prevents OOM from maliciously crafted or corrupted metadata files.
-func readFileBounded(path string, maxSize int64) ([]byte, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxSize {
-		return nil, fmt.Errorf("file too large (%d bytes, limit %d): %s", info.Size(), maxSize, path)
-	}
-	return os.ReadFile(path)
-}

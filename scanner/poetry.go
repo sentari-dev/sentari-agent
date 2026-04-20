@@ -2,11 +2,14 @@ package scanner
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // poetryScanner discovers poetry projects by matching directories that
@@ -50,7 +53,10 @@ func scanPoetryEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 
 	poetryLockPath := filepath.Join(envPath, "poetry.lock")
 
-	file, err := os.Open(poetryLockPath)
+	// Bounded + symlink-refusing read.  A malicious monorepo could
+	// plant ``poetry.lock -> /etc/shadow`` inside a directory the
+	// scanner walks into; safeio refuses the follow.
+	data, err := safeio.ReadFile(poetryLockPath, maxLockFileSize)
 	if err != nil {
 		errors = append(errors, ScanError{
 			Path:      envPath,
@@ -60,7 +66,6 @@ func scanPoetryEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 		})
 		return packages, errors
 	}
-	defer file.Close()
 
 	lockModTime := getFileModTime(poetryLockPath)
 	interpreterVersion := getPoetryInterpreterVersion(envPath)
@@ -89,7 +94,7 @@ func scanPoetryEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 			// Try to extract license from installed METADATA in site-packages.
 			if sitePackagesDir != "" {
 				metadataPath := filepath.Join(sitePackagesDir, currentName+"-"+currentVersion+".dist-info", "METADATA")
-				if metaBytes, err := os.ReadFile(metadataPath); err == nil {
+				if metaBytes, err := safeio.ReadFile(metadataPath, maxPipMetadataSize); err == nil {
 					raw, spdx, tier := ExtractLicenseFromMetadata(string(metaBytes))
 					pkg.LicenseRaw = raw
 					pkg.LicenseSPDX = spdx
@@ -103,7 +108,7 @@ func scanPoetryEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 		currentVersion = ""
 	}
 
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 
@@ -186,9 +191,8 @@ func parseTomlKeyValue(line string) (string, string, bool) {
 func getPoetryInterpreterVersion(envPath string) string {
 	// Try to read pyproject.toml for the python version constraint.
 	pyprojectPath := filepath.Join(envPath, "pyproject.toml")
-	if file, err := os.Open(pyprojectPath); err == nil {
-		defer file.Close()
-		scanner := bufio.NewScanner(file)
+	if data, err := safeio.ReadFile(pyprojectPath, maxPyprojectSize); err == nil {
+		scanner := bufio.NewScanner(bytes.NewReader(data))
 		inDeps := false
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())

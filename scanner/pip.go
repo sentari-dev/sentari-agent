@@ -2,12 +2,15 @@ package scanner
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // pipScanner discovers global pip installs by matching site-packages
@@ -215,10 +218,13 @@ func findSitePackages(envPath string) string {
 // lib/pythonX.Y directory name.
 func detectInterpreterVersion(envPath string) string {
 	// Strategy 1: Parse pyvenv.cfg — most reliable for venvs.
+	// Read the whole file via safeio (symlink-refusing, size-capped)
+	// then scan it in memory; a plain os.Open would silently follow
+	// a pyvenv.cfg -> /etc/shadow symlink planted by an unprivileged
+	// user inside a venv directory they control.
 	pyvenvCfg := filepath.Join(envPath, "pyvenv.cfg")
-	if file, err := os.Open(pyvenvCfg); err == nil {
-		defer file.Close()
-		s := bufio.NewScanner(file)
+	if data, err := safeio.ReadFile(pyvenvCfg, maxPyvenvCfgSize); err == nil {
+		s := bufio.NewScanner(bytes.NewReader(data))
 		for s.Scan() {
 			line := s.Text()
 			// pyvenv.cfg contains "version = 3.11.0" or "version_info = 3.11.0.final.0"
@@ -264,14 +270,17 @@ func detectInterpreterVersion(envPath string) string {
 }
 
 // parseDistInfo parses METADATA file from a .dist-info directory.
-// The METADATA file is an RFC 822-style file with Name: and Version: headers.
+// The METADATA file is an RFC 822-style file with Name: and Version:
+// headers.  Read via safeio — a malicious site-packages entry that
+// planted a METADATA symlink to /etc/shadow would otherwise end up in
+// the scan payload we upload.  We read once and scan the bytes in-
+// memory for both header extraction and license parsing.
 func parseDistInfo(distInfoPath, envPath string) (PackageRecord, error) {
 	metadataPath := filepath.Join(distInfoPath, "METADATA")
-	file, err := os.Open(metadataPath)
+	data, err := safeio.ReadFile(metadataPath, maxPipMetadataSize)
 	if err != nil {
 		return PackageRecord{}, err
 	}
-	defer file.Close()
 
 	pkg := PackageRecord{
 		InstallPath:   distInfoPath,
@@ -279,7 +288,7 @@ func parseDistInfo(distInfoPath, envPath string) (PackageRecord, error) {
 		InstallerUser: getInstallerUser(distInfoPath),
 	}
 
-	s := bufio.NewScanner(file)
+	s := bufio.NewScanner(bytes.NewReader(data))
 	for s.Scan() {
 		line := s.Text()
 
@@ -318,25 +327,24 @@ func parseDistInfo(distInfoPath, envPath string) (PackageRecord, error) {
 		}
 	}
 
-	// Extract license info from the full METADATA content.
-	if metadataBytes, err := os.ReadFile(metadataPath); err == nil {
-		raw, spdx, tier := ExtractLicenseFromMetadata(string(metadataBytes))
-		pkg.LicenseRaw = raw
-		pkg.LicenseSPDX = spdx
-		pkg.LicenseTier = tier
-	}
+	// Extract license info from the same bytes we already have.
+	raw, spdx, tier := ExtractLicenseFromMetadata(string(data))
+	pkg.LicenseRaw = raw
+	pkg.LicenseSPDX = spdx
+	pkg.LicenseTier = tier
 
 	return pkg, nil
 }
 
 // parseEggInfo parses PKG-INFO file from a .egg-info directory.
+// Same safeio treatment as parseDistInfo — single read, scan bytes
+// in-memory for both header and license extraction.
 func parseEggInfo(eggInfoPath, envPath string) (PackageRecord, error) {
 	pkgInfoPath := filepath.Join(eggInfoPath, "PKG-INFO")
-	file, err := os.Open(pkgInfoPath)
+	data, err := safeio.ReadFile(pkgInfoPath, maxPipMetadataSize)
 	if err != nil {
 		return PackageRecord{}, err
 	}
-	defer file.Close()
 
 	pkg := PackageRecord{
 		InstallPath:   eggInfoPath,
@@ -344,7 +352,7 @@ func parseEggInfo(eggInfoPath, envPath string) (PackageRecord, error) {
 		InstallerUser: getInstallerUser(eggInfoPath),
 	}
 
-	s := bufio.NewScanner(file)
+	s := bufio.NewScanner(bytes.NewReader(data))
 	for s.Scan() {
 		line := s.Text()
 
@@ -380,9 +388,9 @@ func parseEggInfo(eggInfoPath, envPath string) (PackageRecord, error) {
 		}
 	}
 
-	// Extract license info from the full PKG-INFO content.
-	if pkgInfoBytes, err := os.ReadFile(pkgInfoPath); err == nil {
-		raw, spdx, tier := ExtractLicenseFromMetadata(string(pkgInfoBytes))
+	// Extract license info from the bytes we already have.
+	{
+		raw, spdx, tier := ExtractLicenseFromMetadata(string(data))
 		pkg.LicenseRaw = raw
 		pkg.LicenseSPDX = spdx
 		pkg.LicenseTier = tier
@@ -397,7 +405,7 @@ func parseEggInfo(eggInfoPath, envPath string) (PackageRecord, error) {
 // is extracted from the filename, and the version from PKG-INFO in the linked
 // source directory if available.
 func parseEggLink(eggLinkPath, sitePackagesPath string) (PackageRecord, error) {
-	data, err := readFileBounded(eggLinkPath, maxMetadataFileSize)
+	data, err := safeio.ReadFile(eggLinkPath, maxEggLinkSize)
 	if err != nil {
 		return PackageRecord{}, err
 	}
