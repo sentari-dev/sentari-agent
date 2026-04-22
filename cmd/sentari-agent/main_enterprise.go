@@ -163,13 +163,20 @@ func main() {
 
 	// Register and obtain certificates if not already present.
 	if !comms.CertsExist(certDir) {
-		slog.Info("registering agent", slog.String("hostname", hostname))
-		// Bootstrap request gets a distinct cycle ID so its server-side
-		// logs are easy to find later ("which agent registered at 14:02?").
+		// Mint the bootstrap request_id first, then bind every log
+		// line in the registration block to it.  Previously the
+		// "registering agent" / "save certificates failed" lines
+		// used bare slog calls, so none of them carried the
+		// request_id the outbound request was about to stamp onto
+		// the wire — correlating an agent enrol with the server log
+		// was harder than it should be.
 		regCtx := logging.WithRequestID(context.Background(), logging.NewRequestID())
+		regLog := logging.LoggerFromContext(regCtx)
+
+		regLog.Info("registering agent", slog.String("hostname", hostname))
 		regResp, deviceKeyPEM, err := bootstrapClient.RegisterWithToken(regCtx, hostname, enrollToken)
 		if err != nil {
-			slog.Error("registration failed", slog.String("err", err.Error()))
+			regLog.Error("registration failed", slog.String("err", err.Error()))
 			os.Exit(1)
 		}
 		if err := comms.SaveCertificates(
@@ -178,11 +185,11 @@ func main() {
 			[]byte(regResp.DeviceCert),
 			deviceKeyPEM,
 		); err != nil {
-			slog.Error("save certificates failed", slog.String("err", err.Error()))
+			regLog.Error("save certificates failed", slog.String("err", err.Error()))
 			os.Exit(1)
 		}
 		if err := comms.SaveDeviceID(certDir, regResp.DeviceID); err != nil {
-			slog.Warn("persist device_id failed", slog.String("err", err.Error()))
+			regLog.Warn("persist device_id failed", slog.String("err", err.Error()))
 		}
 		// Persist the server's license-map signing pubkey so subsequent
 		// scan cycles can verify signed /license-map envelopes without
@@ -193,10 +200,10 @@ func main() {
 			regResp.LicenseMapKeyID,
 			regResp.LicenseMapPubKey,
 		); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to persist license-map trust: %v\n", err)
+			regLog.Warn("persist license-map trust failed", slog.String("err", err.Error()))
 		}
-		logAudit(auditLog,"agent.registered", fmt.Sprintf("device_id=%s", regResp.DeviceID))
-		fmt.Fprintf(os.Stderr, "Certificates saved to %s\n", certDir)
+		logAudit(auditLog, "agent.registered", fmt.Sprintf("device_id=%s", regResp.DeviceID))
+		regLog.Info("certificates saved", slog.String("cert_dir", certDir))
 	}
 
 	// Load the persisted license-map trust (learned at register time)

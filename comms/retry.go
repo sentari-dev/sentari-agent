@@ -191,16 +191,31 @@ func (c *Client) doRequest(
 		var waitHint time.Duration
 		if resp != nil {
 			waitHint = parseRetryAfter(resp.Header.Get("Retry-After"))
-			// Read and discard so the connection can be reused.
-			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyLog))
+			// Drain fully (not just the first 512 B) so the keep-alive
+			// connection can be reused on the retry.  The server
+			// caps the response at maxResponseSize, so unbounded
+			// io.Copy is bounded in practice.
+			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
-			lastErr = fmt.Errorf("%s: HTTP %d", op, resp.StatusCode)
-			if !retryableStatus(resp.StatusCode) {
+		}
+		// http.Client.Do can return non-nil resp AND non-nil err
+		// (e.g. a CheckRedirect violation).  Combine both into
+		// lastErr so the final "giving up" error reflects the real
+		// cause, and base the retryability decision on the err.
+		switch {
+		case err != nil && resp != nil:
+			lastErr = fmt.Errorf("%s: %w (HTTP %d)", op, err, resp.StatusCode)
+			if !isRetryable(err) {
 				return nil, lastErr
 			}
-		} else {
+		case err != nil:
 			lastErr = fmt.Errorf("%s: %w", op, err)
 			if !isRetryable(err) {
+				return nil, lastErr
+			}
+		default: // err == nil, resp != nil with retryable status
+			lastErr = fmt.Errorf("%s: HTTP %d", op, resp.StatusCode)
+			if !retryableStatus(resp.StatusCode) {
 				return nil, lastErr
 			}
 		}

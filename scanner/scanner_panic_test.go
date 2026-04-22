@@ -21,14 +21,21 @@ func (panickingScanner) Scan(_ context.Context, _ Environment) ([]PackageRecord,
 }
 
 func TestScanEnvironment_RecoversFromPanic(t *testing.T) {
-	// Use Register() directly — the runner's private dispatch path
-	// looks up via scannerFor(EnvType), so just pre-register this
-	// scanner before calling scanEnvironment.
-	//
-	// Register() panics on duplicate; env_type "test_panic" must
-	// not collide with any builtin.  If this test ever runs twice
-	// in the same process (it shouldn't — `go test` forks per
-	// package) we'd need to guard; not worth it today.
+	// Snapshot + restore the global registry so registering
+	// "test_panic" here doesn't leak into TestScannerRegistry_*
+	// which assert "only builtins are registered".  Test order is
+	// alphabetical by default, but in -shuffle or race mode either
+	// ordering is possible.
+	regMu.Lock()
+	saved := make([]Scanner, len(registered))
+	copy(saved, registered)
+	regMu.Unlock()
+	t.Cleanup(func() {
+		regMu.Lock()
+		registered = saved
+		regMu.Unlock()
+	})
+
 	Register(panickingScanner{})
 
 	runner := NewRunner(Config{})
