@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"os"
 	"os/signal"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/sentari-dev/sentari-agent/audit"
 	"github.com/sentari-dev/sentari-agent/cache"
+	"github.com/sentari-dev/sentari-agent/common/logging"
 	"github.com/sentari-dev/sentari-agent/comms"
 	"github.com/sentari-dev/sentari-agent/config"
 	"github.com/sentari-dev/sentari-agent/sbom"
@@ -46,6 +48,10 @@ func main() {
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 
 	flag.Parse()
+
+	// Structured logging goes first — every line emitted after this
+	// point inherits the JSON format + the request_id contextvar.
+	logging.Configure()
 
 	if *versionFlag {
 		fmt.Printf("sentari-agent %s (enterprise)\n", scanner.Version)
@@ -157,10 +163,13 @@ func main() {
 
 	// Register and obtain certificates if not already present.
 	if !comms.CertsExist(certDir) {
-		fmt.Fprintf(os.Stderr, "Registering agent and obtaining certificates...\n")
-		regResp, deviceKeyPEM, err := bootstrapClient.RegisterWithToken(hostname, enrollToken)
+		slog.Info("registering agent", slog.String("hostname", hostname))
+		// Bootstrap request gets a distinct cycle ID so its server-side
+		// logs are easy to find later ("which agent registered at 14:02?").
+		regCtx := logging.WithRequestID(context.Background(), logging.NewRequestID())
+		regResp, deviceKeyPEM, err := bootstrapClient.RegisterWithToken(regCtx, hostname, enrollToken)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Registration failed: %v\n", err)
+			slog.Error("registration failed", slog.String("err", err.Error()))
 			os.Exit(1)
 		}
 		if err := comms.SaveCertificates(
@@ -169,11 +178,11 @@ func main() {
 			[]byte(regResp.DeviceCert),
 			deviceKeyPEM,
 		); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to save certificates: %v\n", err)
+			slog.Error("save certificates failed", slog.String("err", err.Error()))
 			os.Exit(1)
 		}
 		if err := comms.SaveDeviceID(certDir, regResp.DeviceID); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to persist device_id: %v\n", err)
+			slog.Warn("persist device_id failed", slog.String("err", err.Error()))
 		}
 		// Persist the server's license-map signing pubkey so subsequent
 		// scan cycles can verify signed /license-map envelopes without
@@ -232,8 +241,9 @@ func main() {
 	}
 
 	if *uploadFlag {
-		if err := runUpload(client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir); err != nil {
-			fmt.Fprintf(os.Stderr, "Upload failed: %v\n", err)
+		ctx := logging.WithRequestID(context.Background(), logging.NewRequestID())
+		if err := runUpload(ctx, client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir); err != nil {
+			logging.LoggerFromContext(ctx).Error("upload cycle failed", slog.String("err", err.Error()))
 			os.Exit(1)
 		}
 		return
@@ -245,8 +255,14 @@ func main() {
 
 // runUpload performs a single drain-cache → scan → upload cycle.
 // Registration is handled once at startup (see main()).
-func runUpload(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.Cache, agentCfg config.AgentConfig, hostname, sbomOutPath, certDir, dataDir string) error {
+//
+// ctx carries the cycle's request_id; every HTTP call and every log
+// line inside this cycle is stamped with it so the server-side trace
+// ("scan received", "CVE correlation fired", "alert delivered") joins
+// back to this single agent cycle.
+func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.Cache, agentCfg config.AgentConfig, hostname, sbomOutPath, certDir, dataDir string) error {
 	cycleStart := time.Now()
+	log := logging.LoggerFromContext(ctx)
 
 	// Refresh license map from server before scanning.  The response
 	// is a signed envelope; FetchLicenseMap verifies it and returns
@@ -254,31 +270,37 @@ func runUpload(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.
 	// verification next startup.  On any verification failure we keep
 	// serving the previously-cached overlay — never apply unverified
 	// data.
-	if lm, envelope, err := client.FetchLicenseMap(scanner.MapVersion()); err != nil {
-		fmt.Fprintf(os.Stderr, "License-map refresh failed (using cached): %v\n", err)
+	if lm, envelope, err := client.FetchLicenseMap(ctx, scanner.MapVersion()); err != nil {
+		log.Warn("license-map refresh failed (using cached)", slog.String("err", err.Error()))
 	} else if lm != nil {
 		scanner.ApplyOverlay(*lm)
 		cachePath := filepath.Join(dataDir, "license_map.json")
 		if err := scanner.SaveVerifiedEnvelopeToFile(cachePath, envelope); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to cache license map: %v\n", err)
+			log.Warn("failed to cache license map", slog.String("err", err.Error()))
 		}
-		fmt.Fprintf(os.Stderr, "License map updated to version %d\n", lm.Version)
+		log.Info("license map updated", slog.Int("version", lm.Version))
 	}
 
 	// Drain cached scans from previous offline runs (oldest first).
 	pending, err := scanCache.DequeuePending()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to read cache: %v\n", err)
+		log.Warn("failed to read cache", slog.String("err", err.Error()))
 	}
 	drained := 0
 	for _, cached := range pending {
-		if uploadErr := client.UploadScan(cached.Result); uploadErr != nil {
+		if uploadErr := client.UploadScan(ctx, cached.Result); uploadErr != nil {
 			logAudit(auditLog, "cache.drain.failed", fmt.Sprintf("queued=%d remaining=%d err=%v", cached.QueueID, len(pending)-drained, uploadErr))
-			fmt.Fprintf(os.Stderr, "Warning: failed to upload cached scan: %v\n", uploadErr)
+			log.Warn("failed to upload cached scan",
+				slog.Int64("queue_id", cached.QueueID),
+				slog.String("err", uploadErr.Error()),
+			)
 			break // Stop draining on first failure; keep items in queue.
 		}
 		if markErr := scanCache.MarkUploaded(cached.QueueID); markErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to mark scan %d as uploaded: %v\n", cached.QueueID, markErr)
+			log.Warn("failed to mark scan as uploaded",
+				slog.Int64("queue_id", cached.QueueID),
+				slog.String("err", markErr.Error()),
+			)
 		}
 		drained++
 	}
@@ -302,7 +324,7 @@ func runUpload(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.
 		MaxWorkers: 8,
 	}
 
-	result, err := scanner.NewScanner(cfg).Run(context.Background())
+	result, err := scanner.NewScanner(cfg).Run(ctx)
 	if err != nil {
 		logAudit(auditLog,"scan.failed", err.Error())
 		return fmt.Errorf("scan: %w", err)
@@ -325,7 +347,7 @@ func runUpload(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.
 		}
 	}
 
-	if uploadErr := client.UploadScan(result); uploadErr != nil {
+	if uploadErr := client.UploadScan(ctx, result); uploadErr != nil {
 		// Cache locally for the next run.
 		if cacheErr := scanCache.EnqueueScan(result); cacheErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to cache scan in SQLite: %v\n", cacheErr)
@@ -384,26 +406,34 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	for {
-		if err := runUpload(client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir); err != nil {
-			fmt.Fprintf(os.Stderr, "Cycle error: %v\n", err)
+		// Fresh request_id per cycle.  One scan, one CVE-correlation
+		// wave, one alert-delivery fan-out — all join on this ID.
+		ctx := logging.WithRequestID(context.Background(), logging.NewRequestID())
+		log := logging.LoggerFromContext(ctx)
+
+		if err := runUpload(ctx, client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir); err != nil {
+			log.Error("cycle error", slog.String("err", err.Error()))
 		}
 
 		// Poll server for configuration updates (scan interval, scan root, etc.).
-		if serverCfg, err := client.PollConfig(); err == nil {
+		if serverCfg, err := client.PollConfig(ctx); err == nil {
 			if serverCfg.ScanInterval > 0 {
 				newInterval := time.Duration(serverCfg.ScanInterval) * time.Second
 				if newInterval != scanInterval {
-					fmt.Fprintf(os.Stderr, "Scan interval changed: %v → %v\n", scanInterval, newInterval)
-					logAudit(auditLog,"config.updated", fmt.Sprintf("scan_interval=%d", serverCfg.ScanInterval))
+					log.Info("scan interval changed",
+						slog.Duration("old", scanInterval),
+						slog.Duration("new", newInterval),
+					)
+					logAudit(auditLog, "config.updated", fmt.Sprintf("scan_interval=%d", serverCfg.ScanInterval))
 					scanInterval = newInterval
 				}
 			}
 			if serverCfg.ScanRoot != "" {
 				cleaned := filepath.Clean(serverCfg.ScanRoot)
 				if !filepath.IsAbs(cleaned) {
-					fmt.Fprintf(os.Stderr, "Ignoring non-absolute scan_root from server: %s\n", serverCfg.ScanRoot)
+					log.Warn("ignoring non-absolute scan_root from server", slog.String("scan_root", serverCfg.ScanRoot))
 				} else if isScanRootDenied(cleaned) {
-					fmt.Fprintf(os.Stderr, "Ignoring restricted scan_root from server: %s\n", serverCfg.ScanRoot)
+					log.Warn("ignoring restricted scan_root from server", slog.String("scan_root", serverCfg.ScanRoot))
 				} else {
 					agentCfg.Scanner.ScanRoot = cleaned
 				}
@@ -412,7 +442,10 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 				agentCfg.Scanner.MaxDepth = serverCfg.MaxDepth
 			}
 		} else {
-			fmt.Fprintf(os.Stderr, "Config poll failed (using cached interval %v): %v\n", scanInterval, err)
+			log.Warn("config poll failed (using cached interval)",
+				slog.Duration("interval", scanInterval),
+				slog.String("err", err.Error()),
+			)
 		}
 
 		// Sleep with ±10% jitter to avoid thundering-herd on the server.
@@ -421,18 +454,17 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 		jitter := cryptoJitter(scanInterval)
 		sleepDuration := scanInterval + jitter
 		nextCycleAt := time.Now().Add(sleepDuration)
-		fmt.Fprintf(os.Stderr, "%s sleeping for %s — next cycle at %s\n",
-			time.Now().Format(time.RFC3339),
-			sleepDuration.Round(time.Second),
-			nextCycleAt.Format(time.RFC3339),
+		log.Info("sleeping until next cycle",
+			slog.Duration("sleep", sleepDuration),
+			slog.String("next_at", nextCycleAt.Format(time.RFC3339)),
 		)
 		sleepTimer := time.NewTimer(sleepDuration)
 
 		select {
 		case sig := <-sigCh:
 			sleepTimer.Stop()
-			fmt.Fprintf(os.Stderr, "Received %s — shutting down gracefully\n", sig)
-			logAudit(auditLog,"agent.shutdown", fmt.Sprintf("signal=%s", sig))
+			log.Info("shutting down gracefully", slog.String("signal", sig.String()))
+			logAudit(auditLog, "agent.shutdown", fmt.Sprintf("signal=%s", sig))
 			return
 		case <-sleepTimer.C:
 			// Next cycle.

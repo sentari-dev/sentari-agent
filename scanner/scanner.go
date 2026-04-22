@@ -161,7 +161,14 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 // scanEnvironment looks up the scanner that produced env and delegates to
 // its Scan method.  This is the sole dispatch path after the Sprint 13
 // plugin-registry refactor — there are no switch arms over EnvType.
-func (r *Runner) scanEnvironment(ctx context.Context, env Environment) scanJobResult {
+//
+// A panic inside a per-ecosystem parser (malformed package DB, parser
+// bug on an unexpected fixture) is caught here and turned into a
+// typed ScanError.  Without the recover, a single malformed .deb or
+// a corrupt RPM header would abort the whole scan cycle and force
+// the cached-scan drain path — the scan_errors surface is exactly
+// where this belongs.
+func (r *Runner) scanEnvironment(ctx context.Context, env Environment) (result scanJobResult) {
 	s := scannerFor(env.EnvType)
 	if s == nil {
 		return scanJobResult{errors: []ScanError{{
@@ -171,6 +178,16 @@ func (r *Runner) scanEnvironment(ctx context.Context, env Environment) scanJobRe
 			Timestamp: time.Now().UTC(),
 		}}}
 	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			result = scanJobResult{errors: []ScanError{{
+				Path:      env.Path,
+				EnvType:   env.EnvType,
+				Error:     fmt.Sprintf("scanner panic: %v", rec),
+				Timestamp: time.Now().UTC(),
+			}}}
+		}
+	}()
 	pkgs, errs := s.Scan(ctx, env)
 	return scanJobResult{packages: pkgs, errors: errs}
 }
