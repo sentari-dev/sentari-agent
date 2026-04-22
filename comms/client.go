@@ -5,6 +5,7 @@ package comms
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -89,6 +90,17 @@ type AgentConfig struct {
 type Client struct {
 	serverURL  string
 	httpClient *http.Client
+	// retry, when non-nil, overrides the defaultRetryConfig used by
+	// doRequest.  Tests set this to shrink waits; production leaves
+	// it nil so the 5-attempt / 60 s-cap defaults apply.
+	retry *RetryConfig
+}
+
+// SetRetryConfig installs a custom retry policy on the client.
+// Intended for tests — production callers should stick with the
+// defaults tuned for the hourly scan cadence.
+func (c *Client) SetRetryConfig(cfg RetryConfig) {
+	c.retry = &cfg
 }
 
 // NewClient creates a new mTLS client. If cert/key files are not provided,
@@ -269,14 +281,18 @@ func shouldBypass(host string, bypassList []string) bool {
 // Register sends an agent registration request to the server and returns the
 // issued device certificate bundle along with the locally-generated private key.
 func (c *Client) Register(hostname string) (*RegisterResponse, []byte, error) {
-	return c.RegisterWithToken(hostname, "")
+	return c.RegisterWithToken(context.Background(), hostname, "")
 }
 
 // RegisterWithToken sends a registration request including an enrollment token.
 // The agent generates its own ECDSA P-256 keypair and sends a CSR to the server.
 // The server signs the CSR and returns the device certificate + CA certificate.
 // The private key never leaves the agent.
-func (c *Client) RegisterWithToken(hostname, enrollmentToken string) (*RegisterResponse, []byte, error) {
+//
+// ctx carries the scan-cycle request_id so the registration log line on
+// the server joins the agent's startup trace.  Retries on transient
+// network / 429 / 5xx via doRequest with exponential backoff.
+func (c *Client) RegisterWithToken(ctx context.Context, hostname, enrollmentToken string) (*RegisterResponse, []byte, error) {
 	// Generate ECDSA P-256 keypair on the agent.
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -315,13 +331,19 @@ func (c *Client) RegisterWithToken(hostname, enrollmentToken string) (*RegisterR
 	}
 	body, _ := json.Marshal(payload)
 
-	resp, err := c.httpClient.Post(
-		c.serverURL+"/api/v1/agent/register",
-		"application/json",
-		bytes.NewReader(body),
-	)
+	// reqBuilder must produce a fresh Request on every attempt — the
+	// retry path discards resp.Body but the next attempt still needs
+	// its own body reader, so we re-wrap the same bytes.
+	resp, err := c.doRequest(ctx, "agent_register", func(ctx context.Context) (*http.Request, error) {
+		r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.serverURL+"/api/v1/agent/register", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		r.Header.Set("Content-Type", "application/json")
+		return r, nil
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("registration request: %w", err)
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 
@@ -453,20 +475,25 @@ func LoadDeviceID(certDir string) string {
 	return strings.TrimSpace(string(data))
 }
 
-// UploadScan sends scan results to the server.
-func (c *Client) UploadScan(result *scanner.ScanResult) error {
+// UploadScan sends scan results to the server.  Retries on transient
+// network / 429 / 5xx via doRequest.  The caller's ctx must carry the
+// scan-cycle request_id so the upload joins the correlation chain.
+func (c *Client) UploadScan(ctx context.Context, result *scanner.ScanResult) error {
 	body, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("marshal scan result: %w", err)
 	}
 
-	resp, err := c.httpClient.Post(
-		c.serverURL+"/api/v1/agent/scan",
-		"application/json",
-		bytes.NewReader(body),
-	)
+	resp, err := c.doRequest(ctx, "upload_scan", func(ctx context.Context) (*http.Request, error) {
+		r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.serverURL+"/api/v1/agent/scan", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		r.Header.Set("Content-Type", "application/json")
+		return r, nil
+	})
 	if err != nil {
-		return fmt.Errorf("scan upload: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
 
@@ -479,10 +506,12 @@ func (c *Client) UploadScan(result *scanner.ScanResult) error {
 }
 
 // PollConfig fetches the latest agent configuration from the server.
-func (c *Client) PollConfig() (*AgentConfig, error) {
-	resp, err := c.httpClient.Get(c.serverURL + "/api/v1/agent/config")
+func (c *Client) PollConfig(ctx context.Context) (*AgentConfig, error) {
+	resp, err := c.doRequest(ctx, "poll_config", func(ctx context.Context) (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, c.serverURL+"/api/v1/agent/config", nil)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("config poll: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
@@ -506,10 +535,12 @@ func (c *Client) PollConfig() (*AgentConfig, error) {
 //
 // Returns (nil, nil, nil) when the server's version is not newer than
 // currentVersion — no update needed, no error.
-func (c *Client) FetchLicenseMap(currentVersion int) (*scanner.LicenseMap, []byte, error) {
-	resp, err := c.httpClient.Get(c.serverURL + "/api/v1/agent/license-map")
+func (c *Client) FetchLicenseMap(ctx context.Context, currentVersion int) (*scanner.LicenseMap, []byte, error) {
+	resp, err := c.doRequest(ctx, "fetch_license_map", func(ctx context.Context) (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, c.serverURL+"/api/v1/agent/license-map", nil)
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("license-map fetch: %w", err)
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 
