@@ -53,6 +53,18 @@ const (
 	maxManifestBytes      = 1 * 1024 * 1024
 	maxJARBytes           = 512 * 1024 * 1024
 	maxRecordsPerJAR      = 10_000
+	// maxNestedDepth bounds the recursion into Spring Boot / Quarkus
+	// / shaded uber-jars.  Real-world uber-jars nest 1 level (Spring
+	// Boot BOOT-INF/lib/*.jar).  A shaded uber-jar that itself
+	// contains another uber-jar is 2.  Beyond 3 is almost certainly
+	// an attacker-crafted zip bomb designed to exhaust the scanner;
+	// we refuse and emit a ScanError rather than recurse indefinitely.
+	maxNestedDepth = 3
+	// maxNestedJarBytes is the per-nested-member read cap.  If a
+	// nested JAR entry decompresses to more than this, we stop
+	// reading and surface a ScanError.  Matches maxJARBytes for
+	// outer files — one member can't be larger than a whole JAR.
+	maxNestedJarBytes = maxJARBytes
 )
 
 // PomProperties is the parsed shape of a META-INF/maven .pom.properties
@@ -241,16 +253,16 @@ func parseFilename(name string) (artifact, version string) {
 	return stem, ""
 }
 
-// extractFromJar is the top-level entrypoint.  Given a path to a JAR,
-// it opens the zip, tries each metadata source in precedence order,
-// and returns the resulting PackageRecord(s) plus any non-fatal scan
-// errors encountered along the way.
+// extractFromJar is the top-level entrypoint.  Given a path to a JAR
+// on disk, it opens the zip and delegates to extractFromReader, which
+// is also the recursion point for nested-jar traversal (Spring Boot /
+// Quarkus uber-jars — see nested_jar.go).
 //
 // Invariants:
 //   - Never panics — corrupt zips, missing metadata, oversized members
 //     all surface as ScanError entries.
-//   - Never emits more than maxRecordsPerJAR records.
-//   - Never reads more than maxJARBytes from the underlying file.
+//   - Never emits more than maxRecordsPerJAR records per outer JAR.
+//   - Recursion depth bounded by maxNestedDepth.
 func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanError) {
 	rc, err := zip.OpenReader(jarPath)
 	if err != nil {
@@ -261,49 +273,119 @@ func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanErro
 		}}
 	}
 	defer rc.Close()
+	return extractFromReader(&rc.Reader, jarPath, 0)
+}
 
-	// Collect any pom.properties files first; if we find any, they win.
-	var pomEntries []*zip.File
-	var manifestEntry *zip.File
-	for _, f := range rc.File {
-		// Normalise to forward slashes; zip stores forward slashes per
-		// spec, but defensive.
+// extractFromReader is the recursion core.  Given an already-opened
+// ``*zip.Reader`` and a ``displayPath`` naming this archive (for
+// outer JARs: the filesystem path; for nested: ``outer!/inner.jar``),
+// it applies the precedence rules for identity, then descends into
+// any nested .jar entries found.
+//
+// ``depth`` starts at 0 for the physical outer JAR; increases by 1
+// per recursion.  When depth reaches maxNestedDepth, this function
+// still extracts identity but refuses to recurse further and emits a
+// ScanError naming the depth-4 child that was skipped.
+func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.PackageRecord, []scanner.ScanError) {
+	// Single pass over entries to classify them.  This is cheaper than
+	// three separate passes and keeps the O(n) bound explicit.
+	var (
+		pomEntries    []*zip.File
+		manifestEntry *zip.File
+		nestedJARs    []*zip.File
+	)
+	for _, f := range r.File {
 		name := path.Clean(f.Name)
-		// Zip-slip guard: refuse entries that look like they walk out
-		// of the archive's virtual root (``../whatever`` after clean).
-		// The extractor doesn't extract-to-disk, but an attacker-named
-		// entry "../../../etc/passwd" would otherwise be mistakenly
-		// examined for metadata.  path.Clean reduces it to a minimal
-		// form starting with ".."; we skip those.
+		// Zip-slip guard: refuse entries that try to walk out of the
+		// archive's virtual root (``../etc/passwd`` etc).  The
+		// extractor doesn't extract-to-disk, but a malicious entry
+		// name could otherwise mislead the metadata pickers.
 		if strings.HasPrefix(name, "..") {
 			continue
 		}
-		if strings.HasPrefix(f.Name, "META-INF/maven/") &&
-			strings.HasSuffix(f.Name, "/pom.properties") {
-			pomEntries = append(pomEntries, f)
+		// Directory entries carry zero data — skip.
+		if strings.HasSuffix(f.Name, "/") {
+			continue
 		}
-		if f.Name == "META-INF/MANIFEST.MF" {
+		switch {
+		case strings.HasPrefix(f.Name, "META-INF/maven/") &&
+			strings.HasSuffix(f.Name, "/pom.properties"):
+			pomEntries = append(pomEntries, f)
+		case f.Name == "META-INF/MANIFEST.MF":
 			manifestEntry = f
+		case isJARLike(f.Name):
+			nestedJARs = append(nestedJARs, f)
 		}
 	}
 
-	var records []scanner.PackageRecord
-	var errs []scanner.ScanError
+	records, errs := extractIdentity(displayPath, pomEntries, manifestEntry)
 
-	// Precedence 1 — pom.properties.
-	for _, f := range pomEntries {
+	// Descend into nested JARs.  Every .jar / .war / .ear / .jmod
+	// inside this archive is its own artefact with its own coordinates
+	// — Spring Boot / Quarkus / shaded uber-jars all end up here.
+	// Agnostic to framework: we descend based on filename suffix, not
+	// on Spring Boot's ``BOOT-INF/lib/`` path, so new uber-jar
+	// conventions Just Work.
+	for _, f := range nestedJARs {
 		if len(records) >= maxRecordsPerJAR {
 			errs = append(errs, scanner.ScanError{
-				Path:    jarPath,
+				Path:    displayPath,
 				EnvType: EnvJVM,
-				Error:   fmt.Sprintf("record cap exceeded (%d); remaining entries skipped", maxRecordsPerJAR),
+				Error:   fmt.Sprintf("record cap exceeded (%d); remaining nested jars skipped", maxRecordsPerJAR),
 			})
 			break
 		}
+		childPath := displayPath + "!/" + f.Name
+		if depth+1 > maxNestedDepth {
+			errs = append(errs, scanner.ScanError{
+				Path:    childPath,
+				EnvType: EnvJVM,
+				Error:   fmt.Sprintf("nested JAR depth cap exceeded (max %d); subtree skipped", maxNestedDepth),
+			})
+			continue
+		}
+
+		body, readErr := readZipMember(f, maxNestedJarBytes)
+		if readErr != nil {
+			errs = append(errs, scanner.ScanError{
+				Path:    childPath,
+				EnvType: EnvJVM,
+				Error:   fmt.Sprintf("read nested jar: %v", readErr),
+			})
+			continue
+		}
+		childReader, zerr := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+		if zerr != nil {
+			errs = append(errs, scanner.ScanError{
+				Path:    childPath,
+				EnvType: EnvJVM,
+				Error:   fmt.Sprintf("parse nested jar: %v", zerr),
+			})
+			continue
+		}
+		childRecs, childErrs := extractFromReader(childReader, childPath, depth+1)
+		records = append(records, childRecs...)
+		errs = append(errs, childErrs...)
+	}
+
+	return records, errs
+}
+
+// extractIdentity runs the Precedence 1-3 rules on the three entry
+// sets classified by the caller.  Returns the identity records for
+// the archive *itself* — nested-jar records are a separate concern
+// handled by the recursion.
+func extractIdentity(displayPath string, pomEntries []*zip.File, manifestEntry *zip.File) ([]scanner.PackageRecord, []scanner.ScanError) {
+	var records []scanner.PackageRecord
+	var errs []scanner.ScanError
+
+	// Precedence 1 — pom.properties (can produce multiple records for
+	// a shaded uber-jar).
+	for _, f := range pomEntries {
 		body, err := readZipMember(f, maxPomPropertiesBytes)
 		if err != nil {
 			errs = append(errs, scanner.ScanError{
-				Path:    jarPath + "!/" + f.Name,
+				Path:    displayPath + "!/" + f.Name,
 				EnvType: EnvJVM,
 				Error:   fmt.Sprintf("read pom.properties: %v", err),
 			})
@@ -312,26 +394,25 @@ func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanErro
 		pp, err := parsePomProperties(body)
 		if err != nil {
 			errs = append(errs, scanner.ScanError{
-				Path:    jarPath + "!/" + f.Name,
+				Path:    displayPath + "!/" + f.Name,
 				EnvType: EnvJVM,
 				Error:   err.Error(),
 			})
 			continue
 		}
 		// A pom.properties with missing groupId OR artifactId is
-		// unusable as an identity; skip it and let the caller
-		// potentially fall through to MANIFEST.MF.  Missing version
-		// is kept because it's still a useful record for the CVE
-		// layer to match against wildcard advisories.
+		// unusable as an identity; skip it and let the caller fall
+		// through.  Missing version is still a useful record for
+		// wildcard CVE advisories.
 		if pp.GroupID == "" || pp.ArtifactID == "" {
 			continue
 		}
 		records = append(records, scanner.PackageRecord{
 			Name:        pp.GroupID + ":" + pp.ArtifactID,
 			Version:     pp.Version,
-			InstallPath: jarPath,
+			InstallPath: displayPath,
 			EnvType:     EnvJVM,
-			Environment: jarPath,
+			Environment: displayPath,
 		})
 	}
 	if len(records) > 0 {
@@ -343,7 +424,7 @@ func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanErro
 		body, err := readZipMember(manifestEntry, maxManifestBytes)
 		if err != nil {
 			errs = append(errs, scanner.ScanError{
-				Path:    jarPath + "!/META-INF/MANIFEST.MF",
+				Path:    displayPath + "!/META-INF/MANIFEST.MF",
 				EnvType: EnvJVM,
 				Error:   fmt.Sprintf("read manifest: %v", err),
 			})
@@ -351,11 +432,11 @@ func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanErro
 			mi, perr := parseManifest(body)
 			if perr != nil {
 				errs = append(errs, scanner.ScanError{
-					Path:    jarPath + "!/META-INF/MANIFEST.MF",
+					Path:    displayPath + "!/META-INF/MANIFEST.MF",
 					EnvType: EnvJVM,
 					Error:   perr.Error(),
 				})
-			} else if rec, ok := manifestToRecord(jarPath, mi); ok {
+			} else if rec, ok := manifestToRecord(displayPath, mi); ok {
 				records = append(records, rec)
 			}
 		}
@@ -364,20 +445,37 @@ func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanErro
 		return records, errs
 	}
 
-	// Precedence 3 — filename fallback.  Always yields at least an
-	// empty-name record on a .jar input; the caller decides whether
-	// empty-name records are worth uploading (they currently are —
-	// missing JVM packages in the inventory is worse than having a
-	// row whose Name is less authoritative).
-	artifact, version := parseFilename(jarPath)
+	// Precedence 3 — filename fallback.  Parses the trailing filename
+	// component; for nested paths like ``outer!/BOOT-INF/lib/x.jar`` we
+	// want the inner filename only, so split on the last ``/``.
+	filename := displayPath
+	if idx := strings.LastIndex(filename, "/"); idx >= 0 {
+		filename = filename[idx+1:]
+	}
+	artifact, version := parseFilename(filename)
 	records = append(records, scanner.PackageRecord{
 		Name:        artifact,
 		Version:     version,
-		InstallPath: jarPath,
+		InstallPath: displayPath,
 		EnvType:     EnvJVM,
-		Environment: jarPath,
+		Environment: displayPath,
 	})
 	return records, errs
+}
+
+// isJARLike returns true if the given archive entry path looks like a
+// Java archive we should try to descend into.  Deliberately agnostic
+// of Spring Boot / Quarkus / shaded conventions — any archive-named
+// entry is a candidate.  Framework-specific path checks would break
+// as soon as the next uber-jar layout appears.
+func isJARLike(name string) bool {
+	lower := strings.ToLower(name)
+	for _, ext := range []string{".jar", ".war", ".ear", ".jmod"} {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 // manifestToRecord turns a parsed ManifestInfo into a PackageRecord.
