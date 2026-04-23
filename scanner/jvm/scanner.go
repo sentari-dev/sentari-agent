@@ -26,6 +26,12 @@ const (
 	layoutMavenCache  = "maven-cache"
 	layoutGradleCache = "gradle-cache"
 	layoutJDKRuntime  = "jdk-runtime"
+	layoutTomcat      = "tomcat"
+	layoutJBoss       = "jboss-wildfly"
+	layoutWebLogic    = "weblogic"
+	layoutWebSphere   = "websphere"
+	layoutJetty       = "jetty"
+	layoutGlassFish   = "glassfish-payara"
 )
 
 // Scanner implements scanner.Scanner and scanner.RootScanner.  The
@@ -56,6 +62,12 @@ func (Scanner) DiscoverAll(ctx context.Context) ([]scanner.Environment, []scanne
 	envs = append(envs, discoverMavenCache()...)
 	envs = append(envs, discoverGradleCache()...)
 	envs = append(envs, discoverJDK()...)
+	envs = append(envs, discoverTomcat()...)
+	envs = append(envs, discoverJBoss()...)
+	envs = append(envs, discoverWebLogic()...)
+	envs = append(envs, discoverWebSphere()...)
+	envs = append(envs, discoverJetty()...)
+	envs = append(envs, discoverGlassFish()...)
 	return envs, nil
 }
 
@@ -67,7 +79,9 @@ func (Scanner) DiscoverAll(ctx context.Context) ([]scanner.Environment, []scanne
 func (Scanner) Scan(ctx context.Context, env scanner.Environment) ([]scanner.PackageRecord, []scanner.ScanError) {
 	_ = ctx // reserved for cancellation
 	switch env.Name {
-	case layoutMavenCache, layoutGradleCache:
+	case layoutMavenCache, layoutGradleCache,
+		layoutTomcat, layoutJBoss, layoutWebLogic,
+		layoutWebSphere, layoutJetty, layoutGlassFish:
 		return scanDirTree(env.Path)
 	case layoutJDKRuntime:
 		return scanJDKRuntime(env.Path)
