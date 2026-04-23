@@ -39,6 +39,21 @@ func TestScanner_DiscoverAll_MavenAndGradle(t *testing.T) {
 	t.Setenv("MAVEN_HOME", "")
 	t.Setenv("GRADLE_USER_HOME", "")
 
+	// Redirect every well-known-roots slice at an empty list so real
+	// host installs (/opt/homebrew/lib, /usr/lib/jvm/*, …) can't leak
+	// into this test's assertion.  Restored via t.Cleanup.
+	origGenericOpt := genericOptRoots
+	origGenericDirect := genericDirectRoots
+	origJDKRoots := jdkWellKnownRoots
+	t.Cleanup(func() {
+		genericOptRoots = origGenericOpt
+		genericDirectRoots = origGenericDirect
+		jdkWellKnownRoots = origJDKRoots
+	})
+	genericOptRoots = nil
+	genericDirectRoots = nil
+	jdkWellKnownRoots = nil
+
 	var s Scanner
 	envs, errs := s.DiscoverAll(context.Background())
 	if len(errs) > 0 {

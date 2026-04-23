@@ -1,9 +1,21 @@
-// This file defines the top-level ``jvm`` Scanner plugin.  The plugin
-// deliberately does NOT ``Register()`` itself in init() yet — that
-// lands in Task 11 of the Sprint-17 plan so the overall flow can be
-// reviewed separately from the per-surface discoverers.  Until then,
-// the scanner-orchestrator doesn't know about the JVM plugin; this
-// package's tests construct Scanner values directly.
+// Package jvm is the Sentari scanner plugin for the Java / JVM
+// ecosystem.  It discovers and inventories every JAR / WAR / EAR /
+// JMOD the agent can find across developer workstations (Maven +
+// Gradle caches), JDK runtimes, the six major app servers (Tomcat,
+// JBoss/WildFly, WebLogic, WebSphere, Jetty, GlassFish/Payara), and
+// the generic /opt + /usr/share/java dumping grounds.  Uber-jar
+// formats (Spring Boot, Quarkus, shaded) are traversed recursively
+// to the plan's depth-3 cap so transitive dependencies surface as
+// first-class records.
+//
+// The plugin registers itself with the scanner registry at init()
+// time; ``agent/scanner/scanner.go`` discovers it via the same
+// mechanism as every other ecosystem.  No explicit wiring is
+// required in the orchestrator.
+//
+// ADRs 0002, 0003 and the Sprint-17 plan
+// (docs/superpowers/plans/2026-04-23-jvm-scanner.md) explain the
+// design decisions behind this package.
 package jvm
 
 import (
@@ -15,6 +27,10 @@ import (
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
+
+func init() {
+	scanner.Register(Scanner{})
+}
 
 // Layout tags carried on Environment.Name so Scan() can dispatch to
 // the right walker without introducing separate env_types for every
@@ -32,6 +48,7 @@ const (
 	layoutWebSphere   = "websphere"
 	layoutJetty       = "jetty"
 	layoutGlassFish   = "glassfish-payara"
+	layoutGeneric     = "generic-lib-dir"
 )
 
 // Scanner implements scanner.Scanner and scanner.RootScanner.  The
@@ -68,6 +85,17 @@ func (Scanner) DiscoverAll(ctx context.Context) ([]scanner.Environment, []scanne
 	envs = append(envs, discoverWebSphere()...)
 	envs = append(envs, discoverJetty()...)
 	envs = append(envs, discoverGlassFish()...)
+
+	// Generic runs LAST and receives the exclusion list of
+	// already-emitted paths.  Generic lib-dir candidates that live
+	// inside an app-server install tree (e.g. /opt/tomcat/lib under
+	// an already-emitted /opt/tomcat) are skipped so JARs inside
+	// specialised roots are scanned exactly once.
+	alreadyCovered := make([]string, 0, len(envs))
+	for _, e := range envs {
+		alreadyCovered = append(alreadyCovered, e.Path)
+	}
+	envs = append(envs, discoverGeneric(alreadyCovered)...)
 	return envs, nil
 }
 
@@ -81,7 +109,8 @@ func (Scanner) Scan(ctx context.Context, env scanner.Environment) ([]scanner.Pac
 	switch env.Name {
 	case layoutMavenCache, layoutGradleCache,
 		layoutTomcat, layoutJBoss, layoutWebLogic,
-		layoutWebSphere, layoutJetty, layoutGlassFish:
+		layoutWebSphere, layoutJetty, layoutGlassFish,
+		layoutGeneric:
 		return scanDirTree(env.Path)
 	case layoutJDKRuntime:
 		return scanJDKRuntime(env.Path)
