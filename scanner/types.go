@@ -72,6 +72,16 @@ type PackageRecord struct {
 	LicenseRaw         string `json:"license_raw"`
 	LicenseSPDX        string `json:"license_spdx"`
 	LicenseTier        string `json:"license_tier"`
+	// Container-origin fields — populated only when the scan was
+	// performed inside a container's merged rootfs (Sprint-17
+	// container-image scanner, opt-in via Config.ScanContainers).
+	// Empty on all host-filesystem records.  Server-side filters
+	// "show me CVEs inside containers" key on ContainerImageID != "".
+	ContainerImageID   string   `json:"container_image_id,omitempty"`
+	ContainerImageTags []string `json:"container_image_tags,omitempty"`
+	ContainerID        string   `json:"container_id,omitempty"`
+	ContainerName      string   `json:"container_name,omitempty"`
+	ContainerRuntime   string   `json:"container_runtime,omitempty"`
 }
 
 // ScanError records a non-fatal error encountered during scanning. The scanner
@@ -94,6 +104,31 @@ type ScanResult struct {
 	Packages     []PackageRecord `json:"packages"`
 	Errors       []ScanError     `json:"errors"`
 	AgentVersion string          `json:"agent_version"`
+	// ContainerTargets lists every container/image the container
+	// discoverer enumerated this scan cycle.  Informational: agents
+	// may have ScanContainers disabled yet still surface "which
+	// containers live on this host" in the fleet dashboard.
+	// Populated only when ScanContainers is true OR when the caller
+	// explicitly invokes the discoverer; otherwise nil.
+	ContainerTargets []ContainerTargetSummary `json:"container_targets,omitempty"`
+}
+
+// ContainerTargetSummary is the informational shape of a discovered
+// container or image, carried on ScanResult so the server can
+// populate a "containers on this host" dashboard without having to
+// wait for the full merged-view scan.  The scan-result schema
+// expands via optional fields only; omitempty keeps the JSON quiet
+// on hosts with no containers.
+type ContainerTargetSummary struct {
+	Runtime       string   `json:"runtime"`
+	ImageID       string   `json:"image_id"`
+	ImageTags     []string `json:"image_tags,omitempty"`
+	ContainerID   string   `json:"container_id,omitempty"`
+	ContainerName string   `json:"container_name,omitempty"`
+	// LayerCount is informational: a high count can indicate a
+	// bloated uber-image and drives the "slow scan" explanation in
+	// support tickets.
+	LayerCount int `json:"layer_count"`
 }
 
 // Config holds scanner configuration.
@@ -101,5 +136,22 @@ type Config struct {
 	ScanRoot   string // Filesystem root to scan (default: / on Linux, C:\ on Windows)
 	MaxDepth   int    // Max directory traversal depth (default: 8)
 	MaxWorkers int    // Max concurrent environment scanners (default: 8)
+	// ScanContainers enables the Sprint-17 container-image scanner.
+	// When true, Runner.Run (via the orchestration wrapper in
+	// scanner/containers) discovers every image/container on the
+	// host from supported runtimes (Docker, Podman, CRI-O), builds
+	// a virtual merged rootfs per target, and runs the existing
+	// plugin registry against each.  Defaults to false: fleet-wide
+	// rollout is opt-in until the performance shape is measured.
+	// Env override: SENTARI_SCAN_CONTAINERS=true.
+	ScanContainers bool
+	// MaxContainersPerCycle caps the number of containers scanned
+	// per cycle to protect against CI nodes with hundreds of
+	// ephemeral containers.  0 = use default (100).
+	MaxContainersPerCycle int
+	// PerContainerTimeout bounds the time spent scanning one
+	// container.  Exceeded => ScanError, continue with next.
+	// 0 = use default (60s).
+	PerContainerTimeout time.Duration
 }
 

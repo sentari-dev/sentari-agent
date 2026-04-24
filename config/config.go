@@ -33,6 +33,13 @@ type ScannerConfig struct {
 	ScanRoot string // Filesystem root to scan (default: / or C:\)
 	MaxDepth int    // Max directory depth (default: 8)
 	Interval int    // Scan interval in seconds (default: 3600)
+	// ScanContainers enables the Sprint-17 container-image scanner
+	// (Docker / Podman / CRI-O — containerd deferred).  INI key:
+	// ``[scanner] containers = true``.  Also honoured via the
+	// ``SENTARI_SCAN_CONTAINERS=true`` env override at main.go.
+	// Defaults to false: off-by-default until fleet telemetry
+	// validates the performance shape on real hosts.
+	ScanContainers bool
 }
 
 // ProxyConfig holds forward proxy settings.
@@ -158,6 +165,17 @@ func (c *AgentConfig) set(section, key, value string) error {
 				return fmt.Errorf("interval must be positive, got %d", v)
 			}
 			c.Scanner.Interval = v
+		case "containers":
+			// Accept the usual INI bool flavours so operators
+			// don't have to remember which one the parser wants.
+			switch strings.ToLower(value) {
+			case "true", "1", "yes", "on":
+				c.Scanner.ScanContainers = true
+			case "false", "0", "no", "off", "":
+				c.Scanner.ScanContainers = false
+			default:
+				return fmt.Errorf("invalid containers value %q (want true/false)", value)
+			}
 		default:
 			log.Printf("config: unknown key [%s] %s — ignored", section, key)
 		}

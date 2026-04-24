@@ -26,6 +26,7 @@ import (
 	"github.com/sentari-dev/sentari-agent/config"
 	"github.com/sentari-dev/sentari-agent/sbom"
 	"github.com/sentari-dev/sentari-agent/scanner"
+	"github.com/sentari-dev/sentari-agent/scanner/containers"
 	// Blank import: pulls in the JVM plugin so its init()
 	// registers with scanner's registry at binary startup.  See
 	// the matching comment in main.go (OSS build).
@@ -330,9 +331,13 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 	logAudit(auditLog,"scan.started", fmt.Sprintf("hostname=%s", hostname))
 
 	cfg := scanner.Config{
-		ScanRoot:   agentCfg.Scanner.ScanRoot,
-		MaxDepth:   agentCfg.Scanner.MaxDepth,
-		MaxWorkers: 8,
+		ScanRoot:       agentCfg.Scanner.ScanRoot,
+		MaxDepth:       agentCfg.Scanner.MaxDepth,
+		MaxWorkers:     8,
+		ScanContainers: agentCfg.Scanner.ScanContainers,
+	}
+	if v := os.Getenv("SENTARI_SCAN_CONTAINERS"); v == "true" || v == "1" {
+		cfg.ScanContainers = true
 	}
 
 	result, err := scanner.NewScanner(cfg).Run(ctx)
@@ -341,7 +346,15 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 		return fmt.Errorf("scan: %w", err)
 	}
 
-	logAudit(auditLog,"scan.completed", fmt.Sprintf("packages=%d", len(result.Packages)))
+	// Opt-in container-scan phase.  Failures here never bubble up
+	// — the host scan already succeeded and we don't want one
+	// bad image to derail the upload.
+	if cfg.ScanContainers {
+		containers.ScanAndAppend(ctx, cfg, result)
+	}
+
+	logAudit(auditLog,"scan.completed", fmt.Sprintf("packages=%d containers=%d",
+		len(result.Packages), len(result.ContainerTargets)))
 
 	// Override scanner's local machine-id with the server-assigned UUID so the
 	// server can match the scan to the registered device record.
