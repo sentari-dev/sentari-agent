@@ -42,8 +42,23 @@ const (
 )
 
 func main() {
+	// Mode flags.  --scan mirrors the community build: run a
+	// local scan, format, exit, no upload, no network.  Present
+	// in enterprise too per the 2026-04-24 OSS ⊆ Enterprise
+	// decision — an enterprise operator who wants a local
+	// one-shot diagnostic can reach for it without switching
+	// binaries or triggering a server round-trip.
+	scanFlag := flag.Bool("scan", false, "One-shot local scan with formatted output to stdout or --output (no server round-trip)")
 	uploadFlag := flag.Bool("upload", false, "One-shot: register, scan, and upload to server then exit")
 	serveFlag := flag.Bool("serve", false, "Daemon: continuously register, scan, and upload on a schedule")
+
+	// --scan companion flags (shared shape with the community build).
+	outputFlag := flag.String("output", "", "Output file path for --scan (default: stdout)")
+	formatFlag := flag.String("format", "",
+		"Output format for --scan: pretty | explain | json | csv  (default: pretty on stdout, json to --output)")
+	explainFlag := flag.Bool("explain", false,
+		"Shorthand for --format=explain when used with --scan")
+
 	serverURLFlag := flag.String("server-url", "", "Override server URL from config (e.g. https://sentari.example.com)")
 	configFlag := flag.String("config", "", "Path to agent config file")
 	enrollTokenFlag := flag.String("enroll-token", "", "Enrollment token for first-time registration")
@@ -62,6 +77,43 @@ func main() {
 	if *versionFlag {
 		fmt.Printf("sentari-agent %s (enterprise)\n", scanner.Version)
 		os.Exit(0)
+	}
+
+	// --scan runs before the --upload / --serve branches so
+	// enterprise operators can invoke the community-style
+	// one-shot diagnostic without any of the registration /
+	// cert-bootstrap / upload machinery firing.  Mutually
+	// exclusive with --upload and --serve: a host either
+	// scans locally or scans-and-uploads, not both in the
+	// same invocation.
+	if *scanFlag {
+		if *uploadFlag || *serveFlag {
+			fmt.Fprintln(os.Stderr, "--scan is mutually exclusive with --upload / --serve")
+			os.Exit(1)
+		}
+		agentCfgLocal := config.DefaultConfig()
+		if *configFlag != "" {
+			var err error
+			agentCfgLocal, err = config.LoadFromFile(*configFlag)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to load config %s: %v\n", *configFlag, err)
+				os.Exit(1)
+			}
+		}
+		cfg := scanner.Config{
+			ScanRoot:       agentCfgLocal.Scanner.ScanRoot,
+			MaxDepth:       agentCfgLocal.Scanner.MaxDepth,
+			MaxWorkers:     8,
+			ScanContainers: agentCfgLocal.Scanner.ScanContainers,
+		}
+		if v := os.Getenv("SENTARI_SCAN_CONTAINERS"); v == "true" || v == "1" {
+			cfg.ScanContainers = true
+		}
+		os.Exit(runOneShot(context.Background(), cfg, oneShotOptions{
+			outputPath: *outputFlag,
+			format:     *formatFlag,
+			explain:    *explainFlag,
+		}))
 	}
 
 	if !*uploadFlag && !*serveFlag {

@@ -10,21 +10,34 @@ Living document tracking deferred work and future improvements. Items here are i
 
 Items driven by the v2 competitive read of Aikido Endpoint (see the companion server doc). Promotes specific agent-side work onto the roadmap with clear scope + reasoning. **Sizes:** S ≤ 3 days, M ≤ 1.5 weeks, L ≤ a full sprint, XL multi-sprint.
 
+### Decisions (2026-04-24)
+
+Six open questions raised in the initial Aikido-v2 draft were settled in the 2026-04-24 roadmap review. Full reasoning lives in [`sentari/docs/47_AIKIDO_ANALYSIS.md §6`](https://github.com/sentari-dev/sentari/blob/main/docs/47_AIKIDO_ANALYSIS.md#6-decisions-2026-04-24); summary here so agent-side contributors don't need to cross-repo for the rules:
+
+1. **Ecosystem expansion ships before install-gate.** npm + NuGet scanners land first; install-gate moves to Horizon 3 with a discuss-when-everything-else-ships gate.
+2. **OSS ⊆ Enterprise.** Every feature in the `!enterprise` build is also in the `enterprise` build. Enterprise adds modes (upload, serve, cert bootstrap, signed-map trust) but never diverges the other way. Practically: shared helpers (e.g. `runOneShot`) live in un-tagged `.go` files used by both mains.
+3. **Install-gate default is fail-open.** Policy unavailable ⇒ installs proceed with a loud log entry. Fail-closed is customer-opt-in.
+4. **Install-gate rolls out CLI-only first.** IDE plugins (VS Code, JetBrains) come later; core enforcement must stabilise before we fan out to IDE integrations.
+5. **Install-gate emergency override is dashboard-driven.** Host-raises → admin-approves → signed scoped-override envelope. Reuses the existing signed-envelope primitive; no new admin-to-host trust path.
+6. **Community CLI ships under Apache 2.0 AS IS.** No custom SLA; standard no-warranty clause is the contract. SLAs attach only to Enterprise contracts.
+
 ### Community CLI polish + OSS distribution (Size: M)
 
-**What:** Make the agent's `!enterprise` build (today's OSS binary) into a genuinely useful standalone dev tool, not a stripped-down client.
+**Status:** Shipping now — the PR that added this roadmap block also delivers the first iteration:
 
-- Pretty-printed default output (switch to JSON only with `--format=json`).
-- New `--explain` flag that surfaces findings in developer-friendly language ("Your env has 3 packages from a publisher flagged by policy `eu-public-sector-v2`").
+- New `scanner/output` package with `Write(w, result, format)` supporting `json` / `csv` / `pretty` / `explain`.
+- New `--explain` flag, a new `--format` value `pretty`, pretty-by-default on stdout, JSON-by-default when `--output` is a file.
+- Shared `runOneShot` helper in `cmd/sentari-agent/oneshot.go` (no build tag) used by both the community and enterprise builds, so `--scan` / `--format` / `--explain` are available in both per the OSS ⊆ Enterprise decision.
+- Explain mode surfaces recent-install highlights (packages installed in the last 48h — the Aikido talking point answered detectively at the CLI level), AI-agent surface summary (MCP servers, Claude Code artefacts, IDE AI extensions), and an in-line scan-errors block capped at 10 items.
+
+**Still on the backlog for the next CLI iteration:**
+
 - Homebrew tap (see [§Homebrew tap](#homebrew-tap) below — promote from deferred when this block is scheduled).
 - `curl | sh` install script symmetric with the Linux `install.sh` but aimed at laptops, not fleets.
 - Sub-3-second default scan on a typical dev laptop (trimmed depth, skip high-entropy dirs like `node_modules`/`venv` by default).
-- Drop enterprise-only flags from `--help` in the community build so the surface reads as a dev tool.
 - Dev-oriented README + CLI man page.
 
 **Why:** Aikido has 200k weekly Safe Chain downloads as an OSS top-of-funnel we structurally lack. Community CLI polish is the single cheapest thing that could change that. Agent-side only — server unaffected.
-
-**When:** Next sprint.
 
 ### npm scanner plugin (Size: M)
 
@@ -47,15 +60,22 @@ Items driven by the v2 competitive read of Aikido Endpoint (see the companion se
 
 **When:** After npm lands so the dispatch pattern is proven.
 
-### Install-gate mode — DESIGN DOC FIRST (Size: S for design, XL for impl)
+### Install-gate mode — HORIZON 3, discuss after ecosystem expansion ships (Size: S for design, XL for impl)
 
-**What:** Agent-resident enforcement layer that blocks disallowed installs before they land. Per-ecosystem wrappers (pip, npm, Maven, NuGet), signed policy delivery from server, company-wide configurable at install-time + server-push, local audit of every block.
+**What:** Agent-resident enforcement layer that blocks disallowed installs before they land. Per-ecosystem wrappers (pip, npm, Maven, NuGet), signed policy delivery from server, company-wide configurable at install-time + server-push, local audit of every block, dashboard-driven emergency override, fail-open default.
 
-**Status:** On the roadmap per user direction 2026-04-24, but **design doc must ship and be signed off before any implementation work begins.** See the full decision analysis in [`sentari/docs/47_AIKIDO_ANALYSIS.md` §5](https://github.com/sentari-dev/sentari/blob/main/docs/47_AIKIDO_ANALYSIS.md#5-install-gate-mode--full-decision-analysis) — benefits, downsides, five enforcement mechanisms compared, policy delivery design, configurability model, failure modes, test surface, rollout posture. Open questions §6 of that doc must be resolved first.
+**Status:** Deferred to Horizon 3 per the 2026-04-24 decision. Discuss the design once npm + NuGet scanners ship and UX revalidation completes. Rationale: an install-gate that covers only Python + Java is thin messaging; ecosystem coverage must be complete first.
+
+**Decisions already pinned for when we do start** (from 2026-04-24, see the Decisions block above):
+
+- Fail-open default; fail-closed is opt-in.
+- CLI rollout first; IDE plugins later.
+- Emergency override flows through the dashboard, using the existing signed-envelope primitive.
+- Configurability is layered: install-time config sets the trust anchor + initial enablement, server-push updates policy day-to-day, per-host emergency override is admin-granted + time-bounded.
 
 **Why the gate, given v1 recommended against:** procurement headline + preventive (not just detective) answer to the supply-chain question + the user's specific "code must be in the agent, visibly enforced" constraint makes it a defensible sovereignty-first gate rather than a cloud-dependent one.
 
-**Why the design-doc gate:** real implementation is a quarter of focused engineering + per-ecosystem maintenance surface + retire the ADR 0003 "never executes" invariant. Not a thing to start on intuition.
+**Why the design-doc gate on top of that:** real implementation is a quarter of focused engineering + per-ecosystem maintenance surface + retire the ADR 0003 "never executes" invariant. Not a thing to start on intuition. Full decision-input in [`sentari/docs/47_AIKIDO_ANALYSIS.md §5`](https://github.com/sentari-dev/sentari/blob/main/docs/47_AIKIDO_ANALYSIS.md#5-install-gate-mode--full-decision-analysis).
 
 ### Offline malicious-package feed consumer (Size: M)
 

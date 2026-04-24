@@ -1,19 +1,22 @@
 //go:build !enterprise
 
+// Community build of the sentari-agent CLI.
+//
+// Runs a one-shot scan of the local host, formats the result, and
+// exits.  No server, no mTLS, no scheduling — the enterprise build
+// (main_enterprise.go) adds those on top.  Per the 2026-04-24
+// roadmap decision, every feature in this build is also available
+// in the enterprise build; the split is additive, not divergent.
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/csv"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 
 	"github.com/sentari-dev/sentari-agent/config"
 	"github.com/sentari-dev/sentari-agent/scanner"
-	"github.com/sentari-dev/sentari-agent/scanner/containers"
 	// Blank imports: pull in plugin packages so their init()
 	// registers with scanner's registry at binary startup.  The
 	// existing Python scanners (pip, conda, poetry, …) live
@@ -25,10 +28,20 @@ import (
 )
 
 func main() {
-	// Flag definitions
-	scanFlag := flag.Bool("scan", false, "Run a scan of all supported ecosystems (Python + JVM)")
+	// Flag definitions.
+	//
+	// Output format default note: when writing to stdout we want a
+	// human-friendly summary by default (developer-first); when
+	// writing to a file (``--output``) we default to JSON because
+	// the most common use case is piping into a script or SIEM.
+	// Either default can be overridden with ``--format``.
+	scanFlag := flag.Bool("scan", false, "Run a scan of every supported ecosystem on this host")
 	outputFlag := flag.String("output", "", "Output file path (default: stdout)")
-	formatFlag := flag.String("format", "json", "Output format: json or csv (default: json)")
+	formatFlag := flag.String("format", "",
+		"Output format: pretty | explain | json | csv  (default: pretty on stdout, json to --output)")
+	explainFlag := flag.Bool("explain", false,
+		"Shorthand for --format=explain; verbose human-readable scan report with "+
+			"recent-install and AI-agent highlights")
 	configFlag := flag.String("config", "", "Path to agent config file")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 
@@ -69,85 +82,9 @@ func main() {
 		cfg.ScanContainers = true
 	}
 
-	// Run the scan with a proper background context.
-	ctx := context.Background()
-	s := scanner.NewScanner(cfg)
-	result, err := s.Run(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Scan failed: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Container-image scan phase.  Opt-in; the host scan above
-	// runs unconditionally so operators always get baseline
-	// inventory.  ScanAndAppend handles caps, per-target
-	// timeouts, and panic recovery.
-	if cfg.ScanContainers {
-		containers.ScanAndAppend(ctx, cfg, result)
-	}
-
-	// Format output.
-	var output []byte
-	switch *formatFlag {
-	case "csv":
-		output, err = formatAsCSV(result)
-	case "json":
-		output, err = json.MarshalIndent(result, "", "  ")
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown format: %s\n", *formatFlag)
-		os.Exit(1)
-	}
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Formatting error: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Write output.
-	if *outputFlag != "" {
-		// Use 0600 — scan results may contain sensitive inventory data.
-		err = os.WriteFile(*outputFlag, output, 0600)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to write output file: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "Results written to %s (%d packages found)\n", *outputFlag, len(result.Packages))
-	} else {
-		fmt.Println(string(output))
-	}
-}
-
-func formatAsCSV(result *scanner.ScanResult) ([]byte, error) {
-	b := &bytes.Buffer{}
-	w := csv.NewWriter(b)
-
-	// Always write header, even for empty results.
-	if err := w.Write([]string{
-		"Name", "Version", "InstallPath", "EnvType", "InterpreterVersion",
-		"InstallerUser", "InstallDate", "Environment",
-	}); err != nil {
-		return nil, err
-	}
-
-	for _, pkg := range result.Packages {
-		if err := w.Write([]string{
-			pkg.Name,
-			pkg.Version,
-			pkg.InstallPath,
-			pkg.EnvType,
-			pkg.InterpreterVersion,
-			pkg.InstallerUser,
-			pkg.InstallDate,
-			pkg.Environment,
-		}); err != nil {
-			return nil, err
-		}
-	}
-
-	w.Flush()
-	if err := w.Error(); err != nil {
-		return nil, err
-	}
-
-	return b.Bytes(), nil
+	os.Exit(runOneShot(context.Background(), cfg, oneShotOptions{
+		outputPath: *outputFlag,
+		format:     *formatFlag,
+		explain:    *explainFlag,
+	}))
 }
