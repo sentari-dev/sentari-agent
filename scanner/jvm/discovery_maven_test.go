@@ -38,10 +38,13 @@ func TestDiscoverMavenCache_HOMEPath(t *testing.T) {
 	}
 }
 
-// TestDiscoverMavenCache_MAVENHOMEOverride: if MAVEN_HOME/repository
-// exists, it wins over $HOME/.m2/repository — matches the convention
-// that explicit configuration wins over fallbacks.
-func TestDiscoverMavenCache_MAVENHOMEOverride(t *testing.T) {
+// TestDiscoverMavenCache_MAVENHOMEAndHOME verifies that when both
+// MAVEN_HOME/repository and $HOME/.m2/repository exist, the discoverer
+// returns both caches as distinct Environments.  There is no
+// "override" precedence: CI runners frequently have both, and
+// extractFromJar is idempotent per physical path so emitting both is
+// safe.
+func TestDiscoverMavenCache_MAVENHOMEAndHOME(t *testing.T) {
 	tmp := t.TempDir()
 
 	homeRepo := filepath.Join(tmp, "home", ".m2", "repository")

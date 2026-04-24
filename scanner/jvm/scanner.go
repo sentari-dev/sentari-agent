@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
@@ -87,9 +88,10 @@ func (Scanner) Scan(ctx context.Context, env scanner.Environment) ([]scanner.Pac
 		return scanJDKRuntime(env.Path)
 	default:
 		return nil, []scanner.ScanError{{
-			Path:    env.Path,
-			EnvType: EnvJVM,
-			Error:   fmt.Sprintf("unknown jvm layout: %q", env.Name),
+			Path:      env.Path,
+			EnvType:   EnvJVM,
+			Error:     fmt.Sprintf("unknown jvm layout: %q", env.Name),
+			Timestamp: time.Now().UTC(),
 		}}
 	}
 }
@@ -108,9 +110,10 @@ func scanDirTree(root string) ([]scanner.PackageRecord, []scanner.ScanError) {
 	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			errs = append(errs, scanner.ScanError{
-				Path:    path,
-				EnvType: EnvJVM,
-				Error:   fmt.Sprintf("walk: %v", err),
+				Path:      path,
+				EnvType:   EnvJVM,
+				Error:     fmt.Sprintf("walk: %v", err),
+				Timestamp: time.Now().UTC(),
 			})
 			// If the failure is on a directory, skip it.  For a file,
 			// just move on; WalkDir will keep going either way.
@@ -132,24 +135,35 @@ func scanDirTree(root string) ([]scanner.PackageRecord, []scanner.ScanError) {
 		info, statErr := d.Info()
 		if statErr == nil && info.Size() > int64(maxJARBytes) {
 			errs = append(errs, scanner.ScanError{
-				Path:    path,
-				EnvType: EnvJVM,
-				Error:   fmt.Sprintf("JAR exceeds size cap: %d > %d bytes; skipped", info.Size(), maxJARBytes),
+				Path:      path,
+				EnvType:   EnvJVM,
+				Error:     fmt.Sprintf("JAR exceeds size cap: %d > %d bytes; skipped", info.Size(), maxJARBytes),
+				Timestamp: time.Now().UTC(),
 			})
 			return nil
 		}
 		recs, jarErrs := extractFromJar(path)
 		records = append(records, recs...)
-		errs = append(errs, jarErrs...)
+		// extractFromJar doesn't stamp ScanError.Timestamp itself so the
+		// extractor stays pure/time-independent; we stamp at the caller
+		// boundary where errors cross out of the scanner package.
+		now := time.Now().UTC()
+		for _, e := range jarErrs {
+			if e.Timestamp.IsZero() {
+				e.Timestamp = now
+			}
+			errs = append(errs, e)
+		}
 		return nil
 	})
 	if walkErr != nil {
 		// Only happens if the root itself is unreadable; the per-entry
 		// callback above already handled per-file failures.
 		errs = append(errs, scanner.ScanError{
-			Path:    root,
-			EnvType: EnvJVM,
-			Error:   fmt.Sprintf("walk root: %v", walkErr),
+			Path:      root,
+			EnvType:   EnvJVM,
+			Error:     fmt.Sprintf("walk root: %v", walkErr),
+			Timestamp: time.Now().UTC(),
 		})
 	}
 	return records, errs
@@ -181,13 +195,30 @@ func isDir(path string) bool {
 }
 
 // containsPath reports whether envs already contains an Environment
-// whose Path equals candidate.  Guards against double-discovery when
-// two env-var paths resolve to the same directory.
+// whose Path equals candidate after canonicalisation.  Guards against
+// double-discovery when two env-var paths resolve to the same directory
+// via symlinks, differing casing on case-insensitive FSes, or trailing-
+// slash variance (``$MAVEN_HOME/repository`` vs ``$HOME/.m2/repository``
+// pointing at the same physical dir through a symlink is the motivating
+// case).  Falls back to filepath.Clean when EvalSymlinks errors (e.g.
+// path doesn't exist yet), which still catches the trailing-slash case.
 func containsPath(envs []scanner.Environment, candidate string) bool {
+	target := canonicalPath(candidate)
 	for _, e := range envs {
-		if e.Path == candidate {
+		if canonicalPath(e.Path) == target {
 			return true
 		}
 	}
 	return false
+}
+
+// canonicalPath returns a canonical form of p for deduplication:
+// EvalSymlinks when it succeeds, filepath.Clean as the fallback.
+// Mirrors the scanner.resolveKey helper in the parent package but is
+// reimplemented here because resolveKey is unexported.
+func canonicalPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
 }
