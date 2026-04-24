@@ -26,6 +26,7 @@ import (
 const (
 	layoutMavenCache  = "maven-cache"
 	layoutGradleCache = "gradle-cache"
+	layoutJDKRuntime  = "jdk-runtime"
 )
 
 // Scanner implements scanner.Scanner and scanner.RootScanner.  The
@@ -55,6 +56,7 @@ func (Scanner) DiscoverAll(ctx context.Context) ([]scanner.Environment, []scanne
 	var envs []scanner.Environment
 	envs = append(envs, discoverMavenCache()...)
 	envs = append(envs, discoverGradleCache()...)
+	envs = append(envs, discoverJDK()...)
 	return envs, nil
 }
 
@@ -68,6 +70,8 @@ func (Scanner) Scan(ctx context.Context, env scanner.Environment) ([]scanner.Pac
 	switch env.Name {
 	case layoutMavenCache, layoutGradleCache:
 		return scanDirTree(env.Path)
+	case layoutJDKRuntime:
+		return scanJDKRuntime(env.Path)
 	default:
 		return nil, []scanner.ScanError{{
 			Path:      env.Path,
