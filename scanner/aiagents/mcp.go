@@ -2,7 +2,6 @@ package aiagents
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
-	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // layoutMCPConfig tags every Environment produced by the MCP-config
@@ -54,7 +52,7 @@ func discoverMCPConfigs() ([]scanner.Environment, []scanner.ScanError) {
 	for _, path := range mcpConfigPaths() {
 		info, err := os.Stat(path)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
+			if isNotExist(err) {
 				continue
 			}
 			errs = append(errs, scanner.ScanError{
@@ -122,36 +120,18 @@ func mcpConfigPaths() []string {
 // hint (``@modelcontextprotocol/server-filesystem@1.2.3`` → 1.2.3),
 // otherwise left empty — many MCP configs don't pin a version.
 //
-// Read goes through ``safeio.ReadFile`` so the same
-// symlink-refusal + size-bound policy every other parser uses
-// applies here.  A symlinked mcp.json that points to
-// /etc/shadow would otherwise exfiltrate host content into a
-// scan record — not hypothetical; the agent has faced this
-// exact class of attack via .deb copyright files.
+// Read + mtime go through ``readFileWithMTime`` which opens the
+// file once via ``safeio.Open`` and derives both the content and
+// the mtime from the same file descriptor — no path-based TOCTOU
+// window between the read and the install-date proxy stamp.  A
+// symlinked mcp.json is refused at open time.
 func scanMCPConfig(path string) ([]scanner.PackageRecord, []scanner.ScanError) {
-	data, err := safeio.ReadFile(path, maxMCPConfigBytes)
+	data, mtime, err := readFileWithMTime(path, maxMCPConfigBytes)
 	if err != nil {
-		// safeio surfaces ErrSymlink and ErrTooLarge as typed
-		// sentinels; pass the message through verbatim so the
-		// operator sees which policy triggered.
 		return nil, []scanner.ScanError{{
 			Path:      path,
 			EnvType:   EnvAIAgent,
 			Error:     fmt.Sprintf("mcp config read: %v", err),
-			Timestamp: time.Now().UTC(),
-		}}
-	}
-	// ``info`` is used below for the install-date proxy; fetch it
-	// after the safeio read so the stat happens on the (verified,
-	// non-symlink) file.  os.Stat here follows the link by design
-	// — but at this point safeio has already confirmed the leaf
-	// isn't a symlink, so there's no escape path left.
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, []scanner.ScanError{{
-			Path:      path,
-			EnvType:   EnvAIAgent,
-			Error:     fmt.Sprintf("mcp config stat: %v", err),
 			Timestamp: time.Now().UTC(),
 		}}
 	}
@@ -171,7 +151,7 @@ func scanMCPConfig(path string) ([]scanner.PackageRecord, []scanner.ScanError) {
 	// the user edited their MCP config is the closest proxy we
 	// have to "when this server was first configured."  Good
 	// enough for the install_age detective rule.
-	installDate := info.ModTime().UTC()
+	installDate := mtime
 
 	out := make([]scanner.PackageRecord, 0, len(cfg.MCPServers))
 	for name, entry := range cfg.MCPServers {

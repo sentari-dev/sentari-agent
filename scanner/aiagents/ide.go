@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
-	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // layoutIDEExtensions tags Environments from the IDE-extension
@@ -126,17 +125,14 @@ func scanIDEExtensions(root string) ([]scanner.PackageRecord, []scanner.ScanErro
 		}
 		dir := filepath.Join(root, e.Name())
 		manifest := filepath.Join(dir, "package.json")
-		// safeio handles both the size cap and the symlink refusal
-		// in one call — an extension dir could in principle symlink
-		// its package.json into the user's home; we refuse at the
-		// read boundary rather than stat-then-read racing.  Missing
-		// manifest (not a VS Code extension dir, e.g. a cache)
-		// surfaces as a plain read error; we skip silently because
-		// that's the dominant legitimate case.
-		data, err := safeio.ReadFile(manifest, maxExtensionManifestBytes)
+		// readFileWithMTime opens once via safeio (refuses symlinks)
+		// and derives both the bytes and the mtime from the same fd
+		// — no path-based TOCTOU window for the install-date proxy.
+		// Missing manifest = not an extension dir (common case);
+		// silent skip rather than emit a ScanError.
+		data, mtime, err := readFileWithMTime(manifest, maxExtensionManifestBytes)
 		if err != nil {
-			if os.IsNotExist(err) {
-				// No manifest = not an extension dir.  Silent.
+			if isNotExist(err) {
 				continue
 			}
 			errs = append(errs, scanner.ScanError{
@@ -145,17 +141,6 @@ func scanIDEExtensions(root string) ([]scanner.PackageRecord, []scanner.ScanErro
 				Error:     fmt.Sprintf("manifest read: %v", err),
 				Timestamp: time.Now().UTC(),
 			})
-			continue
-		}
-		// info fetched post-read for the install-date proxy; at
-		// this point safeio has confirmed the file isn't a
-		// symlink leaf, so the stat() below can't be weaponised
-		// to follow a hostile link.
-		info, err := os.Stat(manifest)
-		if err != nil {
-			// Disappeared between the safeio read and the stat.
-			// Skip — the manifest bytes we already read are
-			// still usable, but the install-date proxy isn't.
 			continue
 		}
 		var m extensionManifest
@@ -175,7 +160,7 @@ func scanIDEExtensions(root string) ([]scanner.PackageRecord, []scanner.ScanErro
 		if _, ok := knownAIExtensions[key]; !ok {
 			continue
 		}
-		installDate := info.ModTime().UTC().Format(time.RFC3339)
+		installDate := mtime.Format(time.RFC3339)
 		records = append(records, scanner.PackageRecord{
 			Name:        "ide-ext:" + key,
 			Version:     m.Version,
