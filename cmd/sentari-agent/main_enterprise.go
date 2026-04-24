@@ -33,6 +33,7 @@ import (
 	_ "github.com/sentari-dev/sentari-agent/scanner/aiagents"
 	_ "github.com/sentari-dev/sentari-agent/scanner/jvm"
 	_ "github.com/sentari-dev/sentari-agent/scanner/npm"
+	_ "github.com/sentari-dev/sentari-agent/scanner/nuget"
 )
 
 const (
