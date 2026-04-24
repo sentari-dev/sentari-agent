@@ -14,12 +14,13 @@ import (
 	"github.com/sentari-dev/sentari-agent/config"
 	"github.com/sentari-dev/sentari-agent/scanner"
 	"github.com/sentari-dev/sentari-agent/scanner/containers"
-	// Blank import: pulls in the JVM plugin so its init()
+	// Blank imports: pull in plugin packages so their init()
 	// registers with scanner's registry at binary startup.  The
 	// existing Python scanners (pip, conda, poetry, …) live
 	// inside the scanner package itself so they're registered by
-	// importing scanner.  Subpackages (scanner/jvm, future
-	// scanner/maven-alternatives, etc.) must be imported here.
+	// importing scanner.  Subpackages (scanner/jvm, scanner/aiagents,
+	// etc.) must be imported here.
+	_ "github.com/sentari-dev/sentari-agent/scanner/aiagents"
 	_ "github.com/sentari-dev/sentari-agent/scanner/jvm"
 )
 
