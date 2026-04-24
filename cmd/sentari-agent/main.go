@@ -24,7 +24,7 @@ import (
 
 func main() {
 	// Flag definitions
-	scanFlag := flag.Bool("scan", false, "Run a scan of Python environments")
+	scanFlag := flag.Bool("scan", false, "Run a scan of all supported ecosystems (Python + JVM)")
 	outputFlag := flag.String("output", "", "Output file path (default: stdout)")
 	formatFlag := flag.String("format", "json", "Output format: json or csv (default: json)")
 	configFlag := flag.String("config", "", "Path to agent config file")

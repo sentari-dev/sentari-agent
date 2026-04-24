@@ -6,15 +6,14 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
-// TestJVMPluginIsRegistered confirms the ``init()`` call in scanner.go
-// actually lands ``jvm`` in the global registry.  Running this test
-// also guarantees that ``scanner/jvm`` gets imported whenever the
-// agent binary compiles with a registry walk, so ``RegisteredScanners``
-// from the orchestrator's perspective includes this plugin.
-//
-// A regression where the init() call disappears (accidental refactor
-// mistake, conditional compilation tag left behind) shows up here
-// rather than as a silent "no Java records in the inventory."
+// TestJVMPluginIsRegistered verifies that the ``init()`` call in
+// scanner.go actually lands ``jvm`` in the global registry by checking
+// ``scanner.RegisteredScanners()``.  Whether production binaries
+// include the blank import is a build-tag / main.go concern — this
+// test can only assert that *if* the package is linked in, init()
+// registers it.  A regression where init() disappears (refactor
+// accident, build-tag slip) shows up here rather than as a silent
+// "no Java records in the inventory."
 func TestJVMPluginIsRegistered(t *testing.T) {
 	var found bool
 	for _, s := range scanner.RegisteredScanners() {
@@ -36,5 +35,4 @@ func TestJVMPluginIsRegistered(t *testing.T) {
 func TestJVMPluginImplementsRootScanner(t *testing.T) {
 	var s Scanner
 	var _ scanner.RootScanner = s // compile-time check would fail on mismatch
-	_ = s
 }

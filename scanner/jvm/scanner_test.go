@@ -38,6 +38,12 @@ func TestScanner_DiscoverAll_MavenAndGradle(t *testing.T) {
 	t.Setenv("USERPROFILE", tmp)
 	t.Setenv("MAVEN_HOME", "")
 	t.Setenv("GRADLE_USER_HOME", "")
+	// Also clear every env var a *non-Maven/Gradle* discoverer looks
+	// at, so a developer machine with e.g. JAVA_HOME or CATALINA_HOME
+	// exported doesn't silently inject an extra Environment past the
+	// well-known-roots override and break the len(envs)==2 assertion.
+	t.Setenv("JAVA_HOME", "")
+	clearAllServerEnvs(t)
 
 	// Redirect every well-known-roots slice at an empty list so real
 	// host installs (/opt/homebrew/lib, /usr/lib/jvm/*, …) can't leak
@@ -45,14 +51,32 @@ func TestScanner_DiscoverAll_MavenAndGradle(t *testing.T) {
 	origGenericOpt := genericOptRoots
 	origGenericDirect := genericDirectRoots
 	origJDKRoots := jdkWellKnownRoots
+	origTomcat := tomcatWellKnown
+	origJBoss := jbossWellKnown
+	origWebLogic := weblogicWellKnown
+	origWebSphereAbs := websphereWellKnownAbs
+	origJetty := jettyWellKnown
+	origGlassFish := glassfishWellKnown
 	t.Cleanup(func() {
 		genericOptRoots = origGenericOpt
 		genericDirectRoots = origGenericDirect
 		jdkWellKnownRoots = origJDKRoots
+		tomcatWellKnown = origTomcat
+		jbossWellKnown = origJBoss
+		weblogicWellKnown = origWebLogic
+		websphereWellKnownAbs = origWebSphereAbs
+		jettyWellKnown = origJetty
+		glassfishWellKnown = origGlassFish
 	})
 	genericOptRoots = nil
 	genericDirectRoots = nil
 	jdkWellKnownRoots = nil
+	tomcatWellKnown = nil
+	jbossWellKnown = nil
+	weblogicWellKnown = nil
+	websphereWellKnownAbs = nil
+	jettyWellKnown = nil
+	glassfishWellKnown = nil
 
 	var s Scanner
 	envs, errs := s.DiscoverAll(context.Background())

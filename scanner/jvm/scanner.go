@@ -9,7 +9,7 @@
 // first-class records.
 //
 // The plugin registers itself with the scanner registry at init()
-// time; ``agent/scanner/scanner.go`` discovers it via the same
+// time; ``scanner/scanner.go`` discovers it via the same
 // mechanism as every other ecosystem.  No explicit wiring is
 // required in the orchestrator.
 //
