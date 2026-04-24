@@ -41,7 +41,7 @@ Six open questions raised in the initial Aikido-v2 draft were settled in the 202
 
 ### npm scanner plugin (Size: M)
 
-**What:** New `scanner/npm/` plugin following ADR 0002. Reads `node_modules/*/package.json` + `package-lock.json` + workspace manifests.
+**What:** New `scanner/npm/` plugin following the existing `Scanner` plugin pattern used by `scanner/jvm/` and `scanner/aiagents/` (self-registers at `init()`, produces `PackageRecord` values with a distinct `env_type`). Reads `node_modules/*/package.json` + `package-lock.json` + workspace manifests.
 
 - Discoverer: walks from `ScanRoot`, marker-matches on `package.json` + `node_modules/`.
 - Extractor: emits one PackageRecord per dependency with `EnvType="npm"`.
@@ -75,7 +75,7 @@ Six open questions raised in the initial Aikido-v2 draft were settled in the 202
 
 **Why the gate, given v1 recommended against:** procurement headline + preventive (not just detective) answer to the supply-chain question + the user's specific "code must be in the agent, visibly enforced" constraint makes it a defensible sovereignty-first gate rather than a cloud-dependent one.
 
-**Why the design-doc gate on top of that:** real implementation is a quarter of focused engineering + per-ecosystem maintenance surface + retire the ADR 0003 "never executes" invariant. Not a thing to start on intuition. Full decision-input in [`sentari/docs/47_AIKIDO_ANALYSIS.md §5`](https://github.com/sentari-dev/sentari/blob/main/docs/47_AIKIDO_ANALYSIS.md#5-install-gate-mode--full-decision-analysis).
+**Why the design-doc gate on top of that:** real implementation is a quarter of focused engineering + per-ecosystem maintenance surface + retire the "agent never executes package managers" invariant that's been load-bearing since day one (see [`sentari/docs/adr/0003-zero-binary-execution.md`](https://github.com/sentari-dev/sentari/blob/main/docs/adr/0003-zero-binary-execution.md) — ADRs live in the internal server repo, not here). Not a thing to start on intuition. Full decision-input in [`sentari/docs/47_AIKIDO_ANALYSIS.md §5`](https://github.com/sentari-dev/sentari/blob/main/docs/47_AIKIDO_ANALYSIS.md#5-install-gate-mode--full-decision-analysis).
 
 ### Offline malicious-package feed consumer (Size: M)
 
@@ -87,7 +87,7 @@ Six open questions raised in the initial Aikido-v2 draft were settled in the 202
 
 ### Safe Chain interop export (Size: S)
 
-**What:** `sentari --export-policy safechain` emits sentari's deny/allow lists in a format Safe Chain (and similar ecosystem gates) can consume. No runtime dependency on Aikido; positions sentari as *source of truth* feeding any gate the customer chooses.
+**What:** `sentari-agent --export-policy safechain` emits Sentari's deny/allow lists in a format Safe Chain (and similar ecosystem gates) can consume. No runtime dependency on Aikido; positions Sentari as *source of truth* feeding any gate the customer chooses.
 
 **Why:** Friendly-neighbour move. Turns a would-be competitor integration point into a sentari-first workflow.
 
@@ -95,7 +95,7 @@ Six open questions raised in the initial Aikido-v2 draft were settled in the 202
 
 ### `openat2 RESOLVE_BENEATH` primitive in `safeio` (Size: M)
 
-**What:** Linux-specific defense-in-depth primitive for the container-scanner's layer walker. Today we drop all symlinks as a blanket rule; with `RESOLVE_BENEATH`, we can walk symlinks that stay inside the layer root and drop only those that escape. Closes the "legitimate `/usr/bin/python3 → python3.12` symlink is invisible in container scans" gap documented in ADR 0009.
+**What:** Linux-specific defense-in-depth primitive for the container-scanner's layer walker. Today we drop all symlinks as a blanket rule; with `RESOLVE_BENEATH`, we can walk symlinks that stay inside the layer root and drop only those that escape. Closes the "legitimate `/usr/bin/python3 → python3.12` symlink is invisible in container scans" gap documented in [`sentari/docs/adr/0009-container-image-scanning.md`](https://github.com/sentari-dev/sentari/blob/main/docs/adr/0009-container-image-scanning.md).
 
 **Why:** Completeness for the container-scanning story. Symmetrically, makes the symlink-refusal story more defensible in procurement audits.
 

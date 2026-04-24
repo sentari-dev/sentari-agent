@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // layoutIDEExtensions tags Environments from the IDE-extension
@@ -125,29 +126,36 @@ func scanIDEExtensions(root string) ([]scanner.PackageRecord, []scanner.ScanErro
 		}
 		dir := filepath.Join(root, e.Name())
 		manifest := filepath.Join(dir, "package.json")
-		info, err := os.Stat(manifest)
+		// safeio handles both the size cap and the symlink refusal
+		// in one call — an extension dir could in principle symlink
+		// its package.json into the user's home; we refuse at the
+		// read boundary rather than stat-then-read racing.  Missing
+		// manifest (not a VS Code extension dir, e.g. a cache)
+		// surfaces as a plain read error; we skip silently because
+		// that's the dominant legitimate case.
+		data, err := safeio.ReadFile(manifest, maxExtensionManifestBytes)
 		if err != nil {
-			// No manifest = not a VS Code extension dir (maybe
-			// a cache dir); skip silently.
-			continue
-		}
-		if info.Size() > maxExtensionManifestBytes {
-			errs = append(errs, scanner.ScanError{
-				Path:      manifest,
-				EnvType:   EnvAIAgent,
-				Error:     fmt.Sprintf("manifest exceeds size cap: %d", info.Size()),
-				Timestamp: time.Now().UTC(),
-			})
-			continue
-		}
-		data, err := os.ReadFile(manifest)
-		if err != nil {
+			if os.IsNotExist(err) {
+				// No manifest = not an extension dir.  Silent.
+				continue
+			}
 			errs = append(errs, scanner.ScanError{
 				Path:      manifest,
 				EnvType:   EnvAIAgent,
 				Error:     fmt.Sprintf("manifest read: %v", err),
 				Timestamp: time.Now().UTC(),
 			})
+			continue
+		}
+		// info fetched post-read for the install-date proxy; at
+		// this point safeio has confirmed the file isn't a
+		// symlink leaf, so the stat() below can't be weaponised
+		// to follow a hostile link.
+		info, err := os.Stat(manifest)
+		if err != nil {
+			// Disappeared between the safeio read and the stat.
+			// Skip — the manifest bytes we already read are
+			// still usable, but the install-date proxy isn't.
 			continue
 		}
 		var m extensionManifest

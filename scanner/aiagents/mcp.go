@@ -2,6 +2,7 @@ package aiagents
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // layoutMCPConfig tags every Environment produced by the MCP-config
@@ -38,18 +40,29 @@ type mcpServerEntry struct {
 }
 
 // discoverMCPConfigs enumerates the platform-appropriate MCP config
-// paths and emits one Environment per config file that exists.  A
-// missing path is NOT an error — the user may simply not use that
-// tool.  Permission-denied on a path IS a ScanError so operators can
-// tell the difference between "not installed" and "running as the
-// wrong user to see this config."
-func discoverMCPConfigs() []scanner.Environment {
+// paths and emits one Environment per config file that exists.
+//
+// Error semantics (aligning with the comment the review found
+// outdated): os.IsNotExist is silently skipped — the user simply
+// doesn't have that tool configured.  Permission-denied is
+// returned as a ScanError alongside the envs so operators can
+// tell "not installed" from "agent can't read this user's config"
+// via the exit surface, not by grepping stderr.
+func discoverMCPConfigs() ([]scanner.Environment, []scanner.ScanError) {
 	var envs []scanner.Environment
+	var errs []scanner.ScanError
 	for _, path := range mcpConfigPaths() {
 		info, err := os.Stat(path)
 		if err != nil {
-			// os.IsNotExist is the common case — absent config file
-			// means this tool isn't configured on this host.
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			errs = append(errs, scanner.ScanError{
+				Path:      path,
+				EnvType:   EnvAIAgent,
+				Error:     fmt.Sprintf("mcp config stat: %v", err),
+				Timestamp: time.Now().UTC(),
+			})
 			continue
 		}
 		if info.IsDir() {
@@ -61,7 +74,7 @@ func discoverMCPConfigs() []scanner.Environment {
 			Path:    path,
 		})
 	}
-	return envs
+	return envs, errs
 }
 
 // mcpConfigPaths returns every known MCP config location for the
@@ -108,30 +121,37 @@ func mcpConfigPaths() []string {
 // is derived from the command/args when we can parse a version
 // hint (``@modelcontextprotocol/server-filesystem@1.2.3`` → 1.2.3),
 // otherwise left empty — many MCP configs don't pin a version.
+//
+// Read goes through ``safeio.ReadFile`` so the same
+// symlink-refusal + size-bound policy every other parser uses
+// applies here.  A symlinked mcp.json that points to
+// /etc/shadow would otherwise exfiltrate host content into a
+// scan record — not hypothetical; the agent has faced this
+// exact class of attack via .deb copyright files.
 func scanMCPConfig(path string) ([]scanner.PackageRecord, []scanner.ScanError) {
+	data, err := safeio.ReadFile(path, maxMCPConfigBytes)
+	if err != nil {
+		// safeio surfaces ErrSymlink and ErrTooLarge as typed
+		// sentinels; pass the message through verbatim so the
+		// operator sees which policy triggered.
+		return nil, []scanner.ScanError{{
+			Path:      path,
+			EnvType:   EnvAIAgent,
+			Error:     fmt.Sprintf("mcp config read: %v", err),
+			Timestamp: time.Now().UTC(),
+		}}
+	}
+	// ``info`` is used below for the install-date proxy; fetch it
+	// after the safeio read so the stat happens on the (verified,
+	// non-symlink) file.  os.Stat here follows the link by design
+	// — but at this point safeio has already confirmed the leaf
+	// isn't a symlink, so there's no escape path left.
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, []scanner.ScanError{{
 			Path:      path,
 			EnvType:   EnvAIAgent,
 			Error:     fmt.Sprintf("mcp config stat: %v", err),
-			Timestamp: time.Now().UTC(),
-		}}
-	}
-	if info.Size() > maxMCPConfigBytes {
-		return nil, []scanner.ScanError{{
-			Path:      path,
-			EnvType:   EnvAIAgent,
-			Error:     fmt.Sprintf("mcp config exceeds size cap: %d > %d", info.Size(), maxMCPConfigBytes),
-			Timestamp: time.Now().UTC(),
-		}}
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, []scanner.ScanError{{
-			Path:      path,
-			EnvType:   EnvAIAgent,
-			Error:     fmt.Sprintf("mcp config read: %v", err),
 			Timestamp: time.Now().UTC(),
 		}}
 	}

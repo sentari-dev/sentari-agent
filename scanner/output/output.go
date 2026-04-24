@@ -3,8 +3,11 @@
 // Four formatters live here: JSON (machine-readable, stable wire
 // shape), CSV (spreadsheet-friendly, flat table), Summary (short
 // human-readable for interactive use), and Explain (verbose human-
-// readable with highlights for the zeitgeist findings — recent
-// installs, AI-agent surfaces, container visibility).
+// readable with highlights for recent installs, the AI-agent
+// surface, and per-error detail).  Container-scan results flow
+// through the same channels — they show up in the Summary's
+// container count and in CSV/JSON output, but Explain does not
+// (yet) carve out a dedicated per-container block.
 //
 // Per the 2026-04-24 roadmap decision (``OSS ⊆ Enterprise``),
 // every formatter here is reachable from both cmd/sentari-agent/main.go
@@ -19,6 +22,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -27,6 +31,12 @@ import (
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
+
+// ErrUnknownFormat is the sentinel Write returns when the caller
+// asks for a format name this package doesn't implement.  Callers
+// that want to distinguish "bad CLI flag" from "write failed"
+// use ``errors.Is(err, ErrUnknownFormat)``.
+var ErrUnknownFormat = errors.New("output: unknown format")
 
 // Format names the output modes callers can request.  Kept as
 // typed strings (not an enum) because they flow in from a CLI
@@ -61,8 +71,9 @@ func Write(w io.Writer, result *scanner.ScanResult, format string) error {
 	case FormatExplain:
 		return writeExplain(w, result)
 	default:
-		return fmt.Errorf("output: unknown format %q (want %s|%s|%s|%s)",
-			format, FormatJSON, FormatCSV, FormatPretty, FormatExplain)
+		return fmt.Errorf("%w %q (want %s|%s|%s|%s)",
+			ErrUnknownFormat, format,
+			FormatJSON, FormatCSV, FormatPretty, FormatExplain)
 	}
 }
 
@@ -147,16 +158,22 @@ func writeExplain(w io.Writer, result *scanner.ScanResult) error {
 	// see what landed on their laptop without needing the server.
 	recent := filterRecentInstalls(result.Packages, recentInstallCutoff)
 	if len(recent) > 0 {
-		fmt.Fprintf(w, "\nRecent installs (< %s):\n", recentInstallCutoff)
-		for _, p := range recent {
-			// Limit to the first 20 in explain mode — beyond that
-			// the user should use ``--format=json`` and grep.
+		// Cap at 20 lines in explain mode so a fleet-busy host
+		// doesn't flood the terminal.  The "and N more" footer
+		// points the operator at --format=json for the full set.
+		const recentDisplayCap = 20
+		fmt.Fprintf(w, "\nRecent installs (≤ %s):\n", recentInstallCutoff)
+		limit := len(recent)
+		if limit > recentDisplayCap {
+			limit = recentDisplayCap
+		}
+		for _, p := range recent[:limit] {
 			fmt.Fprintf(w, "  %-40s %s    [%s]\n",
 				p.Name, p.Version, p.InstallDate)
 		}
-		if len(recent) > 20 {
+		if len(recent) > recentDisplayCap {
 			fmt.Fprintf(w, "  ... and %d more; use --format=json for the full list\n",
-				len(recent)-20)
+				len(recent)-recentDisplayCap)
 		}
 	}
 

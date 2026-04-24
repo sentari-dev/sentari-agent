@@ -3,6 +3,8 @@ package output
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -50,16 +52,16 @@ func fixtureResult() *scanner.ScanResult {
 }
 
 // TestWrite_UnknownFormat: an unrecognised format value surfaces
-// as a typed error instead of silently falling back, so main.go
-// can treat it as a flag-parse failure.
+// as a sentinel-wrapped error so callers can distinguish a bad
+// --format flag from a write-side failure via errors.Is.
 func TestWrite_UnknownFormat(t *testing.T) {
 	var buf bytes.Buffer
 	err := Write(&buf, fixtureResult(), "yaml")
 	if err == nil {
 		t.Fatalf("expected error on unknown format")
 	}
-	if !strings.Contains(err.Error(), "unknown format") {
-		t.Errorf("error should mention unknown format; got %q", err)
+	if !errors.Is(err, ErrUnknownFormat) {
+		t.Errorf("error should wrap ErrUnknownFormat; got %q (type %T)", err, err)
 	}
 }
 
@@ -86,7 +88,9 @@ func TestWrite_JSON_RoundTrip(t *testing.T) {
 // TestWrite_CSV_HasHeaderAndRows: CSV output carries the pinned
 // column order + one row per package.  Downstream scripts parse
 // this; column order changes are a breaking change and need to
-// be caught here.
+// be caught here.  Pin the exact header row rather than checking
+// each column is "somewhere in the line" — a reorder / insertion
+// / duplication would otherwise slip through.
 func TestWrite_CSV_HasHeaderAndRows(t *testing.T) {
 	var buf bytes.Buffer
 	if err := Write(&buf, fixtureResult(), FormatCSV); err != nil {
@@ -96,13 +100,9 @@ func TestWrite_CSV_HasHeaderAndRows(t *testing.T) {
 	if len(lines) != 7 { // 1 header + 6 packages
 		t.Fatalf("expected 7 CSV lines (header + 6 rows); got %d", len(lines))
 	}
-	header := lines[0]
-	wantCols := []string{"Name", "Version", "InstallPath", "EnvType",
-		"InterpreterVersion", "InstallerUser", "InstallDate", "Environment"}
-	for _, col := range wantCols {
-		if !strings.Contains(header, col) {
-			t.Errorf("header missing column %q; got %q", col, header)
-		}
+	const wantHeader = "Name,Version,InstallPath,EnvType,InterpreterVersion,InstallerUser,InstallDate,Environment"
+	if lines[0] != wantHeader {
+		t.Errorf("CSV header drift detected:\n  got:  %s\n  want: %s", lines[0], wantHeader)
 	}
 }
 
@@ -197,8 +197,10 @@ func TestWrite_Explain_NoHighlightsWhenClean(t *testing.T) {
 	}
 }
 
-// TestResolveFormat_Defaults: verifies the default-pick logic
-// matches the documented behaviour.
+// TestFilterRecentInstalls_ParsesRFC3339: the helper that Explain
+// uses to pick the recent-installs block — verifies the RFC3339
+// parse path, the cutoff filter, and graceful handling of
+// unparseable or empty InstallDate values.
 func TestFilterRecentInstalls_ParsesRFC3339(t *testing.T) {
 	now := time.Now().UTC()
 	pkgs := []scanner.PackageRecord{
@@ -223,5 +225,43 @@ func TestWrite_NilResult(t *testing.T) {
 	err := Write(&buf, nil, FormatPretty)
 	if err == nil {
 		t.Errorf("expected error on nil result")
+	}
+}
+
+// TestWrite_Explain_RecentInstallsCapAt20: with 50 recent installs
+// the explain output shows at most 20 detail lines and appends
+// exactly one "and N more" footer.  Catches the regression where
+// the loop would have spammed all 50 + the footer.
+func TestWrite_Explain_RecentInstallsCapAt20(t *testing.T) {
+	now := time.Now().UTC()
+	var pkgs []scanner.PackageRecord
+	for i := 0; i < 50; i++ {
+		pkgs = append(pkgs, scanner.PackageRecord{
+			Name:        fmt.Sprintf("pkg-%02d", i),
+			Version:     "1.0.0",
+			EnvType:     "pip",
+			InstallDate: now.Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),
+		})
+	}
+	result := &scanner.ScanResult{
+		Hostname:     "busy.local",
+		OS:           "linux",
+		Arch:         "amd64",
+		ScannedAt:    now,
+		AgentVersion: "0.1.0-test",
+		Packages:     pkgs,
+	}
+	var buf bytes.Buffer
+	if err := Write(&buf, result, FormatExplain); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	s := buf.String()
+	// Count the "pkg-" data lines (leading two-space indent + hyphen).
+	count := strings.Count(s, "  pkg-")
+	if count != 20 {
+		t.Errorf("expected exactly 20 recent-install lines, got %d", count)
+	}
+	if !strings.Contains(s, "and 30 more") {
+		t.Errorf("expected 'and 30 more' footer; got\n%s", s)
 	}
 }
