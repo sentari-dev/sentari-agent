@@ -27,9 +27,10 @@ import (
 	"github.com/sentari-dev/sentari-agent/sbom"
 	"github.com/sentari-dev/sentari-agent/scanner"
 	"github.com/sentari-dev/sentari-agent/scanner/containers"
-	// Blank import: pulls in the JVM plugin so its init()
+	// Blank imports: pull in plugin packages so their init()
 	// registers with scanner's registry at binary startup.  See
 	// the matching comment in main.go (OSS build).
+	_ "github.com/sentari-dev/sentari-agent/scanner/aiagents"
 	_ "github.com/sentari-dev/sentari-agent/scanner/jvm"
 )
 
