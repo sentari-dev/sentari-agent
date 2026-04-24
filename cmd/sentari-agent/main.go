@@ -13,6 +13,7 @@ import (
 
 	"github.com/sentari-dev/sentari-agent/config"
 	"github.com/sentari-dev/sentari-agent/scanner"
+	"github.com/sentari-dev/sentari-agent/scanner/containers"
 	// Blank import: pulls in the JVM plugin so its init()
 	// registers with scanner's registry at binary startup.  The
 	// existing Python scanners (pip, conda, poetry, …) live
@@ -55,17 +56,33 @@ func main() {
 
 	// Map agent config to scanner config.
 	cfg := scanner.Config{
-		ScanRoot:   agentCfg.Scanner.ScanRoot,
-		MaxDepth:   agentCfg.Scanner.MaxDepth,
-		MaxWorkers: 8,
+		ScanRoot:       agentCfg.Scanner.ScanRoot,
+		MaxDepth:       agentCfg.Scanner.MaxDepth,
+		MaxWorkers:     8,
+		ScanContainers: agentCfg.Scanner.ScanContainers,
+	}
+	// Allow SENTARI_SCAN_CONTAINERS=true to flip the flag at
+	// runtime without touching the config file.  Common for "I
+	// want to try this on one host first."
+	if v := os.Getenv("SENTARI_SCAN_CONTAINERS"); v == "true" || v == "1" {
+		cfg.ScanContainers = true
 	}
 
 	// Run the scan with a proper background context.
+	ctx := context.Background()
 	s := scanner.NewScanner(cfg)
-	result, err := s.Run(context.Background())
+	result, err := s.Run(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Scan failed: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Container-image scan phase.  Opt-in; the host scan above
+	// runs unconditionally so operators always get baseline
+	// inventory.  ScanAndAppend handles caps, per-target
+	// timeouts, and panic recovery.
+	if cfg.ScanContainers {
+		containers.ScanAndAppend(ctx, cfg, result)
 	}
 
 	// Format output.
