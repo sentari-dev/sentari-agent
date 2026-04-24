@@ -13,11 +13,18 @@ import (
 
 	"github.com/sentari-dev/sentari-agent/config"
 	"github.com/sentari-dev/sentari-agent/scanner"
+	// Blank import: pulls in the JVM plugin so its init()
+	// registers with scanner's registry at binary startup.  The
+	// existing Python scanners (pip, conda, poetry, …) live
+	// inside the scanner package itself so they're registered by
+	// importing scanner.  Subpackages (scanner/jvm, future
+	// scanner/maven-alternatives, etc.) must be imported here.
+	_ "github.com/sentari-dev/sentari-agent/scanner/jvm"
 )
 
 func main() {
 	// Flag definitions
-	scanFlag := flag.Bool("scan", false, "Run a scan of Python environments")
+	scanFlag := flag.Bool("scan", false, "Run a scan of all supported ecosystems (Python + JVM)")
 	outputFlag := flag.String("output", "", "Output file path (default: stdout)")
 	formatFlag := flag.String("format", "json", "Output format: json or csv (default: json)")
 	configFlag := flag.String("config", "", "Path to agent config file")
