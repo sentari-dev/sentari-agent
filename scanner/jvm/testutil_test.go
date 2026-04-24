@@ -19,23 +19,32 @@ import (
 // exits; no teardown boilerplate in the caller.
 func buildJAR(t *testing.T, entries map[string][]byte) string {
 	t.Helper()
+	path := filepath.Join(t.TempDir(), "fixture.jar")
+	if err := os.WriteFile(path, buildJARBytes(t, entries), 0o644); err != nil {
+		t.Fatalf("buildJAR: write file: %v", err)
+	}
+	return path
+}
+
+// buildJARBytes is the in-memory variant used when the fixture needs
+// to be nested inside another JAR (Spring Boot / Quarkus uber-jar
+// tests).  Returns the raw zip bytes so the caller can plant them as
+// an entry of an outer ``buildJAR`` call.
+func buildJARBytes(t *testing.T, entries map[string][]byte) []byte {
+	t.Helper()
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	for name, content := range entries {
 		w, err := zw.Create(name)
 		if err != nil {
-			t.Fatalf("buildJAR: create %q: %v", name, err)
+			t.Fatalf("buildJARBytes: create %q: %v", name, err)
 		}
 		if _, err := w.Write(content); err != nil {
-			t.Fatalf("buildJAR: write %q: %v", name, err)
+			t.Fatalf("buildJARBytes: write %q: %v", name, err)
 		}
 	}
 	if err := zw.Close(); err != nil {
-		t.Fatalf("buildJAR: close zip: %v", err)
+		t.Fatalf("buildJARBytes: close zip: %v", err)
 	}
-	path := filepath.Join(t.TempDir(), "fixture.jar")
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
-		t.Fatalf("buildJAR: write file: %v", err)
-	}
-	return path
+	return buf.Bytes()
 }

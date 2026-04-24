@@ -45,28 +45,65 @@ func FuzzParseManifest(f *testing.F) {
 // purported zip, write them to a temp file and run extractFromJar on
 // the path.  The fuzzer exercises every entry-enumeration + reader
 // path with adversarial inputs, which is harder to reach from the
-// per-parser fuzzers above.
+// per-parser fuzzers above.  Post-nested-traversal, this fuzzer also
+// covers the recursion path — a mutated nested-jar member is a
+// second-order attack surface.
 func FuzzExtractFromJar(f *testing.F) {
-	// Seed with a minimal well-formed JAR.  We fail the fuzz setup
-	// hard on any error — a silent nil pointer from the zip writer
-	// defeats the point of fuzzing by crashing before the fuzzer
-	// starts.
-	var seed bytes.Buffer
-	zw := zip.NewWriter(&seed)
-	w, err := zw.Create("META-INF/maven/o/a/pom.properties")
+	// Seed 1 — minimal well-formed JAR.  All writer errors fail the
+	// setup hard so a silent nil-pointer crash doesn't kill the
+	// fuzzer before it starts.
+	var seed1 bytes.Buffer
+	zw1 := zip.NewWriter(&seed1)
+	w1, err := zw1.Create("META-INF/maven/o/a/pom.properties")
 	if err != nil {
-		f.Fatalf("fuzz seed: create pom.properties entry: %v", err)
+		f.Fatalf("fuzz seed 1: create pom.properties: %v", err)
 	}
-	if _, err := w.Write([]byte("groupId=o\nartifactId=a\nversion=1\n")); err != nil {
-		f.Fatalf("fuzz seed: write pom.properties entry: %v", err)
+	if _, err := w1.Write([]byte("groupId=o\nartifactId=a\nversion=1\n")); err != nil {
+		f.Fatalf("fuzz seed 1: write pom.properties: %v", err)
 	}
-	if err := zw.Close(); err != nil {
-		f.Fatalf("fuzz seed: finalise zip: %v", err)
+	if err := zw1.Close(); err != nil {
+		f.Fatalf("fuzz seed 1: finalise zip: %v", err)
 	}
-	f.Add(seed.Bytes())
+	f.Add(seed1.Bytes())
 
-	// Seed with non-zip garbage — the parser must produce a ScanError,
-	// not panic.
+	// Seed 2 — uber-jar with a valid nested JAR, so the fuzzer gets to
+	// exercise the recursion path without having to re-discover the
+	// ``entry ends in .jar → decompress → recurse`` chain from scratch.
+	var inner bytes.Buffer
+	izw := zip.NewWriter(&inner)
+	iw, err := izw.Create("META-INF/maven/n/inner/pom.properties")
+	if err != nil {
+		f.Fatalf("fuzz seed 2: create inner pom.properties: %v", err)
+	}
+	if _, err := iw.Write([]byte("groupId=n\nartifactId=inner\nversion=2\n")); err != nil {
+		f.Fatalf("fuzz seed 2: write inner pom.properties: %v", err)
+	}
+	if err := izw.Close(); err != nil {
+		f.Fatalf("fuzz seed 2: finalise inner zip: %v", err)
+	}
+
+	var seed2 bytes.Buffer
+	zw2 := zip.NewWriter(&seed2)
+	ow, err := zw2.Create("META-INF/maven/o/outer/pom.properties")
+	if err != nil {
+		f.Fatalf("fuzz seed 2: create outer pom.properties: %v", err)
+	}
+	if _, err := ow.Write([]byte("groupId=o\nartifactId=outer\nversion=1\n")); err != nil {
+		f.Fatalf("fuzz seed 2: write outer pom.properties: %v", err)
+	}
+	nw, err := zw2.Create("BOOT-INF/lib/inner.jar")
+	if err != nil {
+		f.Fatalf("fuzz seed 2: create nested entry: %v", err)
+	}
+	if _, err := nw.Write(inner.Bytes()); err != nil {
+		f.Fatalf("fuzz seed 2: write nested entry: %v", err)
+	}
+	if err := zw2.Close(); err != nil {
+		f.Fatalf("fuzz seed 2: finalise outer zip: %v", err)
+	}
+	f.Add(seed2.Bytes())
+
+	// Seeds for obvious-garbage + empty inputs.
 	f.Add([]byte("not a zip at all"))
 	f.Add([]byte{})
 
