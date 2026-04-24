@@ -237,9 +237,16 @@ func TestScannerDotVenvNotSkipped(t *testing.T) {
 }
 
 func TestScannerSkipDirs(t *testing.T) {
-	// Ensure node_modules, .git etc. are skipped.
+	// Ensure .git and __pycache__ are skipped unconditionally —
+	// no plugin has a legitimate reason to see them.  node_modules
+	// is intentionally NOT in this test any more: Sprint-17's npm
+	// plugin claims it as a scan root (returns Matched+Terminal
+	// on Match), so the walker DOES visit node_modules now.  A
+	// pathological pyvenv.cfg planted there surfaces as a venv
+	// env, but that matches reality.  Separate test below covers
+	// the npm-claims-node_modules case explicitly.
 	tmpDir := t.TempDir()
-	for _, skip := range []string{".git", "node_modules", "__pycache__"} {
+	for _, skip := range []string{".git", "__pycache__"} {
 		dir := filepath.Join(tmpDir, skip)
 		os.Mkdir(dir, 0755)
 		// Place a pyvenv.cfg inside — should NOT be discovered.

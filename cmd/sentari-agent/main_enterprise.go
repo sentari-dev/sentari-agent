@@ -32,6 +32,7 @@ import (
 	// the matching comment in main.go (OSS build).
 	_ "github.com/sentari-dev/sentari-agent/scanner/aiagents"
 	_ "github.com/sentari-dev/sentari-agent/scanner/jvm"
+	_ "github.com/sentari-dev/sentari-agent/scanner/npm"
 )
 
 const (

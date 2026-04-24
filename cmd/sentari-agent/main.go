@@ -25,6 +25,7 @@ import (
 	// etc.) must be imported here.
 	_ "github.com/sentari-dev/sentari-agent/scanner/aiagents"
 	_ "github.com/sentari-dev/sentari-agent/scanner/jvm"
+	_ "github.com/sentari-dev/sentari-agent/scanner/npm"
 )
 
 func main() {
