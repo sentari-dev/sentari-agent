@@ -12,12 +12,14 @@
 //
 //   - pnpm default mode, where ``node_modules/<pkg>`` is a symlink
 //     into ``node_modules/.pnpm/<pkg>@<ver>/node_modules/<pkg>``.
-//     safeio refuses to follow the symlink — resolving it safely
-//     wants ``openat2 RESOLVE_BENEATH`` in safeio, which is a
-//     standalone piece of work.  v1 therefore produces zero
-//     records on pnpm non-hoisted projects; operators can either
-//     set ``shamefully-hoist=true`` in .npmrc or wait for the v2
-//     plugin iteration.
+//     The plugin explicitly skips symlinked directory entries
+//     during its walk (see the symlink-handling note in
+//     parser.go) so those packages produce no records.  The
+//     v2 fix that unblocks pnpm default mode wants ``openat2
+//     RESOLVE_BENEATH`` in safeio + a resolve-then-verify path
+//     that keeps the symlink target inside the node_modules
+//     root.  Operators can either set ``shamefully-hoist=true``
+//     in ``.npmrc`` or wait for that v2 iteration.
 //
 //   - yarn Plug'n'Play (``.pnp.cjs`` manifest with bundled
 //     packages).  Requires parsing a generated JS manifest —

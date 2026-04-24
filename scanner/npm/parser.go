@@ -33,11 +33,18 @@ type packageManifest struct {
 // deep, handles scoped packages (``@scope/pkg``) via a second
 // level, and emits one PackageRecord per manifest we can parse.
 //
-// Symlink semantics: safeio.ReadFile refuses symlinks at the
-// manifest leaf, which means pnpm non-hoisted layouts (where
-// ``node_modules/<pkg>`` is a symlink into ``.pnpm/...``) produce
-// zero records.  That's a documented v1 gap — see the package
-// docstring in scanner.go.
+// Symlink handling: directory entries whose type includes
+// ``ModeSymlink`` are skipped explicitly here.  The generic
+// walker normally refuses to descend into symlinked directories
+// (see scanner/scanner.go), but the npm plugin returns
+// Terminal=true on Match so the generic protection no longer
+// applies once we're inside node_modules.  This is the
+// documented reason pnpm-in-default-mode produces zero records:
+// ``node_modules/<pkg>`` is a symlink into
+// ``node_modules/.pnpm/<pkg>@<ver>/node_modules/<pkg>`` and we
+// refuse to follow it.  Hoisted pnpm (``shamefully-hoist=true``)
+// lays out real directories and works identically to npm
+// classic.
 func scanNodeModules(root string) ([]scanner.PackageRecord, []scanner.ScanError) {
 	var (
 		records []scanner.PackageRecord
@@ -57,6 +64,11 @@ func scanNodeModules(root string) ([]scanner.PackageRecord, []scanner.ScanError)
 	}
 
 	for _, e := range entries {
+		// Skip symlinked directory entries explicitly — see
+		// symlink-handling note above.
+		if e.Type()&os.ModeSymlink != 0 {
+			continue
+		}
 		if !e.IsDir() {
 			continue
 		}
@@ -69,13 +81,15 @@ func scanNodeModules(root string) ([]scanner.PackageRecord, []scanner.ScanError)
 		if strings.HasPrefix(name, "@") {
 			// Scoped namespace: scope + slash + package name.
 			// One more level of directory walk to reach each
-			// scoped package's manifest.
-			scopeRecs, scopeErrs := scanScope(filepath.Join(root, name), name)
+			// scoped package's manifest.  ``root`` passed through
+			// so scoped records carry the same ``Environment``
+			// value as their flat-laid siblings.
+			scopeRecs, scopeErrs := scanScope(root, filepath.Join(root, name), name)
 			records = append(records, scopeRecs...)
 			errs = append(errs, scopeErrs...)
 			continue
 		}
-		rec, err := parsePackageDir(filepath.Join(root, name))
+		rec, err := parsePackageDir(root, filepath.Join(root, name))
 		if err != nil {
 			errs = append(errs, scanner.ScanError{
 				Path:      filepath.Join(root, name),
@@ -95,8 +109,11 @@ func scanNodeModules(root string) ([]scanner.PackageRecord, []scanner.ScanError)
 
 // scanScope walks one ``@scope/`` directory and emits records
 // for each scoped package inside.  Split out so the main loop
-// stays flat.
-func scanScope(scopeDir, scopeName string) ([]scanner.PackageRecord, []scanner.ScanError) {
+// stays flat.  ``envRoot`` is the node_modules directory that
+// kicked off the scan — passed through so emitted records carry
+// a consistent ``Environment`` value regardless of whether
+// they're in a ``@scope`` subtree.
+func scanScope(envRoot, scopeDir, scopeName string) ([]scanner.PackageRecord, []scanner.ScanError) {
 	entries, err := os.ReadDir(scopeDir)
 	if err != nil {
 		return nil, []scanner.ScanError{{
@@ -111,13 +128,18 @@ func scanScope(scopeDir, scopeName string) ([]scanner.PackageRecord, []scanner.S
 		errs    []scanner.ScanError
 	)
 	for _, e := range entries {
+		// Same symlink filter as the outer walk — pnpm scoped
+		// packages also land as symlinks into ``.pnpm/``.
+		if e.Type()&os.ModeSymlink != 0 {
+			continue
+		}
 		if !e.IsDir() {
 			continue
 		}
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		rec, err := parsePackageDir(filepath.Join(scopeDir, e.Name()))
+		rec, err := parsePackageDir(envRoot, filepath.Join(scopeDir, e.Name()))
 		if err != nil {
 			errs = append(errs, scanner.ScanError{
 				Path:      filepath.Join(scopeDir, e.Name()),
@@ -140,9 +162,20 @@ func scanScope(scopeDir, scopeName string) ([]scanner.PackageRecord, []scanner.S
 // caller then skips it silently — this is the common case for
 // stray/cache dirs inside node_modules.  A hard error (permission
 // denied, malformed JSON, symlink-refused) returns (nil, err).
-func parsePackageDir(pkgDir string) (*scanner.PackageRecord, error) {
+//
+// ``envRoot`` is the node_modules dir that kicked off the scan.
+// It's stamped on ``Environment`` so every record from the same
+// node_modules tree carries one consistent value — flat
+// packages, scoped packages, and (later) nested layouts all
+// group together on the server-side dashboard.  Previously each
+// scope had its own ``@scope`` Environment string which split
+// records arbitrarily.
+func parsePackageDir(envRoot, pkgDir string) (*scanner.PackageRecord, error) {
 	manifest := filepath.Join(pkgDir, "package.json")
-	data, err := safeio.ReadFile(manifest, maxPackageJSONBytes)
+	// Single fd for both the content read and the mtime — no
+	// path-based TOCTOU window, matches the pattern we use in
+	// aiagents.
+	data, mtime, err := safeio.ReadFileWithMTime(manifest, maxPackageJSONBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Not a package dir — silent skip.
@@ -161,22 +194,14 @@ func parsePackageDir(pkgDir string) (*scanner.PackageRecord, error) {
 		// emit a ghost record for it.
 		return nil, nil //nolint:nilnil
 	}
-	// InstallDate proxy: the manifest's mtime, obtained via the
-	// same file descriptor safeio already validated so there's
-	// no symlink-swap TOCTOU window.  Fallback to empty string
-	// when the stat fails.
-	installDate := ""
-	if info, err := os.Stat(manifest); err == nil {
-		installDate = info.ModTime().UTC().Format(time.RFC3339)
-	}
 	return &scanner.PackageRecord{
 		Name:        m.Name,
 		Version:     m.Version,
 		InstallPath: pkgDir,
 		EnvType:     EnvNpm,
-		Environment: filepath.Dir(pkgDir),
+		Environment: envRoot,
 		LicenseRaw:  extractLicense(m),
-		InstallDate: installDate,
+		InstallDate: mtime.Format(time.RFC3339),
 	}, nil
 }
 

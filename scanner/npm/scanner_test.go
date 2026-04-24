@@ -303,3 +303,75 @@ func TestScan_UnknownLayout_ScanError(t *testing.T) {
 		t.Errorf("ScanError EnvType: got %q", errs[0].EnvType)
 	}
 }
+
+// TestScan_SkipsSymlinkedDirs: when a directory entry under
+// node_modules is a symlink to another directory (the pnpm
+// non-hoisted case), it must be skipped — not followed.  Without
+// this, a hostile layer could plant a symlink to
+// /etc/.../package.json and exfiltrate contents as a ghost
+// package record.  Documents the pnpm-default-mode gap.
+func TestScan_SkipsSymlinkedDirs(t *testing.T) {
+	// Real, flat packages.
+	root := t.TempDir()
+	writePkg(t, root, "lodash", "4.17.21", nil)
+
+	// Plant a symlink-dir alongside.  Simulates pnpm's
+	// ``node_modules/<pkg>`` → ``.pnpm/<pkg>@<ver>/node_modules/<pkg>``
+	// shape by symlinking to a real package dir elsewhere.
+	target := t.TempDir()
+	writePkg(t, target, "should-not-appear", "9.9.9", nil)
+	symlink := filepath.Join(root, "should-not-appear")
+	if err := os.Symlink(filepath.Join(target, "should-not-appear"), symlink); err != nil {
+		t.Skipf("symlink creation not supported on this platform: %v", err)
+	}
+
+	var s Scanner
+	records, errs := s.Scan(context.Background(), scanner.Environment{
+		Name: layoutNodeModules,
+		Path: root,
+	})
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	for _, r := range records {
+		if r.Name == "should-not-appear" {
+			t.Errorf("symlinked package surfaced as a record; got %+v", r)
+		}
+	}
+	// The real package still comes through.
+	found := false
+	for _, r := range records {
+		if r.Name == "lodash" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("real package missed alongside symlinked one")
+	}
+}
+
+// TestScan_EnvironmentFieldIsNodeModulesRoot: every emitted
+// record — flat, scoped, or nested — must carry the same
+// ``Environment`` value: the node_modules directory the scan
+// started in.  Previously scoped packages got ``@scope`` as
+// their Environment which split records across dashboard
+// filters.  Regression test.
+func TestScan_EnvironmentFieldIsNodeModulesRoot(t *testing.T) {
+	root := t.TempDir()
+	writePkg(t, root, "lodash", "4.17.21", nil)            // flat
+	writePkg(t, root, "@types/node", "20.0.0", nil)        // scoped
+
+	var s Scanner
+	records, _ := s.Scan(context.Background(), scanner.Environment{
+		Name: layoutNodeModules,
+		Path: root,
+	})
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records; got %+v", records)
+	}
+	for _, r := range records {
+		if r.Environment != root {
+			t.Errorf("record %s Environment: got %q, want %q", r.Name, r.Environment, root)
+		}
+	}
+}
