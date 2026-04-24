@@ -91,10 +91,13 @@ func scanClaudeCode(path string) ([]scanner.PackageRecord, []scanner.ScanError) 
 		if !ok {
 			continue
 		}
-		installDate := ""
-		if info, err := e.Info(); err == nil {
-			installDate = info.ModTime().UTC().Format(time.RFC3339)
-		}
+		// InstallDate uses the marker-file mtime, NOT the
+		// directory mtime.  For skills the marker is SKILL.md,
+		// for plugins it's plugin.json, for agents the entry
+		// itself is the .md file.  Dir mtime updates on
+		// unrelated edits (e.g. `rm`/`mv` of a sibling) which
+		// would noise up the install_age detective rule.
+		installDate := markerMTime(base, path, e)
 		records = append(records, scanner.PackageRecord{
 			Name:        name,
 			EnvType:     EnvAIAgent,
@@ -104,6 +107,37 @@ func scanClaudeCode(path string) ([]scanner.PackageRecord, []scanner.ScanError) 
 		})
 	}
 	return records, errs
+}
+
+// markerMTime returns the RFC3339 mtime of the entry's
+// load-bearing marker file — the file whose presence makes the
+// entry a valid record.  For agents that's the .md itself; for
+// skills and plugins it's the nested manifest file.  "" is
+// returned when the marker can't be stat'd (shouldn't happen
+// in practice because claudeEntryName only returned ok=true
+// after stat'ing it already; defensive).
+func markerMTime(subdir, dirPath string, e os.DirEntry) string {
+	var marker string
+	switch subdir {
+	case "agents":
+		// The directory entry IS the marker.
+		info, err := e.Info()
+		if err != nil {
+			return ""
+		}
+		return info.ModTime().UTC().Format(time.RFC3339)
+	case "skills":
+		marker = filepath.Join(dirPath, e.Name(), "SKILL.md")
+	case "plugins":
+		marker = filepath.Join(dirPath, e.Name(), "plugin.json")
+	default:
+		return ""
+	}
+	info, err := os.Stat(marker)
+	if err != nil {
+		return ""
+	}
+	return info.ModTime().UTC().Format(time.RFC3339)
 }
 
 // claudeEntryName decides whether a single dir-entry under a

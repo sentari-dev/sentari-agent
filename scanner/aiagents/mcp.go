@@ -38,18 +38,29 @@ type mcpServerEntry struct {
 }
 
 // discoverMCPConfigs enumerates the platform-appropriate MCP config
-// paths and emits one Environment per config file that exists.  A
-// missing path is NOT an error — the user may simply not use that
-// tool.  Permission-denied on a path IS a ScanError so operators can
-// tell the difference between "not installed" and "running as the
-// wrong user to see this config."
-func discoverMCPConfigs() []scanner.Environment {
+// paths and emits one Environment per config file that exists.
+//
+// Error semantics (aligning with the comment the review found
+// outdated): os.IsNotExist is silently skipped — the user simply
+// doesn't have that tool configured.  Permission-denied is
+// returned as a ScanError alongside the envs so operators can
+// tell "not installed" from "agent can't read this user's config"
+// via the exit surface, not by grepping stderr.
+func discoverMCPConfigs() ([]scanner.Environment, []scanner.ScanError) {
 	var envs []scanner.Environment
+	var errs []scanner.ScanError
 	for _, path := range mcpConfigPaths() {
 		info, err := os.Stat(path)
 		if err != nil {
-			// os.IsNotExist is the common case — absent config file
-			// means this tool isn't configured on this host.
+			if isNotExist(err) {
+				continue
+			}
+			errs = append(errs, scanner.ScanError{
+				Path:      path,
+				EnvType:   EnvAIAgent,
+				Error:     fmt.Sprintf("mcp config stat: %v", err),
+				Timestamp: time.Now().UTC(),
+			})
 			continue
 		}
 		if info.IsDir() {
@@ -61,7 +72,7 @@ func discoverMCPConfigs() []scanner.Environment {
 			Path:    path,
 		})
 	}
-	return envs
+	return envs, errs
 }
 
 // mcpConfigPaths returns every known MCP config location for the
@@ -108,25 +119,14 @@ func mcpConfigPaths() []string {
 // is derived from the command/args when we can parse a version
 // hint (``@modelcontextprotocol/server-filesystem@1.2.3`` → 1.2.3),
 // otherwise left empty — many MCP configs don't pin a version.
+//
+// Read + mtime go through ``readFileWithMTime`` which opens the
+// file once via ``safeio.Open`` and derives both the content and
+// the mtime from the same file descriptor — no path-based TOCTOU
+// window between the read and the install-date proxy stamp.  A
+// symlinked mcp.json is refused at open time.
 func scanMCPConfig(path string) ([]scanner.PackageRecord, []scanner.ScanError) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, []scanner.ScanError{{
-			Path:      path,
-			EnvType:   EnvAIAgent,
-			Error:     fmt.Sprintf("mcp config stat: %v", err),
-			Timestamp: time.Now().UTC(),
-		}}
-	}
-	if info.Size() > maxMCPConfigBytes {
-		return nil, []scanner.ScanError{{
-			Path:      path,
-			EnvType:   EnvAIAgent,
-			Error:     fmt.Sprintf("mcp config exceeds size cap: %d > %d", info.Size(), maxMCPConfigBytes),
-			Timestamp: time.Now().UTC(),
-		}}
-	}
-	data, err := os.ReadFile(path)
+	data, mtime, err := readFileWithMTime(path, maxMCPConfigBytes)
 	if err != nil {
 		return nil, []scanner.ScanError{{
 			Path:      path,
@@ -151,7 +151,7 @@ func scanMCPConfig(path string) ([]scanner.PackageRecord, []scanner.ScanError) {
 	// the user edited their MCP config is the closest proxy we
 	// have to "when this server was first configured."  Good
 	// enough for the install_age detective rule.
-	installDate := info.ModTime().UTC()
+	installDate := mtime
 
 	out := make([]scanner.PackageRecord, 0, len(cfg.MCPServers))
 	for name, entry := range cfg.MCPServers {

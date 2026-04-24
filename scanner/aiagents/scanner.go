@@ -28,6 +28,8 @@ package aiagents
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
@@ -76,12 +78,32 @@ func (Scanner) EnvType() string { return EnvAIAgent }
 //     (install_age combined with a known-AI-agent env-var
 //     correlation at scan time) is a follow-up.
 func (Scanner) DiscoverAll(ctx context.Context) ([]scanner.Environment, []scanner.ScanError) {
-	_ = ctx // reserved for cancellation if discoverers grow heavy
+	// Container-scan gate.  During a container sub-scan the
+	// orchestrator calls every plugin's DiscoverAll against a
+	// materialised merged rootfs (ScanRoot = temp dir).  This
+	// plugin's discoverers read the *host's* HOME / USERPROFILE
+	// + Library / AppData paths, which are OUTSIDE the temp
+	// root.  Running them unconditionally would leak the host
+	// user's AI surface into every container record set —
+	// visible in the dashboard as "container X has 24 AI
+	// agents" when the container itself has none.  Only run
+	// when we're doing a full-system scan (scan root is "/"
+	// or the Windows equivalent).
+	if !scanner.IsFullSystemScan(ctx) {
+		return nil, nil
+	}
+
 	var envs []scanner.Environment
-	envs = append(envs, discoverMCPConfigs()...)
+	var errs []scanner.ScanError
+
+	mcpEnvs, mcpErrs := discoverMCPConfigs()
+	envs = append(envs, mcpEnvs...)
+	errs = append(errs, mcpErrs...)
+
 	envs = append(envs, discoverClaudeCode()...)
 	envs = append(envs, discoverIDEExtensions()...)
-	return envs, nil
+
+	return envs, errs
 }
 
 // Scan dispatches on the Environment's Name (layout tag) to the
@@ -98,6 +120,15 @@ func (Scanner) Scan(ctx context.Context, env scanner.Environment) ([]scanner.Pac
 	case layoutIDEExtensions:
 		return scanIDEExtensions(env.Path)
 	default:
-		return nil, nil
+		// Loud-on-dispatch-bug: every other plugin surfaces an
+		// unknown layout tag as a ScanError so a discovery-
+		// versus-scan wiring mismatch is visible in the scan
+		// output rather than silently dropping records.
+		return nil, []scanner.ScanError{{
+			Path:      env.Path,
+			EnvType:   EnvAIAgent,
+			Error:     fmt.Sprintf("unknown ai_agent layout: %q", env.Name),
+			Timestamp: time.Now().UTC(),
+		}}
 	}
 }

@@ -125,23 +125,16 @@ func scanIDEExtensions(root string) ([]scanner.PackageRecord, []scanner.ScanErro
 		}
 		dir := filepath.Join(root, e.Name())
 		manifest := filepath.Join(dir, "package.json")
-		info, err := os.Stat(manifest)
+		// readFileWithMTime opens once via safeio (refuses symlinks)
+		// and derives both the bytes and the mtime from the same fd
+		// — no path-based TOCTOU window for the install-date proxy.
+		// Missing manifest = not an extension dir (common case);
+		// silent skip rather than emit a ScanError.
+		data, mtime, err := readFileWithMTime(manifest, maxExtensionManifestBytes)
 		if err != nil {
-			// No manifest = not a VS Code extension dir (maybe
-			// a cache dir); skip silently.
-			continue
-		}
-		if info.Size() > maxExtensionManifestBytes {
-			errs = append(errs, scanner.ScanError{
-				Path:      manifest,
-				EnvType:   EnvAIAgent,
-				Error:     fmt.Sprintf("manifest exceeds size cap: %d", info.Size()),
-				Timestamp: time.Now().UTC(),
-			})
-			continue
-		}
-		data, err := os.ReadFile(manifest)
-		if err != nil {
+			if isNotExist(err) {
+				continue
+			}
 			errs = append(errs, scanner.ScanError{
 				Path:      manifest,
 				EnvType:   EnvAIAgent,
@@ -167,7 +160,7 @@ func scanIDEExtensions(root string) ([]scanner.PackageRecord, []scanner.ScanErro
 		if _, ok := knownAIExtensions[key]; !ok {
 			continue
 		}
-		installDate := info.ModTime().UTC().Format(time.RFC3339)
+		installDate := mtime.Format(time.RFC3339)
 		records = append(records, scanner.PackageRecord{
 			Name:        "ide-ext:" + key,
 			Version:     m.Version,

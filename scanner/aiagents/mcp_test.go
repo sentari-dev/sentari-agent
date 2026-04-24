@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"sort"
 	"testing"
+
+	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
 // TestScanMCPConfig_ParsesRealShape: the config file format
@@ -115,9 +117,12 @@ func TestDiscoverMCPConfigs_SkipsMissingPaths(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	t.Setenv("USERPROFILE", tmp)
-	envs := discoverMCPConfigs()
+	envs, errs := discoverMCPConfigs()
 	if len(envs) != 0 {
 		t.Errorf("expected 0 envs when no config present; got %+v", envs)
+	}
+	if len(errs) != 0 {
+		t.Errorf("missing paths are the common case; should not surface as ScanError. got %+v", errs)
 	}
 }
 
@@ -149,7 +154,7 @@ func TestDiscoverMCPConfigs_PicksUpClaudeConfig(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	envs := discoverMCPConfigs()
+	envs, _ := discoverMCPConfigs()
 	paths := make([]string, 0, len(envs))
 	for _, e := range envs {
 		paths = append(paths, e.Path)
@@ -205,4 +210,27 @@ func TestScanner_RegistersAtInit(t *testing.T) {
 		t.Fatalf("EnvType mismatch: %q", s.EnvType())
 	}
 	_, _ = s.DiscoverAll(context.Background())
+}
+
+// TestDiscoverAll_NoOpDuringContainerSubScan: when the orchestrator
+// sets ScanRoot to a materialised container rootfs (NOT "/"), the
+// AI-agent plugin must not read the host's HOME / Application
+// Support paths — otherwise the container record set gets
+// contaminated with the host user's AI surface, which is
+// semantically wrong (those MCP configs aren't in the container)
+// and misleading operationally.
+func TestDiscoverAll_NoOpDuringContainerSubScan(t *testing.T) {
+	// Even if the host has MCP configs present, we'd still expect
+	// zero envs when the scan root is a random temp dir (not "/").
+	tmp := t.TempDir()
+	ctx := scanner.WithScanRoot(context.Background(), tmp)
+
+	var s Scanner
+	envs, errs := s.DiscoverAll(ctx)
+	if len(envs) != 0 {
+		t.Errorf("expected 0 envs in container sub-scan; got %d", len(envs))
+	}
+	if len(errs) != 0 {
+		t.Errorf("expected 0 errs; got %+v", errs)
+	}
 }
