@@ -15,17 +15,20 @@ import "github.com/sentari-dev/sentari-agent/scanner"
 // Marker: ``start.jar`` at the install root is present in every
 // Jetty distribution since 7.  ``lib/jetty-*.jar`` is the binary
 // equivalent check.
+// jettyWellKnown — see note in tomcatWellKnown.
+var jettyWellKnown = map[string][]string{
+	"linux":  {"/opt", "/usr/share", "/var/lib"},
+	"darwin": {"/opt", "/usr/local/opt"},
+	"windows": {
+		`C:\Program Files\Eclipse Foundation`,
+	},
+}
+
 func discoverJetty() []scanner.Environment {
 	return discoverByServerSpec(serverSpec{
-		layout:  layoutJetty,
-		envVars: []string{"JETTY_HOME", "JETTY_BASE"},
-		wellKnown: map[string][]string{
-			"linux":  {"/opt", "/usr/share", "/var/lib"},
-			"darwin": {"/opt", "/usr/local/opt"},
-			"windows": {
-				`C:\Program Files\Eclipse Foundation`,
-			},
-		},
+		layout:    layoutJetty,
+		envVars:   []string{"JETTY_HOME", "JETTY_BASE"},
+		wellKnown: jettyWellKnown,
 		marker: func(root string) bool {
 			// start.jar is the universal Jetty marker; etc/jetty.xml
 			// is the fallback for stripped installs.  "lib" alone

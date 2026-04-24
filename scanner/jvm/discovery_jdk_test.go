@@ -67,6 +67,14 @@ func TestDiscoverJDK_JavaHomeWins(t *testing.T) {
 	jdk := filepath.Join(tmp, "jdk-21")
 	seedJDKFixture(t, jdk, "21.0.3")
 
+	// Hermeticity: discoverJDK also walks jdkWellKnownRoots
+	// (/usr/lib/jvm etc.), so on CI images with a real system JDK
+	// installed we'd get >1 Environment. Override with an empty
+	// slice so only the JAVA_HOME branch is exercised.
+	originalRoots := jdkWellKnownRoots
+	t.Cleanup(func() { jdkWellKnownRoots = originalRoots })
+	jdkWellKnownRoots = nil
+
 	t.Setenv("JAVA_HOME", jdk)
 	// Clear USERPROFILE/HOME so the well-known install walk can't
 	// accidentally add extras.
@@ -99,6 +107,13 @@ func TestDiscoverJDK_JavaHomeButNotAJDK(t *testing.T) {
 	if err := os.MkdirAll(bogus, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	// Hermeticity: clear well-known roots so CI systems with a real
+	// system JDK don't inject an extra Environment and fool the
+	// len(envs) != 0 assertion.
+	originalRoots := jdkWellKnownRoots
+	t.Cleanup(func() { jdkWellKnownRoots = originalRoots })
+	jdkWellKnownRoots = nil
+
 	t.Setenv("JAVA_HOME", bogus)
 	t.Setenv("HOME", tmp)
 	t.Setenv("USERPROFILE", tmp)

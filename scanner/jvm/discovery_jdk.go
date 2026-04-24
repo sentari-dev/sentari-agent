@@ -68,12 +68,15 @@ func initJDKRoots() []string {
 func discoverJDK() []scanner.Environment {
 	var out []scanner.Environment
 
-	if jh := os.Getenv("JAVA_HOME"); jh != "" && looksLikeJDK(jh) {
-		out = append(out, scanner.Environment{
-			EnvType: EnvJVM,
-			Name:    layoutJDKRuntime,
-			Path:    jh,
-		})
+	if jh := os.Getenv("JAVA_HOME"); jh != "" {
+		jh = filepath.Clean(jh)
+		if looksLikeJDK(jh) {
+			out = append(out, scanner.Environment{
+				EnvType: EnvJVM,
+				Name:    layoutJDKRuntime,
+				Path:    jh,
+			})
+		}
 	}
 
 	for _, root := range jdkWellKnownRoots {
@@ -88,6 +91,17 @@ func discoverJDK() []scanner.Environment {
 				continue
 			}
 			candidate := filepath.Join(root, d.Name())
+			// On macOS, ``/Library/Java/JavaVirtualMachines/<name>.jdk``
+			// is a bundle directory; the actual JDK home (with the
+			// ``release`` file and ``lib/modules``) is nested under
+			// ``Contents/Home``.  Resolve that first so looksLikeJDK
+			// sees the real layout.  On Linux/Windows the flat layout
+			// is the norm and this branch is a no-op.
+			if runtime.GOOS == "darwin" {
+				if inner := filepath.Join(candidate, "Contents", "Home"); looksLikeJDK(inner) {
+					candidate = inner
+				}
+			}
 			if !looksLikeJDK(candidate) {
 				continue
 			}
@@ -165,16 +179,26 @@ func readJDKVersion(root string) string {
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
-		if !strings.HasPrefix(line, "JAVA_VERSION") {
-			continue
-		}
 		idx := strings.IndexByte(line, '=')
 		if idx < 0 {
+			continue
+		}
+		// Match the key exactly: without this, JAVA_VERSION_DATE (a
+		// real key on modern release files) matches HasPrefix and we
+		// return the date instead of the version.
+		key := strings.TrimSpace(line[:idx])
+		if key != "JAVA_VERSION" {
 			continue
 		}
 		val := strings.TrimSpace(line[idx+1:])
 		val = strings.Trim(val, `"`)
 		return val
+	}
+	// Surface scanner errors explicitly (oversized lines, read errors).
+	// We still return "" — the JDK version is a nice-to-have, not a
+	// hard requirement — but ignoring Err() silently hides real bugs.
+	if err := sc.Err(); err != nil {
+		return ""
 	}
 	return ""
 }

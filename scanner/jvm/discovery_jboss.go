@@ -21,23 +21,34 @@ import "github.com/sentari-dev/sentari-agent/scanner"
 // Nested .ear/.war entries get descended into by the nested-jar
 // traversal (PR #6), so every bundled library surfaces as its own
 // PackageRecord.
+// jbossWellKnown — see note in tomcatWellKnown.  Previously this
+// included ``C:\`` directly which forced a listing of the Windows
+// system drive root; narrowed to specific parents that every real
+// Red Hat / WildFly installer uses.
+var jbossWellKnown = map[string][]string{
+	"linux":  {"/opt", "/usr/share"},
+	"darwin": {"/opt", "/usr/local/opt"},
+	"windows": {
+		`C:\Program Files`,
+		`C:\Program Files\Red Hat`,
+		`C:\wildfly`,
+		`C:\jboss`,
+	},
+}
+
 func discoverJBoss() []scanner.Environment {
 	return discoverByServerSpec(serverSpec{
-		layout:  layoutJBoss,
-		envVars: []string{"JBOSS_HOME", "WILDFLY_HOME", "EAP_HOME"},
-		wellKnown: map[string][]string{
-			"linux":  {"/opt", "/usr/share"},
-			"darwin": {"/opt", "/usr/local/opt"},
-			"windows": {
-				`C:\`,
-				`C:\Program Files`,
-			},
-		},
+		layout:    layoutJBoss,
+		envVars:   []string{"JBOSS_HOME", "WILDFLY_HOME", "EAP_HOME"},
+		wellKnown: jbossWellKnown,
 		marker: func(root string) bool {
 			// Both markers must be present so the check doesn't
 			// false-positive on random ``bin/standalone.sh`` scripts.
+			// The ``modules/`` entry must be a directory — a regular
+			// file named ``modules`` would otherwise satisfy hasAny
+			// and produce a false positive on wrapper shell scripts.
 			return hasAny(root, "bin/standalone.sh", "bin/standalone.bat") &&
-				hasAny(root, "modules")
+				hasAnyDir(root, "modules")
 		},
 	})
 }

@@ -86,12 +86,31 @@ func discoverByServerSpec(spec serverSpec) []scanner.Environment {
 }
 
 // hasAny returns true iff ``root`` contains at least one of the given
-// relative paths.  Helper for the marker predicates below — each
-// server has a short list of "this file/dir uniquely identifies an
-// install of me" markers.
+// relative paths as anything (file or directory).  Helper for the
+// marker predicates below — each server has a short list of "this
+// file/dir uniquely identifies an install of me" markers.
+//
+// Use hasAnyDir instead when a marker MUST be a directory (e.g. the
+// JBoss/WildFly ``modules`` check): otherwise a hostile or buggy
+// wrapper script named ``modules`` would satisfy the shape check.
 func hasAny(root string, rels ...string) bool {
 	for _, rel := range rels {
 		if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAnyDir is the directory-only variant of hasAny.  Returns true iff
+// at least one of the relative paths exists AND names a directory.
+// Used for markers that must be directories (e.g. the JBoss/WildFly
+// ``modules`` entry) so a same-named regular file can't spoof the
+// check.
+func hasAnyDir(root string, rels ...string) bool {
+	for _, rel := range rels {
+		st, err := os.Stat(filepath.Join(root, rel))
+		if err == nil && st.IsDir() {
 			return true
 		}
 	}

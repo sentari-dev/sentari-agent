@@ -18,64 +18,77 @@ import (
 // marker-shape quirks live near that server's row.
 
 type serverFixture struct {
-	name         string // for t.Run
-	envVar       string
-	layoutConst  string
-	markerFiles  []string // relative paths to create (dirs auto-created)
-	discoverFunc func() []serverEnvironment
+	name        string // for t.Run
+	envVar      string
+	layoutConst string
+	markerFiles []string // relative paths to create (dirs auto-created)
 }
 
-// serverEnvironment is a shape-only alias so this file doesn't need
-// to import the scanner package just for the assertion loop.
+// serverEnvironment is a shape-only alias used by runDiscoverer so the
+// table body doesn't have to import scanner.Environment for each cast.
 type serverEnvironment = struct {
 	EnvType string
 	Path    string
 	Name    string
 }
 
+// fixtures covers every env var each discoverer actually consults so a
+// typo or marker-expectation mismatch for any variant is caught here,
+// not by a customer.  Tomcat: CATALINA_HOME only (CATALINA_BASE is not
+// a binary root).  JBoss: all three alias vars.  Jetty: HOME + BASE
+// (BASE also carries start.jar when a split install is in use).
 func fixtures() []serverFixture {
-	// Wrap each discoverer so the test table sees a uniform
-	// signature.  (Can't store the raw functions directly because
-	// they return scanner.Environment and the test file above already
-	// imports the scanner package where needed.)
-	toAlias := func(envs interface{ Len() int }) []serverEnvironment {
-		return nil // unused — we compare via the real discoverer below
-	}
-	_ = toAlias
-
 	return []serverFixture{
 		{
-			name:        "tomcat",
+			name:        "tomcat-CATALINA_HOME",
 			envVar:      "CATALINA_HOME",
 			layoutConst: layoutTomcat,
 			markerFiles: []string{"bin/catalina.sh"},
 		},
 		{
-			name:        "jboss",
+			name:        "jboss-JBOSS_HOME",
 			envVar:      "JBOSS_HOME",
 			layoutConst: layoutJBoss,
 			markerFiles: []string{"bin/standalone.sh", "modules/placeholder"},
 		},
 		{
-			name:        "weblogic",
+			name:        "jboss-WILDFLY_HOME",
+			envVar:      "WILDFLY_HOME",
+			layoutConst: layoutJBoss,
+			markerFiles: []string{"bin/standalone.sh", "modules/placeholder"},
+		},
+		{
+			name:        "jboss-EAP_HOME",
+			envVar:      "EAP_HOME",
+			layoutConst: layoutJBoss,
+			markerFiles: []string{"bin/standalone.sh", "modules/placeholder"},
+		},
+		{
+			name:        "weblogic-WL_HOME",
 			envVar:      "WL_HOME",
 			layoutConst: layoutWebLogic,
 			markerFiles: []string{"server/bin/startWebLogic.sh"},
 		},
 		{
-			name:        "websphere",
+			name:        "websphere-WAS_HOME",
 			envVar:      "WAS_HOME",
 			layoutConst: layoutWebSphere,
 			markerFiles: []string{"bin/versionInfo.sh"},
 		},
 		{
-			name:        "jetty",
+			name:        "jetty-JETTY_HOME",
 			envVar:      "JETTY_HOME",
 			layoutConst: layoutJetty,
 			markerFiles: []string{"start.jar"},
 		},
 		{
-			name:        "glassfish",
+			name:        "jetty-JETTY_BASE",
+			envVar:      "JETTY_BASE",
+			layoutConst: layoutJetty,
+			markerFiles: []string{"start.jar"},
+		},
+		{
+			name:        "glassfish-GLASSFISH_HOME",
 			envVar:      "GLASSFISH_HOME",
 			layoutConst: layoutGlassFish,
 			markerFiles: []string{"bin/asadmin"},
@@ -140,23 +153,44 @@ func TestAppServerDiscoverers_EnvVarRefusedOnNonMatchingDir(t *testing.T) {
 }
 
 // TestAppServerDiscoverers_NothingConfigured: with every server env
-// var cleared and no well-known paths hit (tests run under t.TempDir
-// so /opt/tomcat etc. are either absent or out of reach), the
-// discoverer returns empty.
+// var cleared AND the well-known-roots slices emptied, every
+// discoverer MUST return an empty slice.  Previously we tolerated a
+// non-empty result on CI images with real installs under /opt — but
+// that made the test non-deterministic and effectively untestable.
+// Now the well-known paths are forcibly empty so the assertion is
+// strict.
 func TestAppServerDiscoverers_NothingConfigured(t *testing.T) {
+	// Zero out well-known parents for every app-server discoverer so
+	// the test is hermetic on hosts with real installs under /opt
+	// (common on CI Linux images).
+	origTomcat := tomcatWellKnown
+	origJBoss := jbossWellKnown
+	origWebLogic := weblogicWellKnown
+	origWebSphereAbs := websphereWellKnownAbs
+	origJetty := jettyWellKnown
+	origGlassFish := glassfishWellKnown
+	t.Cleanup(func() {
+		tomcatWellKnown = origTomcat
+		jbossWellKnown = origJBoss
+		weblogicWellKnown = origWebLogic
+		websphereWellKnownAbs = origWebSphereAbs
+		jettyWellKnown = origJetty
+		glassfishWellKnown = origGlassFish
+	})
+	tomcatWellKnown = nil
+	jbossWellKnown = nil
+	weblogicWellKnown = nil
+	websphereWellKnownAbs = nil
+	jettyWellKnown = nil
+	glassfishWellKnown = nil
+
 	for _, f := range fixtures() {
 		t.Run(f.name, func(t *testing.T) {
 			clearAllServerEnvs(t)
 			envs := runDiscoverer(f.name)
-			// On a CI host with real Tomcat/WildFly installed under
-			// /opt this could return non-empty.  We allow it — the
-			// scenario is unusual enough that we'd rather document
-			// than skip the test entirely.  What we MUST NOT see is
-			// a panic or a wrong layout tag.
-			for _, e := range envs {
-				if e.Name != f.layoutConst {
-					t.Errorf("%s: unexpected layout %q in %+v", f.name, e.Name, e)
-				}
+			if len(envs) != 0 {
+				t.Fatalf("%s: expected 0 Environments with nothing configured, got %d: %+v",
+					f.name, len(envs), envs)
 			}
 		})
 	}
@@ -174,11 +208,14 @@ func clearAllServerEnvs(t *testing.T) {
 	for _, v := range []string{
 		// Workstation + JDK
 		"MAVEN_HOME", "GRADLE_USER_HOME", "JAVA_HOME",
-		// Tomcat
+		// Tomcat — CATALINA_BASE is NOT consulted by the discoverer
+		// (see note in discovery_tomcat.go) but we still clear it to
+		// avoid leakage from the caller's environment into the test.
 		"CATALINA_HOME", "CATALINA_BASE",
 		// JBoss / WildFly / EAP
 		"JBOSS_HOME", "WILDFLY_HOME", "EAP_HOME",
-		// WebLogic
+		// WebLogic — MW_HOME / DOMAIN_HOME are NOT consulted (see
+		// note in discovery_weblogic.go) but we clear them anyway.
 		"WL_HOME", "MW_HOME", "DOMAIN_HOME",
 		// WebSphere
 		"WAS_HOME",
@@ -204,9 +241,11 @@ func seedMarkers(t *testing.T, root string, rels []string) {
 	}
 }
 
-// runDiscoverer routes the string name to the actual discoverer and
-// converts the returned []scanner.Environment into the alias shape
-// used by the table above.  Keeps the table rows free of type noise.
+// runDiscoverer routes a fixture name (e.g. "jboss-WILDFLY_HOME") to
+// the actual discoverer for that server family and converts the
+// returned []scanner.Environment into the alias shape used by the
+// table above.  Keeps the table rows free of type noise and lets one
+// discoverer be exercised through multiple env-var columns.
 func runDiscoverer(name string) []serverEnvironment {
 	var raw []serverEnvironment
 	convert := func(name, layout, path string) {
@@ -216,7 +255,16 @@ func runDiscoverer(name string) []serverEnvironment {
 			Path:    path,
 		})
 	}
-	switch name {
+	// Fixture name format: "<server>-<ENVVAR>" (e.g. "jboss-JBOSS_HOME").
+	// Dispatch on the prefix before the first '-'.
+	server := name
+	for i := 0; i < len(name); i++ {
+		if name[i] == '-' {
+			server = name[:i]
+			break
+		}
+	}
+	switch server {
 	case "tomcat":
 		for _, e := range discoverTomcat() {
 			convert(e.EnvType, e.Name, e.Path)
