@@ -49,12 +49,21 @@ func FuzzParseManifest(f *testing.F) {
 // covers the recursion path — a mutated nested-jar member is a
 // second-order attack surface.
 func FuzzExtractFromJar(f *testing.F) {
-	// Seed 1 — minimal well-formed JAR.
+	// Seed 1 — minimal well-formed JAR.  All writer errors fail the
+	// setup hard so a silent nil-pointer crash doesn't kill the
+	// fuzzer before it starts.
 	var seed1 bytes.Buffer
 	zw1 := zip.NewWriter(&seed1)
-	w1, _ := zw1.Create("META-INF/maven/o/a/pom.properties")
-	w1.Write([]byte("groupId=o\nartifactId=a\nversion=1\n"))
-	zw1.Close()
+	w1, err := zw1.Create("META-INF/maven/o/a/pom.properties")
+	if err != nil {
+		f.Fatalf("fuzz seed 1: create pom.properties: %v", err)
+	}
+	if _, err := w1.Write([]byte("groupId=o\nartifactId=a\nversion=1\n")); err != nil {
+		f.Fatalf("fuzz seed 1: write pom.properties: %v", err)
+	}
+	if err := zw1.Close(); err != nil {
+		f.Fatalf("fuzz seed 1: finalise zip: %v", err)
+	}
 	f.Add(seed1.Bytes())
 
 	// Seed 2 — uber-jar with a valid nested JAR, so the fuzzer gets to
@@ -62,17 +71,36 @@ func FuzzExtractFromJar(f *testing.F) {
 	// ``entry ends in .jar → decompress → recurse`` chain from scratch.
 	var inner bytes.Buffer
 	izw := zip.NewWriter(&inner)
-	iw, _ := izw.Create("META-INF/maven/n/inner/pom.properties")
-	iw.Write([]byte("groupId=n\nartifactId=inner\nversion=2\n"))
-	izw.Close()
+	iw, err := izw.Create("META-INF/maven/n/inner/pom.properties")
+	if err != nil {
+		f.Fatalf("fuzz seed 2: create inner pom.properties: %v", err)
+	}
+	if _, err := iw.Write([]byte("groupId=n\nartifactId=inner\nversion=2\n")); err != nil {
+		f.Fatalf("fuzz seed 2: write inner pom.properties: %v", err)
+	}
+	if err := izw.Close(); err != nil {
+		f.Fatalf("fuzz seed 2: finalise inner zip: %v", err)
+	}
 
 	var seed2 bytes.Buffer
 	zw2 := zip.NewWriter(&seed2)
-	ow, _ := zw2.Create("META-INF/maven/o/outer/pom.properties")
-	ow.Write([]byte("groupId=o\nartifactId=outer\nversion=1\n"))
-	nw, _ := zw2.Create("BOOT-INF/lib/inner.jar")
-	nw.Write(inner.Bytes())
-	zw2.Close()
+	ow, err := zw2.Create("META-INF/maven/o/outer/pom.properties")
+	if err != nil {
+		f.Fatalf("fuzz seed 2: create outer pom.properties: %v", err)
+	}
+	if _, err := ow.Write([]byte("groupId=o\nartifactId=outer\nversion=1\n")); err != nil {
+		f.Fatalf("fuzz seed 2: write outer pom.properties: %v", err)
+	}
+	nw, err := zw2.Create("BOOT-INF/lib/inner.jar")
+	if err != nil {
+		f.Fatalf("fuzz seed 2: create nested entry: %v", err)
+	}
+	if _, err := nw.Write(inner.Bytes()); err != nil {
+		f.Fatalf("fuzz seed 2: write nested entry: %v", err)
+	}
+	if err := zw2.Close(); err != nil {
+		f.Fatalf("fuzz seed 2: finalise outer zip: %v", err)
+	}
 	f.Add(seed2.Bytes())
 
 	// Seeds for obvious-garbage + empty inputs.

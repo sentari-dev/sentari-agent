@@ -15,11 +15,13 @@
 //     nor OSGi headers (e.g. older Apache Commons releases).
 //
 // Size caps exist on every parse to defend against malicious or
-// corrupt archives — see the max* constants.  The zip format's own
-// path-normalisation means entries like ``../../etc/passwd`` never
-// escape the archive's virtual namespace; the parser still only reads
-// specific logical paths, so a zip-slip entry is either picked up
-// unambiguously as its stated name or ignored.
+// corrupt archives — see the max* constants.  ZIP entry names are
+// treated as raw names; safety here does NOT come from the ZIP
+// format normalising them.  This parser only reads specific
+// logical member paths (``META-INF/maven/*/pom.properties``,
+// ``META-INF/MANIFEST.MF``) after explicit traversal-check
+// validation, so entries such as ``../../etc/passwd`` are rejected
+// before they can be used as metadata sources.
 package jvm
 
 import (
@@ -29,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -254,9 +257,10 @@ func parseFilename(name string) (artifact, version string) {
 }
 
 // extractFromJar is the top-level entrypoint.  Given a path to a JAR
-// on disk, it opens the zip and delegates to extractFromReader, which
-// is also the recursion point for nested-jar traversal (Spring Boot /
-// Quarkus uber-jars — see nested_jar.go).
+// on disk, it opens the zip and delegates to extractFromReader,
+// which is also the recursion point for nested-jar traversal
+// (Spring Boot / Quarkus uber-jars — see ``extractFromReader``
+// below).
 //
 // Invariants:
 //   - Never panics — corrupt zips, missing metadata, oversized members
@@ -264,6 +268,21 @@ func parseFilename(name string) (artifact, version string) {
 //   - Never emits more than maxRecordsPerJAR records per outer JAR.
 //   - Recursion depth bounded by maxNestedDepth.
 func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanError) {
+	// Pre-open size check.  ``zip.OpenReader`` will parse the central
+	// directory regardless of the file's total size, so an attacker-
+	// supplied 10 GB "JAR" would still cause a lot of work before we
+	// find out it's too big.  Stat first; reject at the boundary.
+	if info, err := os.Stat(jarPath); err == nil && info.Size() > int64(maxJARBytes) {
+		return nil, []scanner.ScanError{{
+			Path:    jarPath,
+			EnvType: EnvJVM,
+			Error: fmt.Sprintf(
+				"JAR exceeds size cap before open: %d > %d bytes",
+				info.Size(), maxJARBytes,
+			),
+		}}
+	}
+
 	rc, err := zip.OpenReader(jarPath)
 	if err != nil {
 		return nil, []scanner.ScanError{{
@@ -273,7 +292,24 @@ func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanErro
 		}}
 	}
 	defer rc.Close()
-	return extractFromReader(&rc.Reader, jarPath, 0)
+	// Shared record budget across the whole recursion tree.  Without
+	// this, each extractFromReader call resets len(records) = 0 and a
+	// single outer JAR with thousands of nested members can emit far
+	// more than maxRecordsPerJAR records.  We decrement as records
+	// are produced and stop recursion + identity emission once the
+	// budget is exhausted, emitting a single ScanError.
+	budget := &recordBudget{remaining: maxRecordsPerJAR}
+	return extractFromReader(&rc.Reader, jarPath, 0, budget)
+}
+
+// recordBudget threads the per-outer-JAR record cap through the
+// recursive descent.  ``remaining`` starts at ``maxRecordsPerJAR``
+// and is decremented every time a record is appended; once it
+// reaches zero, ``capEmitted`` gets set so we only add one
+// cap-exceeded ScanError across the whole tree.
+type recordBudget struct {
+	remaining  int
+	capEmitted bool
 }
 
 // extractFromReader is the recursion core.  Given an already-opened
@@ -286,7 +322,12 @@ func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanErro
 // per recursion.  When depth reaches maxNestedDepth, this function
 // still extracts identity but refuses to recurse further and emits a
 // ScanError naming the depth-4 child that was skipped.
-func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.PackageRecord, []scanner.ScanError) {
+//
+// ``budget`` is a shared counter across the whole recursion tree so
+// the maxRecordsPerJAR cap holds cumulatively, not per-recursion-
+// frame.  Without it, a uber-jar with thousands of nested members
+// could easily blow past the cap.
+func extractFromReader(r *zip.Reader, displayPath string, depth int, budget *recordBudget) ([]scanner.PackageRecord, []scanner.ScanError) {
 	// Single pass over entries to classify them.  This is cheaper than
 	// three separate passes and keeps the O(n) bound explicit.
 	var (
@@ -295,12 +336,19 @@ func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.
 		nestedJARs    []*zip.File
 	)
 	for _, f := range r.File {
+		// Use the cleaned + validated path for EVERY decision below,
+		// not f.Name.  An attacker-crafted entry named e.g.
+		// ``META-INF/maven/../../etc/passwd/pom.properties`` would
+		// pass a raw HasPrefix/HasSuffix on f.Name but escape the
+		// intended directory structure.  Cleaning first and then
+		// matching on the cleaned form avoids that.
 		name := path.Clean(f.Name)
-		// Zip-slip guard: refuse entries that try to walk out of the
-		// archive's virtual root (``../etc/passwd`` etc).  The
-		// extractor doesn't extract-to-disk, but a malicious entry
-		// name could otherwise mislead the metadata pickers.
-		if strings.HasPrefix(name, "..") {
+		// Zip-slip + absolute-path guard.  Reject exact ``..``,
+		// anything starting with ``../``, or absolute paths
+		// (``/etc/...``).  HasPrefix("..") alone would also reject
+		// benign entries like ``..foo/bar`` (not a traversal), so
+		// the more specific check is both safer AND less noisy.
+		if name == ".." || strings.HasPrefix(name, "../") || path.IsAbs(name) {
 			continue
 		}
 		// Directory entries carry zero data — skip.
@@ -308,17 +356,17 @@ func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.
 			continue
 		}
 		switch {
-		case strings.HasPrefix(f.Name, "META-INF/maven/") &&
-			strings.HasSuffix(f.Name, "/pom.properties"):
+		case strings.HasPrefix(name, "META-INF/maven/") &&
+			strings.HasSuffix(name, "/pom.properties"):
 			pomEntries = append(pomEntries, f)
-		case f.Name == "META-INF/MANIFEST.MF":
+		case name == "META-INF/MANIFEST.MF":
 			manifestEntry = f
-		case isJARLike(f.Name):
+		case isJARLike(name):
 			nestedJARs = append(nestedJARs, f)
 		}
 	}
 
-	records, errs := extractIdentity(displayPath, pomEntries, manifestEntry)
+	records, errs := extractIdentity(displayPath, pomEntries, manifestEntry, budget)
 
 	// Descend into nested JARs.  Every .jar / .war / .ear / .jmod
 	// inside this archive is its own artefact with its own coordinates
@@ -327,12 +375,18 @@ func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.
 	// on Spring Boot's ``BOOT-INF/lib/`` path, so new uber-jar
 	// conventions Just Work.
 	for _, f := range nestedJARs {
-		if len(records) >= maxRecordsPerJAR {
-			errs = append(errs, scanner.ScanError{
-				Path:    displayPath,
-				EnvType: EnvJVM,
-				Error:   fmt.Sprintf("record cap exceeded (%d); remaining nested jars skipped", maxRecordsPerJAR),
-			})
+		if budget.remaining <= 0 {
+			if !budget.capEmitted {
+				errs = append(errs, scanner.ScanError{
+					Path:    displayPath,
+					EnvType: EnvJVM,
+					Error: fmt.Sprintf(
+						"record cap exceeded (%d); remaining nested jars skipped",
+						maxRecordsPerJAR,
+					),
+				})
+				budget.capEmitted = true
+			}
 			break
 		}
 		childPath := displayPath + "!/" + f.Name
@@ -363,7 +417,7 @@ func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.
 			})
 			continue
 		}
-		childRecs, childErrs := extractFromReader(childReader, childPath, depth+1)
+		childRecs, childErrs := extractFromReader(childReader, childPath, depth+1, budget)
 		records = append(records, childRecs...)
 		errs = append(errs, childErrs...)
 	}
@@ -374,14 +428,25 @@ func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.
 // extractIdentity runs the Precedence 1-3 rules on the three entry
 // sets classified by the caller.  Returns the identity records for
 // the archive *itself* — nested-jar records are a separate concern
-// handled by the recursion.
-func extractIdentity(displayPath string, pomEntries []*zip.File, manifestEntry *zip.File) ([]scanner.PackageRecord, []scanner.ScanError) {
+// handled by the recursion.  ``budget`` is decremented for every
+// record emitted; once it hits zero the function stops emitting
+// and the caller (extractFromReader) will emit a single cap
+// ScanError.
+func extractIdentity(
+	displayPath string,
+	pomEntries []*zip.File,
+	manifestEntry *zip.File,
+	budget *recordBudget,
+) ([]scanner.PackageRecord, []scanner.ScanError) {
 	var records []scanner.PackageRecord
 	var errs []scanner.ScanError
 
 	// Precedence 1 — pom.properties (can produce multiple records for
 	// a shaded uber-jar).
 	for _, f := range pomEntries {
+		if budget.remaining <= 0 {
+			break
+		}
 		body, err := readZipMember(f, maxPomPropertiesBytes)
 		if err != nil {
 			errs = append(errs, scanner.ScanError{
@@ -414,6 +479,7 @@ func extractIdentity(displayPath string, pomEntries []*zip.File, manifestEntry *
 			EnvType:     EnvJVM,
 			Environment: displayPath,
 		})
+		budget.remaining--
 	}
 	if len(records) > 0 {
 		return records, errs
@@ -437,7 +503,10 @@ func extractIdentity(displayPath string, pomEntries []*zip.File, manifestEntry *
 					Error:   perr.Error(),
 				})
 			} else if rec, ok := manifestToRecord(displayPath, mi); ok {
-				records = append(records, rec)
+				if budget.remaining > 0 {
+					records = append(records, rec)
+					budget.remaining--
+				}
 			}
 		}
 	}
@@ -448,6 +517,9 @@ func extractIdentity(displayPath string, pomEntries []*zip.File, manifestEntry *
 	// Precedence 3 — filename fallback.  Parses the trailing filename
 	// component; for nested paths like ``outer!/BOOT-INF/lib/x.jar`` we
 	// want the inner filename only, so split on the last ``/``.
+	if budget.remaining <= 0 {
+		return records, errs
+	}
 	filename := displayPath
 	if idx := strings.LastIndex(filename, "/"); idx >= 0 {
 		filename = filename[idx+1:]
@@ -460,6 +532,7 @@ func extractIdentity(displayPath string, pomEntries []*zip.File, manifestEntry *
 		EnvType:     EnvJVM,
 		Environment: displayPath,
 	})
+	budget.remaining--
 	return records, errs
 }
 
