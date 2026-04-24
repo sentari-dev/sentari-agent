@@ -2,6 +2,93 @@
 
 Living document tracking deferred work and future improvements. Items here are intentional — they were evaluated and postponed with a reason, not forgotten. Remove an item when it ships or when the decision is revisited and closed out.
 
+**Companion:** [`sentari/ROADMAP.md`](https://github.com/sentari-dev/sentari/blob/main/ROADMAP.md) for server-side items. Strategic framing in [`sentari/docs/47_AIKIDO_ANALYSIS.md`](https://github.com/sentari-dev/sentari/blob/main/docs/47_AIKIDO_ANALYSIS.md).
+
+---
+
+## Strategic — Aikido response (added 2026-04-24)
+
+Items driven by the v2 competitive read of Aikido Endpoint (see the companion server doc). Promotes specific agent-side work onto the roadmap with clear scope + reasoning. **Sizes:** S ≤ 3 days, M ≤ 1.5 weeks, L ≤ a full sprint, XL multi-sprint.
+
+### Community CLI polish + OSS distribution (Size: M)
+
+**What:** Make the agent's `!enterprise` build (today's OSS binary) into a genuinely useful standalone dev tool, not a stripped-down client.
+
+- Pretty-printed default output (switch to JSON only with `--format=json`).
+- New `--explain` flag that surfaces findings in developer-friendly language ("Your env has 3 packages from a publisher flagged by policy `eu-public-sector-v2`").
+- Homebrew tap (see [§Homebrew tap](#homebrew-tap) below — promote from deferred when this block is scheduled).
+- `curl | sh` install script symmetric with the Linux `install.sh` but aimed at laptops, not fleets.
+- Sub-3-second default scan on a typical dev laptop (trimmed depth, skip high-entropy dirs like `node_modules`/`venv` by default).
+- Drop enterprise-only flags from `--help` in the community build so the surface reads as a dev tool.
+- Dev-oriented README + CLI man page.
+
+**Why:** Aikido has 200k weekly Safe Chain downloads as an OSS top-of-funnel we structurally lack. Community CLI polish is the single cheapest thing that could change that. Agent-side only — server unaffected.
+
+**When:** Next sprint.
+
+### npm scanner plugin (Size: M)
+
+**What:** New `scanner/npm/` plugin following ADR 0002. Reads `node_modules/*/package.json` + `package-lock.json` + workspace manifests.
+
+- Discoverer: walks from `ScanRoot`, marker-matches on `package.json` + `node_modules/`.
+- Extractor: emits one PackageRecord per dependency with `EnvType="npm"`.
+- Server-side ecosystem mapping: add `"npm" → ECOSYSTEM_NPM` in `server/services/ecosystem.py`.
+- Test fixtures: simple `node_modules`, workspace monorepo, pnpm hoisted, yarn-pnp.
+
+**Why:** Ecosystem-agnostic positioning requires it. npm is the ecosystem where most 2025–2026 supply-chain attacks landed (typosquats, maintainer hijacks). Adding it unblocks the v2 positioning language.
+
+**When:** Next sprint after community CLI polish ships.
+
+### NuGet scanner plugin (Size: M)
+
+**What:** `scanner/nuget/` plugin reading `~/.nuget/packages/<id>/<version>/<id>.nuspec` on Linux/macOS and `%UserProfile%\.nuget\packages\...` on Windows. Global-packages directory is the standard NuGet convention since v3.
+
+**Why:** Broad .NET fleet coverage. Same plugin shape as npm — cheap once the npm one exists as a pattern.
+
+**When:** After npm lands so the dispatch pattern is proven.
+
+### Install-gate mode — DESIGN DOC FIRST (Size: S for design, XL for impl)
+
+**What:** Agent-resident enforcement layer that blocks disallowed installs before they land. Per-ecosystem wrappers (pip, npm, Maven, NuGet), signed policy delivery from server, company-wide configurable at install-time + server-push, local audit of every block.
+
+**Status:** On the roadmap per user direction 2026-04-24, but **design doc must ship and be signed off before any implementation work begins.** See the full decision analysis in [`sentari/docs/47_AIKIDO_ANALYSIS.md` §5](https://github.com/sentari-dev/sentari/blob/main/docs/47_AIKIDO_ANALYSIS.md#5-install-gate-mode--full-decision-analysis) — benefits, downsides, five enforcement mechanisms compared, policy delivery design, configurability model, failure modes, test surface, rollout posture. Open questions §6 of that doc must be resolved first.
+
+**Why the gate, given v1 recommended against:** procurement headline + preventive (not just detective) answer to the supply-chain question + the user's specific "code must be in the agent, visibly enforced" constraint makes it a defensible sovereignty-first gate rather than a cloud-dependent one.
+
+**Why the design-doc gate:** real implementation is a quarter of focused engineering + per-ecosystem maintenance surface + retire the ADR 0003 "never executes" invariant. Not a thing to start on intuition.
+
+### Offline malicious-package feed consumer (Size: M)
+
+**What:** Agent-side consumer of the signed deny-list feed the server publishes (companion to the vuln-map push channel). Agent verifies signature against pinned pubkey learned at register-time, caches locally, applies as a detective rule.
+
+**Prerequisite for install-gate** — the same feed becomes the preventive deny-list when the gate ships. Shipping this as detective-only first means the gate can reuse the verified cache path instead of rebuilding it.
+
+**When:** After the server ships the signed deny-list feed endpoint ([`sentari/ROADMAP.md` item 7](https://github.com/sentari-dev/sentari/blob/main/ROADMAP.md)).
+
+### Safe Chain interop export (Size: S)
+
+**What:** `sentari --export-policy safechain` emits sentari's deny/allow lists in a format Safe Chain (and similar ecosystem gates) can consume. No runtime dependency on Aikido; positions sentari as *source of truth* feeding any gate the customer chooses.
+
+**Why:** Friendly-neighbour move. Turns a would-be competitor integration point into a sentari-first workflow.
+
+**When:** Customer-pull triggered. Not a priority until someone asks.
+
+### `openat2 RESOLVE_BENEATH` primitive in `safeio` (Size: M)
+
+**What:** Linux-specific defense-in-depth primitive for the container-scanner's layer walker. Today we drop all symlinks as a blanket rule; with `RESOLVE_BENEATH`, we can walk symlinks that stay inside the layer root and drop only those that escape. Closes the "legitimate `/usr/bin/python3 → python3.12` symlink is invisible in container scans" gap documented in ADR 0009.
+
+**Why:** Completeness for the container-scanning story. Symmetrically, makes the symlink-refusal story more defensible in procurement audits.
+
+**When:** Low priority; blanket-drop is safe and matches what we ship today.
+
+### CycloneDX VEX attachment (Size: M)
+
+**What:** Emit VEX (Vulnerability-EXploitability-eXchange) statements alongside the existing CycloneDX SBOM output.
+
+**Why:** CRA-relevant. Once a scan has `(package, cve, status=affected|not_affected|fixed|under_investigation)`, VEX is a 1:1 serialization.
+
+**When:** Tied to server-side roadmap item 10.
+
 ---
 
 ## Deferred
@@ -63,6 +150,12 @@ Homebrew handles the Gatekeeper quarantine attribute automatically, updates work
 ---
 
 ## Recently shipped
+
+### Sprint 17 — JVM + containers + AI-agent (2026-04-23 / 2026-04-24)
+
+- **JVM scanner plugin** — Maven caches, Gradle caches, JDK runtimes (OpenJDK/Oracle/Adoptium/Zulu/GraalVM), six app-servers (Tomcat, JBoss/WildFly/EAP, WebLogic, WebSphere, Jetty, GlassFish/Payara), shaded uber-jar + Spring Boot recursive descent. Landed across PRs #5–#10.
+- **Container-image scanner** — Docker/Podman/CRI-O discovery, virtual overlay walker with OCI whiteout semantics, per-container materialised merged rootfs, existing plugin registry dispatched against each. Opt-in via `[scanner] containers = true`. Landed across PRs #11–#13.
+- **Shadow-AI scanner** (`ai_agent` env_type) — MCP server configs (Claude Desktop, Cursor, Claude Code CLI), Claude Code agents/skills/plugins, AI-oriented IDE extensions (Copilot, Continue, Cody, Cline, Codeium, etc.). Filter allowlist to stay targeted. Landed as PR #14.
 
 ### v0.1.1 — macOS support
 
