@@ -47,12 +47,22 @@ func FuzzParseManifest(f *testing.F) {
 // path with adversarial inputs, which is harder to reach from the
 // per-parser fuzzers above.
 func FuzzExtractFromJar(f *testing.F) {
-	// Seed with a minimal well-formed JAR.
+	// Seed with a minimal well-formed JAR.  We fail the fuzz setup
+	// hard on any error — a silent nil pointer from the zip writer
+	// defeats the point of fuzzing by crashing before the fuzzer
+	// starts.
 	var seed bytes.Buffer
 	zw := zip.NewWriter(&seed)
-	w, _ := zw.Create("META-INF/maven/o/a/pom.properties")
-	w.Write([]byte("groupId=o\nartifactId=a\nversion=1\n"))
-	zw.Close()
+	w, err := zw.Create("META-INF/maven/o/a/pom.properties")
+	if err != nil {
+		f.Fatalf("fuzz seed: create pom.properties entry: %v", err)
+	}
+	if _, err := w.Write([]byte("groupId=o\nartifactId=a\nversion=1\n")); err != nil {
+		f.Fatalf("fuzz seed: write pom.properties entry: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		f.Fatalf("fuzz seed: finalise zip: %v", err)
+	}
 	f.Add(seed.Bytes())
 
 	// Seed with non-zip garbage — the parser must produce a ScanError,

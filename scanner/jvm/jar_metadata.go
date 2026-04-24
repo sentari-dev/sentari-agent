@@ -15,11 +15,13 @@
 //     nor OSGi headers (e.g. older Apache Commons releases).
 //
 // Size caps exist on every parse to defend against malicious or
-// corrupt archives — see the max* constants.  The zip format's own
-// path-normalisation means entries like ``../../etc/passwd`` never
-// escape the archive's virtual namespace; the parser still only reads
-// specific logical paths, so a zip-slip entry is either picked up
-// unambiguously as its stated name or ignored.
+// corrupt archives — see the max* constants.  ZIP entry names are
+// treated as raw names; safety here does NOT come from the ZIP
+// format normalising them.  This parser only reads specific
+// logical member paths (``META-INF/maven/*/pom.properties``,
+// ``META-INF/MANIFEST.MF``) after explicit traversal-check
+// validation, so entries such as ``../../etc/passwd`` are rejected
+// before they can be used as metadata sources.
 package jvm
 
 import (
@@ -29,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -252,6 +255,21 @@ func parseFilename(name string) (artifact, version string) {
 //   - Never emits more than maxRecordsPerJAR records.
 //   - Never reads more than maxJARBytes from the underlying file.
 func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanError) {
+	// Pre-open size check.  ``zip.OpenReader`` will parse the central
+	// directory regardless of the file's total size, so an attacker-
+	// supplied 10 GB "JAR" would still cause a lot of work before we
+	// find out it's too big.  Stat first; reject at the boundary.
+	if info, err := os.Stat(jarPath); err == nil && info.Size() > int64(maxJARBytes) {
+		return nil, []scanner.ScanError{{
+			Path:    jarPath,
+			EnvType: EnvJVM,
+			Error: fmt.Sprintf(
+				"JAR exceeds size cap before open: %d > %d bytes",
+				info.Size(), maxJARBytes,
+			),
+		}}
+	}
+
 	rc, err := zip.OpenReader(jarPath)
 	if err != nil {
 		return nil, []scanner.ScanError{{
@@ -266,23 +284,24 @@ func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanErro
 	var pomEntries []*zip.File
 	var manifestEntry *zip.File
 	for _, f := range rc.File {
-		// Normalise to forward slashes; zip stores forward slashes per
-		// spec, but defensive.
+		// Use the cleaned + validated path for EVERY decision below,
+		// not f.Name.  An attacker-crafted entry named e.g.
+		// ``META-INF/maven/../../etc/passwd/pom.properties`` would
+		// pass the old HasPrefix/HasSuffix on the raw name but
+		// escape the intended directory structure.  Cleaning and
+		// then validating prefixes avoids that.
 		name := path.Clean(f.Name)
-		// Zip-slip guard: refuse entries that look like they walk out
-		// of the archive's virtual root (``../whatever`` after clean).
-		// The extractor doesn't extract-to-disk, but an attacker-named
-		// entry "../../../etc/passwd" would otherwise be mistakenly
-		// examined for metadata.  path.Clean reduces it to a minimal
-		// form starting with ".."; we skip those.
-		if strings.HasPrefix(name, "..") {
+		// Zip-slip + absolute-path guard.  An entry whose cleaned
+		// name is "..", starts with "../", or is absolute
+		// (``/etc/...``) is rejected before we ever read its bytes.
+		if name == ".." || strings.HasPrefix(name, "../") || path.IsAbs(name) {
 			continue
 		}
-		if strings.HasPrefix(f.Name, "META-INF/maven/") &&
-			strings.HasSuffix(f.Name, "/pom.properties") {
+		if strings.HasPrefix(name, "META-INF/maven/") &&
+			strings.HasSuffix(name, "/pom.properties") {
 			pomEntries = append(pomEntries, f)
 		}
-		if f.Name == "META-INF/MANIFEST.MF" {
+		if name == "META-INF/MANIFEST.MF" {
 			manifestEntry = f
 		}
 	}
