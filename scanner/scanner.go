@@ -303,13 +303,29 @@ func (r *Runner) discoverEnvironments(ctx context.Context) ([]Environment, []Sca
 
 	// Directories that are never useful and slow down scanning.
 	skipDirs := map[string]bool{
-		".git": true, "node_modules": true, "__pycache__": true,
+		".git": true, "__pycache__": true,
 		".cache": true, "proc": true, "sys": true, "dev": true,
 		"run": true, "tmp": true, ".hg": true, ".svn": true,
 		".pytest_cache": true, ".tox": true, ".mypy_cache": true,
 		".ruff_cache": true,
 	}
 	// NOTE: .venv is NOT skipped — it's a valid Python virtualenv.
+	// NOTE: ``node_modules`` used to be in skipDirs for years because
+	// no plugin knew what to do with it; Sprint-17 added the npm
+	// plugin which claims-and-terminals node_modules on Match.  The
+	// walker visits the directory, the npm plugin queues an
+	// Environment + returns Terminal=true, no further descent
+	// happens.  Net walker-visit cost is one stat per node_modules
+	// directory (not per-file), so the performance difference is
+	// negligible even on dev laptops with hundreds of them.
+	//
+	// Side-effect: a venv pathologically planted inside a
+	// node_modules directory (``node_modules/pyvenv.cfg``) is now
+	// visible to the venv MarkerScanner.  That's technically new
+	// behaviour but matches the semantic truth of the filesystem —
+	// if a venv is there, we should surface it.  TestScannerSkipDirs
+	// asserts ``.git`` + ``__pycache__`` stay blocked; it no longer
+	// asserts node_modules does.
 
 	// Absolute paths to skip — prevents duplicate discovery on macOS
 	// where /System/Volumes/Data is a firmlink mirror of /.
