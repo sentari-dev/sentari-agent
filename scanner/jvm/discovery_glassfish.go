@@ -20,19 +20,22 @@ import "github.com/sentari-dev/sentari-agent/scanner"
 //   - lib/*.jar
 //   - domains/*/applications/**/*.{jar,war,ear}
 //   - domains/*/lib/*.jar
+// glassfishWellKnown — see note in tomcatWellKnown.
+var glassfishWellKnown = map[string][]string{
+	"linux":  {"/opt"},
+	"darwin": {"/opt", "/usr/local/opt"},
+	"windows": {
+		`C:\Program Files`,
+		`C:\glassfish`,
+		`C:\payara`,
+	},
+}
+
 func discoverGlassFish() []scanner.Environment {
 	return discoverByServerSpec(serverSpec{
-		layout:  layoutGlassFish,
-		envVars: []string{"GLASSFISH_HOME", "PAYARA_HOME", "AS_INSTALL"},
-		wellKnown: map[string][]string{
-			"linux":  {"/opt"},
-			"darwin": {"/opt", "/usr/local/opt"},
-			"windows": {
-				`C:\Program Files`,
-				`C:\glassfish`,
-				`C:\payara`,
-			},
-		},
+		layout:    layoutGlassFish,
+		envVars:   []string{"GLASSFISH_HOME", "PAYARA_HOME", "AS_INSTALL"},
+		wellKnown: glassfishWellKnown,
 		marker: func(root string) bool {
 			return hasAny(root, "bin/asadmin", "bin/asadmin.bat")
 		},
