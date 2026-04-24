@@ -145,11 +145,9 @@ func globalPackagesPath() (string, bool) {
 		return "", false
 	}
 	// Both Windows and POSIX use the same relative layout —
-	// ``.nuget\packages`` under the user profile — so only the
-	// separator differs.  filepath.Join handles it.
-	if runtime.GOOS == "windows" {
-		return filepath.Join(home, ".nuget", "packages"), false
-	}
+	// ``.nuget/packages`` under the user profile.  filepath.Join
+	// handles the separator per-OS, so one return path covers
+	// every platform.
 	return filepath.Join(home, ".nuget", "packages"), false
 }
 
