@@ -75,7 +75,16 @@ type RegisterResponse struct {
 	// (logged server-side; agent treats license-map as unavailable).
 	LicenseMapPubKey string `json:"license_map_pubkey"`
 	LicenseMapKeyID  string `json:"license_map_key_id"`
-	Message          string `json:"message"`
+	// Install-gate (policy-map) signing — same shape and the same
+	// trust-bootstrap story as the license-map fields above; separate
+	// keypair on the server so rotation + compromise scope are
+	// independent.  Empty when the server could not load/generate its
+	// install-gate signing key — agent treats install-gate as
+	// unavailable and writes no native package-manager configs rather
+	// than trust unsigned policy.
+	InstallGatePubKey string `json:"install_gate_pubkey"`
+	InstallGateKeyID  string `json:"install_gate_key_id"`
+	Message           string `json:"message"`
 }
 
 // AgentConfig is the configuration received from the server during polling.
@@ -455,6 +464,69 @@ func LoadLicenseMapTrust(certDir string) (*LicenseMapTrust, error) {
 	return &trust, nil
 }
 
+// installGateTrustFile is the on-disk filename where the agent
+// persists the server's install-gate signing pubkey, learned at
+// /register.  Co-located with the mTLS certs because trust for both
+// is anchored to the same TLS-fingerprint bootstrap.  Separate file
+// from the license-map trust file so a key rotation on one channel
+// does not touch the other.
+const installGateTrustFile = "install_gate_trust.json"
+
+// InstallGateTrust is the persisted shape of the trusted install-
+// gate signing key learned during /register.  ``KeyID`` identifies
+// which pinned entry envelopes set; ``PubKeyB64`` is the raw 32-byte
+// ed25519 public key, base64-encoded.
+type InstallGateTrust struct {
+	KeyID     string `json:"key_id"`
+	PubKeyB64 string `json:"pubkey_b64"`
+}
+
+// SaveInstallGateTrust persists the install-gate pubkey returned by
+// /register to ``certDir/install_gate_trust.json``.  Empty fields are
+// silently no-op'd so a server that has not provisioned an install-
+// gate key (e.g. older deployments) does not blank out an existing
+// trust file with zeroes.
+func SaveInstallGateTrust(certDir, keyID, pubKeyB64 string) error {
+	if keyID == "" || pubKeyB64 == "" {
+		return nil
+	}
+	if err := os.MkdirAll(certDir, 0o700); err != nil {
+		return fmt.Errorf("create cert dir: %w", err)
+	}
+	data, err := json.Marshal(InstallGateTrust{KeyID: keyID, PubKeyB64: pubKeyB64})
+	if err != nil {
+		return fmt.Errorf("marshal trust record: %w", err)
+	}
+	path := filepath.Join(certDir, installGateTrustFile)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", installGateTrustFile, err)
+	}
+	return nil
+}
+
+// LoadInstallGateTrust returns the persisted install-gate pubkey, or
+// (nil, nil) if no trust file exists yet (fresh install pre-register).
+// Decode errors return (nil, err) so callers can log and skip
+// install-gate verification rather than crash.
+func LoadInstallGateTrust(certDir string) (*InstallGateTrust, error) {
+	path := filepath.Join(certDir, installGateTrustFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", installGateTrustFile, err)
+	}
+	var trust InstallGateTrust
+	if err := json.Unmarshal(data, &trust); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", installGateTrustFile, err)
+	}
+	if trust.KeyID == "" || trust.PubKeyB64 == "" {
+		return nil, fmt.Errorf("%s: key_id and pubkey_b64 both required", installGateTrustFile)
+	}
+	return &trust, nil
+}
+
 // SaveDeviceID persists the server-assigned device UUID to a file so the agent
 // can include it in subsequent scan uploads.
 func SaveDeviceID(certDir, deviceID string) error {
@@ -565,6 +637,49 @@ func (c *Client) FetchLicenseMap(ctx context.Context, currentVersion int) (*scan
 
 	if m.Version <= currentVersion {
 		return nil, nil, nil // no update needed
+	}
+
+	return m, body, nil
+}
+
+// FetchInstallGateMap fetches the latest install-gate policy map from
+// the server.  The response is a signed envelope; this function reads
+// the raw bytes, verifies the ed25519 signature against the pinned
+// install-gate public key, and returns the verified
+// ``InstallGateMap`` plus the raw envelope bytes so the caller can
+// persist them for offline re-use.
+//
+// Returns ``(nil, nil, nil)`` when the server's version is not newer
+// than ``currentVersion`` — no update needed, no error.  Mirrors the
+// license-map fetch contract.
+func (c *Client) FetchInstallGateMap(ctx context.Context, currentVersion int) (*scanner.InstallGateMap, []byte, error) {
+	resp, err := c.doRequest(ctx, "fetch_install_gate", func(ctx context.Context) (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, c.serverURL+"/api/v1/agent/policy-map", nil)
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("install-gate fetch: status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, scanner.MaxInstallGatePayloadBytes+1))
+	if err != nil {
+		return nil, nil, fmt.Errorf("install-gate read: %w", err)
+	}
+	if len(body) > scanner.MaxInstallGatePayloadBytes {
+		return nil, nil, fmt.Errorf("install-gate fetch: response exceeds size cap")
+	}
+
+	m, err := scanner.VerifyInstallGateEnvelope(body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("install-gate verify: %w", err)
+	}
+
+	if m.Version <= currentVersion {
+		return nil, nil, nil
 	}
 
 	return m, body, nil
