@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 )
@@ -72,12 +73,14 @@ func TrustedInstallGateKeyIDs() []string {
 
 // InstallGateEntry is one rule on the deny/allow list — flat enough
 // that the per-ecosystem writers can iterate it without further
-// schema knowledge.  ``VersionRange`` may be empty (matches any
-// version); ``ScopeEnvTag`` may be empty (applies fleet-wide);
-// ``ExpiresAt`` is RFC 3339 or empty (no natural expiry).
+// schema knowledge.  Pointer fields are intentional — the server
+// emits ``null`` (not the empty string) for "no value", and a
+// non-pointer ``string`` would silently coerce ``null`` to the zero
+// value, hiding the distinction between "unset" and "empty string"
+// from downstream writers that may want to treat them differently.
 type InstallGateEntry struct {
 	Pattern      string  `json:"pattern"`
-	VersionRange string  `json:"version_range,omitempty"`
+	VersionRange *string `json:"version_range"`
 	Severity     string  `json:"severity"`
 	Reason       *string `json:"reason"`
 	ScopeEnvTag  *string `json:"scope_env_tag"`
@@ -184,22 +187,43 @@ func VerifyInstallGateEnvelope(data []byte) (*InstallGateMap, error) {
 }
 
 // LoadVerifiedInstallGateFromFile reads a cached envelope from disk,
-// verifies it, and returns the ``InstallGateMap``.  Returns
-// (nil, false, err) on disk errors and (nil, false, nil) when the
-// file does not exist (fresh install — caller falls back to a
-// network fetch).
+// verifies it, and returns ``(map, raw envelope bytes, nil)`` on
+// success.  Returns:
 //
-// Verification failures bubble up as a non-nil error so the caller
-// can log at warning level — a tampered cache is the expected
-// signal to refuse to apply and re-fetch fresh.
+//   - ``(nil, nil, nil)`` when the file does not exist (fresh install
+//     — caller falls back to a network fetch).
+//   - ``(nil, nil, err)`` on read errors and on verification failures
+//     so the caller can log at warning level.  A tampered cache is
+//     the expected signal to refuse to apply and re-fetch fresh.
+//
+// The read is bounded by ``MaxInstallGatePayloadBytes`` so a
+// pathological cache file (filesystem corruption, hostile process
+// with write access to the cache dir) cannot OOM the agent before
+// the size check inside ``VerifyInstallGateEnvelope`` fires.
 func LoadVerifiedInstallGateFromFile(path string) (*InstallGateMap, []byte, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil, nil
 		}
+		return nil, nil, fmt.Errorf("install-gate cache open: %w", err)
+	}
+	defer f.Close()
+
+	// Read one byte past the cap so we can distinguish "exactly at
+	// cap" (legal) from "over cap" (refuse).  ``VerifyInstallGateEnvelope``
+	// re-applies the same cap defensively.
+	data, err := io.ReadAll(io.LimitReader(f, MaxInstallGatePayloadBytes+1))
+	if err != nil {
 		return nil, nil, fmt.Errorf("install-gate cache read: %w", err)
 	}
+	if len(data) > MaxInstallGatePayloadBytes {
+		return nil, nil, fmt.Errorf(
+			"install-gate cache exceeds max size (>%d bytes)",
+			MaxInstallGatePayloadBytes,
+		)
+	}
+
 	m, err := VerifyInstallGateEnvelope(data)
 	if err != nil {
 		return nil, nil, err

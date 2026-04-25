@@ -241,6 +241,24 @@ func TestInstallGateCache_MissingFileIsNotAnError(t *testing.T) {
 	}
 }
 
+func TestInstallGateCache_RefusesOversizeFile(t *testing.T) {
+	// Hostile / corrupt cache file: write more bytes than the cap.
+	// The bounded reader inside LoadVerifiedInstallGateFromFile must
+	// stop before pulling the whole file into memory — we assert the
+	// failure mode is "over-size error", not a verification error
+	// triggered by the truncated bytes downstream.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy_map.json")
+	oversize := make([]byte, MaxInstallGatePayloadBytes+1024)
+	if err := os.WriteFile(path, oversize, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := LoadVerifiedInstallGateFromFile(path)
+	if err == nil {
+		t.Fatal("expected error on oversize cache file")
+	}
+}
+
 func TestInstallGateCache_TamperedFileFailsVerify(t *testing.T) {
 	priv := registerInstallGateTestKey(t, "ig-cache-tamper")
 	envelope := signInstallGateEnvelope(t, priv, "ig-cache-tamper", validInstallGatePayload())
