@@ -44,6 +44,17 @@ type ApplyOptions struct {
 	// drop-in).  System scope is a soft no-op on POSIX where
 	// NuGet has no system-wide config dir.
 	NuGetScope NuGetScope
+
+	// UvScope picks ``user`` or ``system`` ``uv.toml``.
+	// Astral's uv has its own config namespace separate from
+	// pip's; without this the install-gate covers ``uv pip
+	// install`` only and silently mis-routes ``uv add`` /
+	// ``uv sync``.
+	UvScope UvScope
+
+	// PdmScope picks ``user`` config.  pdm has no system-wide
+	// config path so PdmScopeSystem is a soft no-op.
+	PdmScope PdmScope
 }
 
 // ApplyResult collects per-ecosystem outcomes.  One field per
@@ -61,7 +72,9 @@ type ApplyResult struct {
 	Npm   WriteNpmResult
 	Maven WriteMavenResult
 	NuGet WriteNuGetResult
-	// future: apt, yum
+	Uv    WriteUvResult
+	Pdm   WritePdmResult
+	// future: apt, yum, gradle, sbt, yarn-berry
 }
 
 // AnyChanged reports whether any writer reported a change in
@@ -87,6 +100,12 @@ func (r ApplyResult) AnyChanged() bool {
 		return true
 	}
 	if r.NuGet.Changed || r.NuGet.Removed {
+		return true
+	}
+	if r.Uv.Changed || r.Uv.Removed {
+		return true
+	}
+	if r.Pdm.Changed || r.Pdm.Removed {
 		return true
 	}
 	return false
@@ -132,6 +151,18 @@ func Apply(m *scanner.InstallGateMap, opts ApplyOptions) (ApplyResult, []error) 
 	res.NuGet = nugetRes
 	if err != nil {
 		errs = append(errs, fmt.Errorf("nuget writer: %w", err))
+	}
+
+	uvRes, err := WriteUv(m, opts.UvScope, opts.Marker)
+	res.Uv = uvRes
+	if err != nil {
+		errs = append(errs, fmt.Errorf("uv writer: %w", err))
+	}
+
+	pdmRes, err := WritePdm(m, opts.PdmScope, opts.Marker)
+	res.Pdm = pdmRes
+	if err != nil {
+		errs = append(errs, fmt.Errorf("pdm writer: %w", err))
 	}
 
 	// Future writers register here.  Each one returns its own

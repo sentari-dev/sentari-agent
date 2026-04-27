@@ -421,6 +421,8 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 				NpmScope:   npmScopeFromConfig(agentCfg.InstallGate.NodeScope),
 				MavenScope: mavenScopeFromConfig(agentCfg.InstallGate.MavenScope),
 				NuGetScope: nugetScopeFromConfig(agentCfg.InstallGate.NuGetScope),
+				UvScope:    uvScopeFromConfig(agentCfg.InstallGate.UvScope),
+				PdmScope:   pdmScopeFromConfig(agentCfg.InstallGate.PdmScope),
 			})
 			for _, e := range errs {
 				log.Warn("install-gate writer", slog.String("err", e.Error()))
@@ -447,6 +449,20 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 				logAudit(auditLog, "install_gate.nuget.skipped_operator",
 					fmt.Sprintf("path=%s version=%d", res.NuGet.Path, igMap.Version))
 			}
+			if res.Uv.SkippedOperator {
+				log.Info("install-gate uv skipped (operator-curated uv.toml)",
+					slog.String("path", res.Uv.Path),
+				)
+				logAudit(auditLog, "install_gate.uv.skipped_operator",
+					fmt.Sprintf("path=%s version=%d", res.Uv.Path, igMap.Version))
+			}
+			if res.Pdm.SkippedOperator {
+				log.Info("install-gate pdm skipped (operator-curated pdm config.toml)",
+					slog.String("path", res.Pdm.Path),
+				)
+				logAudit(auditLog, "install_gate.pdm.skipped_operator",
+					fmt.Sprintf("path=%s version=%d", res.Pdm.Path, igMap.Version))
+			}
 			if res.AnyChanged() {
 				log.Info("install-gate applied",
 					slog.Int("version", igMap.Version),
@@ -462,17 +478,27 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 					slog.String("nuget_path", res.NuGet.Path),
 					slog.Bool("nuget_changed", res.NuGet.Changed),
 					slog.Bool("nuget_removed", res.NuGet.Removed),
+					slog.String("uv_path", res.Uv.Path),
+					slog.Bool("uv_changed", res.Uv.Changed),
+					slog.Bool("uv_removed", res.Uv.Removed),
+					slog.String("pdm_path", res.Pdm.Path),
+					slog.Bool("pdm_changed", res.Pdm.Changed),
+					slog.Bool("pdm_removed", res.Pdm.Removed),
 				)
 				logAudit(auditLog, "install_gate.applied",
 					fmt.Sprintf("version=%d pip_path=%s pip_changed=%t pip_removed=%t "+
 						"npm_path=%s npm_changed=%t npm_removed=%t "+
 						"maven_path=%s maven_changed=%t maven_removed=%t "+
-						"nuget_path=%s nuget_changed=%t nuget_removed=%t",
+						"nuget_path=%s nuget_changed=%t nuget_removed=%t "+
+						"uv_path=%s uv_changed=%t uv_removed=%t "+
+						"pdm_path=%s pdm_changed=%t pdm_removed=%t",
 						igMap.Version,
 						res.Pip.Path, res.Pip.Changed, res.Pip.Removed,
 						res.Npm.Path, res.Npm.Changed, res.Npm.Removed,
 						res.Maven.Path, res.Maven.Changed, res.Maven.Removed,
-						res.NuGet.Path, res.NuGet.Changed, res.NuGet.Removed))
+						res.NuGet.Path, res.NuGet.Changed, res.NuGet.Removed,
+						res.Uv.Path, res.Uv.Changed, res.Uv.Removed,
+						res.Pdm.Path, res.Pdm.Changed, res.Pdm.Removed))
 			}
 		}
 	}
@@ -725,6 +751,29 @@ func nugetScopeFromConfig(s string) installgate.NuGetScope {
 		return installgate.NuGetScopeSystem
 	default:
 		return installgate.NuGetScopeUser
+	}
+}
+
+// uvScopeFromConfig — Astral's uv has user + system config paths.
+// Same defaulting story as the others: empty / unrecognised → user.
+func uvScopeFromConfig(s string) installgate.UvScope {
+	switch s {
+	case "system":
+		return installgate.UvScopeSystem
+	default:
+		return installgate.UvScopeUser
+	}
+}
+
+// pdmScopeFromConfig — pdm has no system-wide config path; the
+// system enum value soft-no-ops downstream in PdmPath.  Kept for
+// symmetry with the other scope helpers.
+func pdmScopeFromConfig(s string) installgate.PdmScope {
+	switch s {
+	case "system":
+		return installgate.PdmScopeSystem
+	default:
+		return installgate.PdmScopeUser
 	}
 }
 
