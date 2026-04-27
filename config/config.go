@@ -81,6 +81,14 @@ type InstallGateConfig struct {
 	// default but requires the agent to run as root).  Empty
 	// resolves to ``user`` at apply time.
 	PythonScope string
+
+	// NodeScope selects the npm-config target on hosts with Node
+	// installed.  ``user`` writes ``~/.npmrc``; ``system`` writes
+	// ``/etc/npmrc`` (Linux/macOS only — the npm "global" prefix
+	// on Windows is install-method-dependent so the npm writer
+	// soft-no-ops there for system scope).  Empty resolves to
+	// ``user`` at apply time.
+	NodeScope string
 }
 
 // DefaultConfig returns the default agent configuration.
@@ -245,6 +253,13 @@ func (c *AgentConfig) set(section, key, value string) error {
 				c.InstallGate.PythonScope = strings.ToLower(value)
 			default:
 				return fmt.Errorf("invalid python_scope %q (want user/system)", value)
+			}
+		case "node_scope":
+			switch strings.ToLower(value) {
+			case "", "user", "system":
+				c.InstallGate.NodeScope = strings.ToLower(value)
+			default:
+				return fmt.Errorf("invalid node_scope %q (want user/system)", value)
 			}
 		default:
 			log.Printf("config: unknown key [%s] %s — ignored", section, key)
