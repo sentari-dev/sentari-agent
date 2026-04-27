@@ -10,10 +10,10 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
-// makeNpmMap returns a verified-shape map with one ``npm`` proxy
-// endpoint and a populated pypi block (so the orchestrator's pip
-// writer doesn't trip over a missing ecosystem entry when the
-// integration tests later exercise both writers).
+// makeNpmMap returns a verified-shape map with one ``npm``
+// ecosystem entry and matching proxy endpoint.  Single-ecosystem
+// fixture for npm-specific tests; orchestrator tests build their
+// own multi-ecosystem fixture in ``orchestrator_test.go``.
 func makeNpmMap(npmEndpoint string) *scanner.InstallGateMap {
 	return &scanner.InstallGateMap{
 		Version: 1730901234,
@@ -115,7 +115,10 @@ func TestWriteNpm_NormalisesTrailingSlash(t *testing.T) {
 	if !res.Changed {
 		t.Fatal("expected Changed=true")
 	}
-	body, _ := os.ReadFile(path)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(string(body), "registry=https://proxy.example.test/npm/\n") {
 		t.Errorf(".npmrc did not normalise trailing slash:\n%s", body)
 	}
@@ -220,5 +223,34 @@ func TestWriteNpm_NilMapRejected(t *testing.T) {
 	npmHomeOverride(t, dir)
 	if _, err := WriteNpm(nil, NpmScopeUser, MarkerFields{}); err == nil {
 		t.Error("expected error on nil map")
+	}
+}
+
+// Endpoint-injection guard: a CR/LF in the proxy URL would let a
+// tampered policy-map (or a buggy server config) inject a second
+// ``registry=`` line that npm would honour over ours.  The
+// validateEndpoint gate refuses control bytes before the renderer
+// emits anything.  Defence-in-depth — even though signature
+// verification + dashboard UI both validate the URL upstream.
+func TestWriteNpm_RejectsControlCharsInEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	path := npmHomeOverride(t, dir)
+
+	cases := []string{
+		"https://proxy.example.test/npm/\nregistry=evil/",
+		"https://proxy.example.test/npm/\rregistry=evil/",
+		"https://proxy.example.test/npm /", // embedded space
+		"https://proxy.example.test/npm/\x00",
+	}
+	for _, ep := range cases {
+		_, err := WriteNpm(makeNpmMap(ep), NpmScopeUser, MarkerFields{Applied: fixedTime})
+		if err == nil {
+			t.Errorf("expected error for endpoint %q", ep)
+		}
+		// And no file should have been created on the host.
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("file created for invalid endpoint %q: stat err=%v", ep, err)
+			_ = os.Remove(path) // clean up before the next iteration
+		}
 	}
 }

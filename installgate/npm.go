@@ -159,8 +159,8 @@ func WriteNpm(m *scanner.InstallGateMap, scope NpmScope, marker MarkerFields) (W
 // ``.sentari-backup-*`` file the writer creates on first overwrite.
 func renderNpmrc(endpoint string, marker MarkerFields) ([]byte, error) {
 	endpoint = strings.TrimSpace(endpoint)
-	if endpoint == "" {
-		return nil, fmt.Errorf("renderNpmrc: empty endpoint after trim")
+	if err := validateEndpoint(endpoint); err != nil {
+		return nil, fmt.Errorf("renderNpmrc: %w", err)
 	}
 	// npm's registry URL must end with ``/`` — npm appends paths
 	// directly to it without inserting a separator, so a missing
