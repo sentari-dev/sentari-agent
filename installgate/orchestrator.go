@@ -33,6 +33,11 @@ type ApplyOptions struct {
 	// NpmScope picks ``user`` or ``system`` ``.npmrc``.  Same
 	// defaulting story as ``PipScope``.
 	NpmScope NpmScope
+
+	// MavenScope picks ``user`` (~/.m2/settings.xml) or ``system``
+	// ($MAVEN_HOME/conf/settings.xml).  System scope is a soft
+	// no-op when MAVEN_HOME is unset.
+	MavenScope MavenScope
 }
 
 // ApplyResult collects per-ecosystem outcomes.  One field per
@@ -46,9 +51,10 @@ type ApplyOptions struct {
 // field here, but that's the exact spot a reviewer should look at
 // when a new writer lands.
 type ApplyResult struct {
-	Pip WritePipResult
-	Npm WriteNpmResult
-	// future: Maven WriteMavenResult; NuGet …
+	Pip   WritePipResult
+	Npm   WriteNpmResult
+	Maven WriteMavenResult
+	// future: NuGet …
 }
 
 // AnyChanged reports whether any writer reported a change in
@@ -56,11 +62,20 @@ type ApplyResult struct {
 // this to decide whether to log at info-level (something changed
 // → operator wants to know) or debug-level (everything was a
 // no-op → noise).
+//
+// Maven's ``SkippedOperator`` is intentionally NOT counted as a
+// change — skipping is the steady-state outcome on Artifactory
+// hosts and would otherwise spam info-level logs every cycle.
+// The orchestrator's caller surfaces SkippedOperator separately
+// in audit / structured logs so operators still see it.
 func (r ApplyResult) AnyChanged() bool {
 	if r.Pip.Changed || r.Pip.Removed {
 		return true
 	}
 	if r.Npm.Changed || r.Npm.Removed {
+		return true
+	}
+	if r.Maven.Changed || r.Maven.Removed {
 		return true
 	}
 	return false
@@ -94,6 +109,12 @@ func Apply(m *scanner.InstallGateMap, opts ApplyOptions) (ApplyResult, []error) 
 	res.Npm = npmRes
 	if err != nil {
 		errs = append(errs, fmt.Errorf("npm writer: %w", err))
+	}
+
+	mavenRes, err := WriteMaven(m, opts.MavenScope, opts.Marker)
+	res.Maven = mavenRes
+	if err != nil {
+		errs = append(errs, fmt.Errorf("maven writer: %w", err))
 	}
 
 	// Future writers register here.  Each one returns its own

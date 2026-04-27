@@ -212,6 +212,9 @@ func renderPipConf(endpoint string, marker MarkerFields) ([]byte, error) {
 	if err := validateEndpoint(endpoint); err != nil {
 		return nil, fmt.Errorf("renderPipConf: %w", err)
 	}
+	if err := validateMarkerKeyID(marker.KeyID); err != nil {
+		return nil, fmt.Errorf("renderPipConf: %w", err)
+	}
 
 	host, err := hostOf(endpoint)
 	if err != nil {

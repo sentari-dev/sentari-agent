@@ -71,7 +71,7 @@ func TestApply_NoProxyNoOp(t *testing.T) {
 
 	res, errs := Apply(orchestratorTestMap(""), ApplyOptions{
 		PipScope: PipScopeUser,
-		Marker:   MarkerFields{Applied: fixedTime},
+		Marker:   MarkerFields{KeyID: "primary", Applied: fixedTime},
 	})
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)

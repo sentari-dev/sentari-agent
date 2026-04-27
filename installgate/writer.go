@@ -224,8 +224,9 @@ func validateEndpoint(endpoint string) error {
 var sentariManagedSentinel = []byte("# Managed by Sentari")
 var sentariManagedSentinelXML = []byte("<!-- Managed by Sentari")
 
-// isSentariManaged reports whether ``path`` exists AND its first
-// bytes carry the Sentari-managed marker.  Returns:
+// isSentariManaged reports whether ``path`` exists AND carries
+// the Sentari-managed marker within its first ``markerSearchBytes``
+// bytes.  Returns:
 //
 //   - ``(false, nil)`` for absent files (the writer treats this as
 //     "no Sentari ownership claim", same as the operator-curated
@@ -236,8 +237,14 @@ var sentariManagedSentinelXML = []byte("<!-- Managed by Sentari")
 //   - ``(false, err)`` on permission/IO errors so the caller can
 //     refuse to act under uncertainty.
 //
-// A 256-byte read is enough to decide; the marker plus its
-// surrounding comment line never exceeds ~120 bytes in practice.
+// 1 KiB is enough to decide.  The hash-marker variant (pip / npm /
+// apt / yum) sits at offset zero, so a tiny prefix-check would be
+// fine for those — but the XML-marker variant (Maven, NuGet) sits
+// AFTER the ``<?xml ...?>`` declaration on line 2, so we need a
+// substring scan rather than a prefix match.  ``bytes.Contains``
+// is fine; the read is bounded, the search is linear.
+const markerSearchBytes = 1024
+
 func isSentariManaged(path string) (bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -247,31 +254,48 @@ func isSentariManaged(path string) (bool, error) {
 		return false, err
 	}
 	defer f.Close()
-	head := make([]byte, 256)
-	n, err := f.Read(head)
-	if err != nil && err != io.EOF {
+	head := make([]byte, markerSearchBytes)
+	// io.ReadFull guarantees we get either a full buffer or an
+	// ``io.ErrUnexpectedEOF`` (file shorter than buffer — fine,
+	// scan what we got).  Plain ``f.Read`` is allowed to short-
+	// read with ``err == nil`` on POSIX, which on a slow disk
+	// could truncate the marker scan window mid-marker and
+	// misclassify a Sentari-managed file as operator-curated.
+	n, err := io.ReadFull(f, head)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return false, err
 	}
 	head = head[:n]
-	if bytesPrefix(head, sentariManagedSentinel) || bytesPrefix(head, sentariManagedSentinelXML) {
+	if bytesContains(head, sentariManagedSentinel) || bytesContains(head, sentariManagedSentinelXML) {
 		return true, nil
 	}
 	return false, nil
 }
 
-// bytesPrefix returns true iff prefix is a leading sub-slice of s.
-// Avoids importing ``bytes`` to keep the package surface minimal —
-// ``bytesEqual`` above is the same trade-off.
-func bytesPrefix(s, prefix []byte) bool {
-	if len(s) < len(prefix) {
+// bytesContains returns true iff ``needle`` appears anywhere in
+// ``haystack``.  We hand-roll this rather than importing ``bytes``
+// to keep this package's import surface auditable — same
+// minimalist trade-off as the local ``bytesEqual`` helper above.
+func bytesContains(haystack, needle []byte) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(haystack) < len(needle) {
 		return false
 	}
-	for i := range prefix {
-		if s[i] != prefix[i] {
-			return false
+	for i := 0; i <= len(haystack)-len(needle); i++ {
+		match := true
+		for j := 0; j < len(needle); j++ {
+			if haystack[i+j] != needle[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // Remove deletes a previously-written Sentari-managed config file.

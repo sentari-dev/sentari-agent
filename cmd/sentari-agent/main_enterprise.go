@@ -417,11 +417,23 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 					KeyID:   envelopeKeyID(envelope),
 					Applied: time.Now().UTC(),
 				},
-				PipScope: pipScopeFromConfig(agentCfg.InstallGate.PythonScope),
-				NpmScope: npmScopeFromConfig(agentCfg.InstallGate.NodeScope),
+				PipScope:   pipScopeFromConfig(agentCfg.InstallGate.PythonScope),
+				NpmScope:   npmScopeFromConfig(agentCfg.InstallGate.NodeScope),
+				MavenScope: mavenScopeFromConfig(agentCfg.InstallGate.MavenScope),
 			})
 			for _, e := range errs {
 				log.Warn("install-gate writer", slog.String("err", e.Error()))
+			}
+			// Surface the Maven SkippedOperator state at info-level
+			// even when nothing else changed — operators of
+			// Artifactory hosts need to see that Maven is NOT being
+			// gated so they don't conclude install-gate is broken.
+			if res.Maven.SkippedOperator {
+				log.Info("install-gate maven skipped (operator-curated settings.xml)",
+					slog.String("path", res.Maven.Path),
+				)
+				logAudit(auditLog, "install_gate.maven.skipped_operator",
+					fmt.Sprintf("path=%s version=%d", res.Maven.Path, igMap.Version))
 			}
 			if res.AnyChanged() {
 				log.Info("install-gate applied",
@@ -432,13 +444,18 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 					slog.String("npm_path", res.Npm.Path),
 					slog.Bool("npm_changed", res.Npm.Changed),
 					slog.Bool("npm_removed", res.Npm.Removed),
+					slog.String("maven_path", res.Maven.Path),
+					slog.Bool("maven_changed", res.Maven.Changed),
+					slog.Bool("maven_removed", res.Maven.Removed),
 				)
 				logAudit(auditLog, "install_gate.applied",
 					fmt.Sprintf("version=%d pip_path=%s pip_changed=%t pip_removed=%t "+
-						"npm_path=%s npm_changed=%t npm_removed=%t",
+						"npm_path=%s npm_changed=%t npm_removed=%t "+
+						"maven_path=%s maven_changed=%t maven_removed=%t",
 						igMap.Version,
 						res.Pip.Path, res.Pip.Changed, res.Pip.Removed,
-						res.Npm.Path, res.Npm.Changed, res.Npm.Removed))
+						res.Npm.Path, res.Npm.Changed, res.Npm.Removed,
+						res.Maven.Path, res.Maven.Changed, res.Maven.Removed))
 			}
 		}
 	}
@@ -667,6 +684,18 @@ func npmScopeFromConfig(s string) installgate.NpmScope {
 		return installgate.NpmScopeSystem
 	default:
 		return installgate.NpmScopeUser
+	}
+}
+
+// mavenScopeFromConfig is the Maven-side parallel of
+// pipScopeFromConfig.  System scope is a soft no-op when MAVEN_HOME
+// is unset — that decision lives downstream in MavenPath.
+func mavenScopeFromConfig(s string) installgate.MavenScope {
+	switch s {
+	case "system":
+		return installgate.MavenScopeSystem
+	default:
+		return installgate.MavenScopeUser
 	}
 }
 

@@ -24,6 +24,36 @@ import (
 	"time"
 )
 
+// validateMarkerKeyID refuses KeyIDs that would land in an XML
+// comment as ill-formed content (XML disallows ``--`` inside
+// comments and disallows comments ending in ``-``).  Even the
+// hash-marker variant routes through this so a misconfigured
+// KeyID can't smuggle a newline / control byte into pip's
+// ``signed=...`` line — defence-in-depth, the server-side
+// validator already guards against most of this.
+//
+// Returns nil on a clean KeyID; ``error`` describes the offending
+// character / sequence so an operator chasing a render failure
+// can correct the server-side configuration.
+func validateMarkerKeyID(keyID string) error {
+	if keyID == "" {
+		return fmt.Errorf("marker key_id is empty")
+	}
+	for i := 0; i < len(keyID); i++ {
+		c := keyID[i]
+		if c < 0x20 || c == 0x7F {
+			return fmt.Errorf("marker key_id contains forbidden control byte 0x%02x at offset %d", c, i)
+		}
+	}
+	if strings.Contains(keyID, "--") {
+		return fmt.Errorf("marker key_id contains ``--`` (illegal in XML comments)")
+	}
+	if strings.HasSuffix(keyID, "-") {
+		return fmt.Errorf("marker key_id ends with ``-`` (illegal in XML comments)")
+	}
+	return nil
+}
+
 // renderHashMarker produces the two-line ``#``-prefixed comment
 // block used by pip / npm / apt / yum config files.  Format intent:
 //
@@ -32,9 +62,6 @@ import (
 //
 // The trailing ``\n`` is included so callers can concatenate the
 // rendered config body without worrying about leading whitespace.
-//
-// XML-flavoured marker for ``settings.xml`` / ``NuGet.Config``
-// lands with the maven + nuget writers in a follow-up PR.
 func renderHashMarker(fields MarkerFields) string {
 	return strings.Join([]string{
 		fmt.Sprintf(
@@ -46,4 +73,25 @@ func renderHashMarker(fields MarkerFields) string {
 		"# Do not edit manually — changes are overwritten on the next policy sync.",
 		"",
 	}, "\n")
+}
+
+// renderXMLMarker produces the XML-comment variant for
+// ``settings.xml`` / ``NuGet.Config``.  Used by the Maven writer
+// (PR-5) and the NuGet writer (PR-6).  Format intent:
+//
+//	<!-- Managed by Sentari (version=..., signed=..., applied=...) -->
+//
+// Single-line so it can sit between the XML declaration and the
+// document's root element without disrupting parsers that have
+// strict-DTD expectations.  isSentariManaged matches the
+// ``<!-- Managed by Sentari`` prefix to identify these files
+// without rendering — same recognition pattern as the hash
+// marker, just XML-flavoured.
+func renderXMLMarker(fields MarkerFields) string {
+	return fmt.Sprintf(
+		"<!-- Managed by Sentari (version=%d, signed=%s, applied=%s) -->\n",
+		fields.Version,
+		fields.KeyID,
+		fields.Applied.UTC().Format(time.RFC3339),
+	)
 }
