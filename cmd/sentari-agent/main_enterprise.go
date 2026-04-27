@@ -392,7 +392,17 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 	if agentCfg.InstallGate.Enabled {
 		igCachePath := filepath.Join(dataDir, "policy_map.json")
 		currentVersion := 0
-		if cachedMap, _, _ := scanner.LoadVerifiedInstallGateFromFile(igCachePath); cachedMap != nil {
+		// A cache-read error is a real signal — typically a tampered
+		// or otherwise corrupt cache file.  Log and treat as
+		// "no cached version" so the next FetchInstallGateMap call
+		// pulls a fresh envelope.  Don't auto-delete the file: an
+		// operator who needs to reproduce the corruption for a
+		// support ticket would lose the evidence.
+		cachedMap, _, cacheErr := scanner.LoadVerifiedInstallGateFromFile(igCachePath)
+		if cacheErr != nil {
+			log.Warn("install-gate cache load failed; refetching",
+				slog.String("err", cacheErr.Error()))
+		} else if cachedMap != nil {
 			currentVersion = cachedMap.Version
 		}
 		if igMap, envelope, err := client.FetchInstallGateMap(ctx, currentVersion); err != nil {
@@ -404,7 +414,7 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 			res, errs := installgate.Apply(igMap, installgate.ApplyOptions{
 				Marker: installgate.MarkerFields{
 					Version: igMap.Version,
-					KeyID:   "primary",
+					KeyID:   envelopeKeyID(envelope),
 					Applied: time.Now().UTC(),
 				},
 				PipScope: pipScopeFromConfig(agentCfg.InstallGate.PythonScope),
@@ -629,9 +639,6 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 	}
 }
 
-// logAudit writes an audit entry and logs to stderr on failure.
-// Audit logging should never be silently discarded — if the audit database
-// is unavailable, the operator must be aware.
 // pipScopeFromConfig translates the operator's [install_gate]
 // python_scope INI value into the writer's typed scope.  Empty
 // or unrecognised → ``user`` (laptop default), matching the
@@ -645,6 +652,29 @@ func pipScopeFromConfig(s string) installgate.PipScope {
 	}
 }
 
+// envelopeKeyID extracts the ``key_id`` field from a verified
+// signed envelope's outer wrapper.  The signature itself was
+// validated upstream in scanner.VerifyInstallGateEnvelope, so
+// this is a safe re-decode for marker bookkeeping — we are not
+// re-trusting the bytes, just lifting the already-verified key_id
+// for embedding in the rendered config's ``signed=`` marker.
+//
+// Falls back to ``"primary"`` only when the envelope is malformed
+// (which can't happen given the upstream verify) so the audit
+// trail stays internally consistent rather than blank.
+func envelopeKeyID(envelope []byte) string {
+	var meta struct {
+		KeyID string `json:"key_id"`
+	}
+	if err := json.Unmarshal(envelope, &meta); err == nil && meta.KeyID != "" {
+		return meta.KeyID
+	}
+	return "primary"
+}
+
+// logAudit writes an audit entry and logs to stderr on failure.
+// Audit logging should never be silently discarded — if the audit database
+// is unavailable, the operator must be aware.
 func logAudit(a *audit.AuditLog, eventType, detail string) {
 	if err := a.Log(eventType, detail); err != nil {
 		fmt.Fprintf(os.Stderr, "WARNING: audit log write failed (%s): %v\n", eventType, err)

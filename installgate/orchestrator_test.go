@@ -2,7 +2,6 @@ package installgate
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
@@ -33,9 +32,11 @@ func TestApply_NilMap(t *testing.T) {
 }
 
 func TestApply_PipChanged(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("HOME", dir)
+	// Reuse the per-OS env override from pip_test.go so this test
+	// passes on Windows (APPDATA-based path) as well as on
+	// Linux/macOS (XDG_CONFIG_HOME / HOME).  ``want`` comes back
+	// already adjusted to the platform.
+	want := userHomeOverride(t, t.TempDir())
 
 	res, errs := Apply(
 		orchestratorTestMap("https://proxy.example.test/pypi/simple/"),
@@ -57,18 +58,16 @@ func TestApply_PipChanged(t *testing.T) {
 	if !res.Pip.Changed {
 		t.Error("expected Pip.Changed=true")
 	}
-
-	// File actually exists at the resolved path.
-	want := filepath.Join(dir, ".config", "pip", "pip.conf")
+	if res.Pip.Path != want {
+		t.Errorf("Pip.Path: got %q, want %q", res.Pip.Path, want)
+	}
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("pip.conf not created at %s: %v", want, err)
 	}
 }
 
 func TestApply_NoProxyNoOp(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("HOME", dir)
+	userHomeOverride(t, t.TempDir())
 
 	res, errs := Apply(orchestratorTestMap(""), ApplyOptions{
 		PipScope: PipScopeUser,
