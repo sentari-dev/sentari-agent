@@ -10,10 +10,13 @@
 // uniformly.
 //
 // Reads the same ``proxy_endpoints["pypi"]`` as the pip writer
-// since uv consumes the PyPI ecosystem.  An operator who wants to
-// gate pip but NOT uv (rare) can drop the uv writer by clearing
-// ``[install_gate] uv_scope`` — the agent then leaves uv.toml
-// alone.
+// since uv consumes the PyPI ecosystem.  Blank or unknown
+// ``[install_gate] uv_scope`` values do NOT disable the uv writer;
+// they fall back to the default user scope (same defaulting as the
+// other scope keys).  An operator who genuinely wants pip gated
+// but uv un-gated must rely on the policy-map server-side: clear
+// ``proxy_endpoints["pypi"]`` only when the host has no uv,
+// otherwise the uv writer will gate uv-using projects too.
 
 package installgate
 
