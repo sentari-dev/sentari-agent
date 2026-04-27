@@ -70,9 +70,9 @@ type ApplyResult struct {
 // → operator wants to know) or debug-level (everything was a
 // no-op → noise).
 //
-// Maven and NuGet's ``SkippedOperator`` is intentionally NOT
-// counted as a change — skipping is the steady-state outcome on
-// hosts whose package configs predate enrolment and would
+// Maven's and NuGet's ``SkippedOperator`` flags are intentionally
+// not counted as a change — skipping is the steady-state outcome
+// on hosts whose package configs predate enrolment and would
 // otherwise spam info-level logs every cycle.  The orchestrator's
 // caller surfaces SkippedOperator separately in audit / structured
 // logs so operators still see it.
