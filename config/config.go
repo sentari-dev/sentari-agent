@@ -13,10 +13,11 @@ import (
 
 // AgentConfig holds all agent configuration.
 type AgentConfig struct {
-	Server  ServerConfig
-	Scanner ScannerConfig
-	Proxy   ProxyConfig
-	Logging LoggingConfig
+	Server      ServerConfig
+	Scanner     ScannerConfig
+	Proxy       ProxyConfig
+	Logging     LoggingConfig
+	InstallGate InstallGateConfig
 }
 
 // ServerConfig holds server connection settings.
@@ -54,6 +55,32 @@ type ProxyConfig struct {
 type LoggingConfig struct {
 	Level string // Log level: debug, info, warn, error
 	File  string // Log file path (empty = stderr)
+}
+
+// InstallGateConfig holds install-gate (preventive enforcement)
+// settings.  Phase-B feature; off-by-default until the rollout
+// graduates to GA.
+//
+// INI section:
+//
+//	[install_gate]
+//	enabled = true
+//	python_scope = user|system
+type InstallGateConfig struct {
+	// Enabled gates the entire install-gate feature on the agent.
+	// When false (default), the agent does not fetch the
+	// policy-map, does not write any native package-manager
+	// configs, and emits no install-gate audit events.  Operators
+	// pre-stage policies via the dashboard against this dormant
+	// flag so the flip-day is a no-op for them.
+	Enabled bool
+
+	// PythonScope selects the pip-config target on hosts with
+	// Python installed.  ``user`` writes ``~/.config/pip/pip.conf``
+	// (laptop default); ``system`` writes ``/etc/pip.conf`` (server
+	// default but requires the agent to run as root).  Empty
+	// resolves to ``user`` at apply time.
+	PythonScope string
 }
 
 // DefaultConfig returns the default agent configuration.
@@ -198,6 +225,27 @@ func (c *AgentConfig) set(section, key, value string) error {
 			c.Logging.Level = value
 		case "file":
 			c.Logging.File = value
+		default:
+			log.Printf("config: unknown key [%s] %s — ignored", section, key)
+		}
+	case "install_gate":
+		switch key {
+		case "enabled":
+			switch strings.ToLower(value) {
+			case "true", "1", "yes", "on":
+				c.InstallGate.Enabled = true
+			case "false", "0", "no", "off", "":
+				c.InstallGate.Enabled = false
+			default:
+				return fmt.Errorf("invalid enabled value %q (want true/false)", value)
+			}
+		case "python_scope":
+			switch strings.ToLower(value) {
+			case "", "user", "system":
+				c.InstallGate.PythonScope = strings.ToLower(value)
+			default:
+				return fmt.Errorf("invalid python_scope %q (want user/system)", value)
+			}
 		default:
 			log.Printf("config: unknown key [%s] %s — ignored", section, key)
 		}

@@ -24,6 +24,7 @@ import (
 	"github.com/sentari-dev/sentari-agent/common/logging"
 	"github.com/sentari-dev/sentari-agent/comms"
 	"github.com/sentari-dev/sentari-agent/config"
+	"github.com/sentari-dev/sentari-agent/installgate"
 	"github.com/sentari-dev/sentari-agent/sbom"
 	"github.com/sentari-dev/sentari-agent/scanner"
 	"github.com/sentari-dev/sentari-agent/scanner/containers"
@@ -262,6 +263,17 @@ func main() {
 		); err != nil {
 			regLog.Warn("persist license-map trust failed", slog.String("err", err.Error()))
 		}
+		// Same persistence story for the install-gate signing pubkey.
+		// Empty fields → SaveInstallGateTrust no-ops, which is the
+		// expected case on older servers that have not yet provisioned
+		// the install-gate signing key.
+		if err := comms.SaveInstallGateTrust(
+			certDir,
+			regResp.InstallGateKeyID,
+			regResp.InstallGatePubKey,
+		); err != nil {
+			regLog.Warn("persist install-gate trust failed", slog.String("err", err.Error()))
+		}
 		logAudit(auditLog, "agent.registered", fmt.Sprintf("device_id=%s", regResp.DeviceID))
 		regLog.Info("certificates saved", slog.String("cert_dir", certDir))
 	}
@@ -280,6 +292,23 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Warning: license-map pubkey has wrong length (%d)\n", len(raw))
 		} else {
 			scanner.RegisterTrustedMapKey(trust.KeyID, ed25519.PublicKey(raw))
+		}
+	}
+
+	// Same shape for the install-gate signing pubkey.  Trust file
+	// missing → install-gate-disabled mode (writers will bail out
+	// when verifying envelopes); base64 / length errors get logged
+	// loudly so an operator noticing a corrupt trust file can
+	// reset by re-registering.
+	if trust, err := comms.LoadInstallGateTrust(certDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not load install-gate trust: %v\n", err)
+	} else if trust != nil {
+		if raw, err := base64.StdEncoding.DecodeString(trust.PubKeyB64); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: install-gate pubkey is not valid base64: %v\n", err)
+		} else if len(raw) != ed25519.PublicKeySize {
+			fmt.Fprintf(os.Stderr, "Warning: install-gate pubkey has wrong length (%d)\n", len(raw))
+		} else {
+			scanner.RegisterTrustedInstallGateKey(trust.KeyID, ed25519.PublicKey(raw))
 		}
 	}
 
@@ -346,6 +375,55 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 			log.Warn("failed to cache license map", slog.String("err", err.Error()))
 		}
 		log.Info("license map updated", slog.Int("version", lm.Version))
+	}
+
+	// Install-gate (preventive enforcement) — Phase B.  Off by
+	// default; only fetches the policy-map when the operator has
+	// explicitly enabled the feature.  Off-day cost is one config
+	// flag check per scan cycle.
+	//
+	// On-day: load cached envelope to derive the current version,
+	// fetch a fresher one from the server, persist + apply.  A
+	// fetch failure keeps the cached config in place rather than
+	// reverting — the agent re-tries on the next cycle, and if
+	// the server is durably unreachable the fail-open vs fail-
+	// closed decision is the operator's via the policy-map's
+	// ``fail_mode`` field (Phase D).
+	if agentCfg.InstallGate.Enabled {
+		igCachePath := filepath.Join(dataDir, "policy_map.json")
+		currentVersion := 0
+		if cachedMap, _, _ := scanner.LoadVerifiedInstallGateFromFile(igCachePath); cachedMap != nil {
+			currentVersion = cachedMap.Version
+		}
+		if igMap, envelope, err := client.FetchInstallGateMap(ctx, currentVersion); err != nil {
+			log.Warn("install-gate refresh failed (using cached)", slog.String("err", err.Error()))
+		} else if igMap != nil {
+			if err := scanner.SaveVerifiedInstallGateEnvelopeToFile(igCachePath, envelope); err != nil {
+				log.Warn("failed to cache install-gate map", slog.String("err", err.Error()))
+			}
+			res, errs := installgate.Apply(igMap, installgate.ApplyOptions{
+				Marker: installgate.MarkerFields{
+					Version: igMap.Version,
+					KeyID:   "primary",
+					Applied: time.Now().UTC(),
+				},
+				PipScope: pipScopeFromConfig(agentCfg.InstallGate.PythonScope),
+			})
+			for _, e := range errs {
+				log.Warn("install-gate writer", slog.String("err", e.Error()))
+			}
+			if res.AnyChanged() {
+				log.Info("install-gate applied",
+					slog.Int("version", igMap.Version),
+					slog.String("pip_path", res.Pip.Path),
+					slog.Bool("pip_changed", res.Pip.Changed),
+					slog.Bool("pip_removed", res.Pip.Removed),
+				)
+				logAudit(auditLog, "install_gate.applied",
+					fmt.Sprintf("version=%d pip_path=%s pip_changed=%t pip_removed=%t",
+						igMap.Version, res.Pip.Path, res.Pip.Changed, res.Pip.Removed))
+			}
+		}
 	}
 
 	// Drain cached scans from previous offline runs (oldest first).
@@ -554,6 +632,19 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 // logAudit writes an audit entry and logs to stderr on failure.
 // Audit logging should never be silently discarded — if the audit database
 // is unavailable, the operator must be aware.
+// pipScopeFromConfig translates the operator's [install_gate]
+// python_scope INI value into the writer's typed scope.  Empty
+// or unrecognised → ``user`` (laptop default), matching the
+// design-doc §4.1 default for non-server hosts.
+func pipScopeFromConfig(s string) installgate.PipScope {
+	switch s {
+	case "system":
+		return installgate.PipScopeSystem
+	default:
+		return installgate.PipScopeUser
+	}
+}
+
 func logAudit(a *audit.AuditLog, eventType, detail string) {
 	if err := a.Log(eventType, detail); err != nil {
 		fmt.Fprintf(os.Stderr, "WARNING: audit log write failed (%s): %v\n", eventType, err)
