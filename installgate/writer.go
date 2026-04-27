@@ -116,6 +116,13 @@ func WriteAtomic(opts WriteOptions) (bool, error) {
 		opts.FileMode = 0o644
 	}
 
+	// Cleanup any stranded ``.sentari-tmp`` from a prior run that
+	// crashed between fsync and rename.  Best-effort — a permission
+	// error here doesn't block the normal write path because the
+	// final ``os.Rename`` will fail anyway with a clearer message.
+	tmpPath := opts.Path + ".sentari-tmp"
+	_ = os.Remove(tmpPath)
+
 	// Idempotency check.  If the path exists and its bytes already
 	// match what we are about to write, skip the rename + fsync —
 	// every applied policy would otherwise rewrite identical files
@@ -144,11 +151,10 @@ func WriteAtomic(opts WriteOptions) (bool, error) {
 		return false, fmt.Errorf("create config dir %s: %w", parent, err)
 	}
 
-	// Atomic write: tmpfile in same dir → fsync → rename.  Same
-	// dir matters: ``rename`` is atomic only inside one filesystem,
-	// and ``filepath.Dir(opts.Path)`` is the filesystem we already
-	// know we have permission to write to.
-	tmpPath := opts.Path + ".sentari-tmp"
+	// Atomic write: tmpfile in same dir → fsync → rename → fsync
+	// parent.  Same dir matters: ``rename`` is atomic only inside
+	// one filesystem, and ``filepath.Dir(opts.Path)`` is the
+	// filesystem we already know we have permission to write to.
 	if err := writeAndSync(tmpPath, opts.Content, opts.FileMode); err != nil {
 		// Best-effort cleanup; ignoring removal errors here is OK
 		// because the next scan cycle's first write attempt does
@@ -160,7 +166,79 @@ func WriteAtomic(opts WriteOptions) (bool, error) {
 		_ = os.Remove(tmpPath)
 		return false, fmt.Errorf("rename %s -> %s: %w", tmpPath, opts.Path, err)
 	}
+	// fsync the parent directory so the rename's metadata change
+	// hits disk before we declare success.  Without this, ext4 / xfs
+	// can lose the rename across a power cut even though the file
+	// data was synced.  Best-effort + POSIX-only — Windows file
+	// systems don't support directory fsync, so the helper is a
+	// no-op there (see syncDir_*.go).
+	if err := syncDir(parent); err != nil {
+		// Surface as a warning-level error wrap rather than failing
+		// the apply: the file IS visible at this point, and the
+		// trade-off "config not durable across crash" is dramatically
+		// better than "agent crashes every apply on a filesystem
+		// that doesn't support O_DIRECTORY syncs".
+		return true, fmt.Errorf("fsync parent %s: %w", parent, err)
+	}
 	return true, nil
+}
+
+// sentariManagedSentinel is the byte sequence every rendered config
+// begins with.  Per design §4 every writer prepends a ``Managed by
+// Sentari`` comment block; matching the literal bytes here keeps
+// the marker check syntax-agnostic across the # / <!-- variants
+// because both share this prefix.
+var sentariManagedSentinel = []byte("# Managed by Sentari")
+var sentariManagedSentinelXML = []byte("<!-- Managed by Sentari")
+
+// isSentariManaged reports whether ``path`` exists AND its first
+// bytes carry the Sentari-managed marker.  Returns:
+//
+//   - ``(false, nil)`` for absent files (the writer treats this as
+//     "no Sentari ownership claim", same as the operator-curated
+//     case below).
+//   - ``(false, nil)`` for files that exist but lack the marker
+//     (operator-curated pre-Sentari config, or hand-edited).
+//   - ``(true, nil)`` when the marker is present.
+//   - ``(false, err)`` on permission/IO errors so the caller can
+//     refuse to act under uncertainty.
+//
+// A 256-byte read is enough to decide; the marker plus its
+// surrounding comment line never exceeds ~120 bytes in practice.
+func isSentariManaged(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer f.Close()
+	head := make([]byte, 256)
+	n, err := f.Read(head)
+	if err != nil && err != io.EOF {
+		return false, err
+	}
+	head = head[:n]
+	if bytesPrefix(head, sentariManagedSentinel) || bytesPrefix(head, sentariManagedSentinelXML) {
+		return true, nil
+	}
+	return false, nil
+}
+
+// bytesPrefix returns true iff prefix is a leading sub-slice of s.
+// Avoids importing ``bytes`` to keep the package surface minimal —
+// ``bytesEqual`` above is the same trade-off.
+func bytesPrefix(s, prefix []byte) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		if s[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Remove deletes a previously-written Sentari-managed config file.
@@ -250,7 +328,15 @@ func writeAndSync(path string, data []byte, mode os.FileMode) error {
 // backupOriginal copies the existing file to
 // ``<path>.sentari-backup-<RFC3339-timestamp>`` (or to
 // ``<path><customSuffix>`` when supplied).  Mode is preserved from
-// the source.
+// the source via an explicit ``os.Chmod`` after create — relying
+// on ``os.OpenFile``'s perm argument alone is umask-subject and
+// would quietly drop bits the operator had set on the original.
+//
+// The copy is bounded by ``MaxConfigFileBytes``: a pre-existing
+// pip.conf bigger than that is almost certainly malicious or
+// pathological, and copying it to a backup would (a) waste disk
+// proportional to the attacker's input and (b) recur every time we
+// rewrote the config.  Refuse rather than back up.
 //
 // Idempotent at the byte level: if a backup with the same
 // destination name somehow already exists (clock-skew + same-
@@ -281,6 +367,12 @@ func backupOriginal(path string, now time.Time, customSuffix string) error {
 	if err != nil {
 		return fmt.Errorf("stat original %s: %w", path, err)
 	}
+	if srcInfo.Size() > MaxConfigFileBytes {
+		return fmt.Errorf(
+			"original %s exceeds backup size cap (%d > %d)",
+			path, srcInfo.Size(), MaxConfigFileBytes,
+		)
+	}
 
 	// O_EXCL — refuse to clobber, just in case the Stat-then-Open
 	// raced with another writer (vanishingly rare, but free safety).
@@ -293,11 +385,21 @@ func backupOriginal(path string, now time.Time, customSuffix string) error {
 	}
 	defer dst.Close()
 
-	if _, err := io.Copy(dst, src); err != nil {
+	// Bounded copy.  +1 lets us distinguish "exactly at cap" (legal,
+	// allowed via the Stat check above) from "grew between Stat and
+	// Copy" (refuse).
+	if _, err := io.Copy(dst, io.LimitReader(src, MaxConfigFileBytes+1)); err != nil {
 		return fmt.Errorf("copy %s -> %s: %w", path, dest, err)
 	}
 	if err := dst.Sync(); err != nil {
 		return fmt.Errorf("fsync backup %s: %w", dest, err)
+	}
+	// OpenFile honours the process umask; a clean readable backup
+	// at mode 0644 on a host with umask 027 would otherwise land at
+	// 0640 silently.  Explicit Chmod brings the backup back to the
+	// source's permission bits regardless.
+	if err := os.Chmod(dest, srcInfo.Mode().Perm()); err != nil {
+		return fmt.Errorf("chmod backup %s: %w", dest, err)
 	}
 	return nil
 }

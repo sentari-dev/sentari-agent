@@ -156,6 +156,42 @@ func TestWritePip_NoProxyExistingConfigRemoved(t *testing.T) {
 	}
 }
 
+// Regression test for the data-loss bug Copilot caught on the
+// initial PR: an operator-curated pip.conf (no Sentari marker)
+// must NEVER be removed by the fail-open path, even when the
+// policy-map drops the proxy URL.  Operator configs that pre-date
+// install-gate enrolment are off-limits to the writer.
+func TestWritePip_NoProxyOperatorCuratedSurvives(t *testing.T) {
+	dir := t.TempDir()
+	path := userHomeOverride(t, dir)
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	operatorBody := []byte("[global]\nindex-url = https://artifactory.corp.local/api/pypi/pypi/simple/\n")
+	if err := os.WriteFile(path, operatorBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty endpoint should NOT touch this file.
+	res, err := WritePip(makeMap(""), PipScopeUser, MarkerFields{Applied: fixedTime})
+	if err != nil {
+		t.Fatalf("WritePip: %v", err)
+	}
+	if res.Removed || res.Changed {
+		t.Errorf("operator-curated config touched: %+v", res)
+	}
+
+	// File still present, byte-identical.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(operatorBody) {
+		t.Errorf("operator config altered:\ngot:  %q\nwant: %q", got, operatorBody)
+	}
+}
+
 func TestWritePip_IdempotentSecondCall(t *testing.T) {
 	dir := t.TempDir()
 	userHomeOverride(t, dir)

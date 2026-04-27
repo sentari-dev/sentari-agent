@@ -119,23 +119,36 @@ type WritePipResult struct {
 //
 // Behaviour matrix:
 //
-//	+----------------------+----------+---------------------------+
-//	| proxy_endpoints[pypi]| existing | action                    |
-//	+----------------------+----------+---------------------------+
-//	| non-empty            | absent   | write fresh, marker+body  |
-//	| non-empty            | present  | rewrite (with backup if    |
-//	|                      |          |  the previous body differs)|
-//	| empty / missing      | absent   | no-op                     |
-//	| empty / missing      | present  | remove (fail-open revert) |
-//	+----------------------+----------+---------------------------+
+//	+----------------------+--------------------+--------------------------+
+//	| proxy_endpoints[pypi]| existing           | action                   |
+//	+----------------------+--------------------+--------------------------+
+//	| non-empty            | absent             | write fresh, marker+body |
+//	| non-empty            | present            | rewrite (backup if body  |
+//	|                      |                    |  differs)                |
+//	| empty / missing      | absent             | no-op                    |
+//	| empty / missing      | Sentari-managed    | remove (fail-open revert)|
+//	| empty / missing      | operator-curated   | no-op (refuse to delete) |
+//	+----------------------+--------------------+--------------------------+
 //
-// The "remove" branch only fires for files that exist; we don't
-// stat-and-remove arbitrary paths, so a writer for a host that
-// never had pip configured stays inert.
+// The fail-open ``remove`` branch is gated on the existing file
+// carrying the Sentari marker — we never delete an operator-curated
+// pip.conf that pre-dated install-gate enrolment, even if the
+// policy-map drops the proxy URL.  Any pre-existing content on a
+// host's first install-gate apply has already been preserved at
+// ``<path>.sentari-backup-<timestamp>``; a Sentari-managed file is
+// the only state we own and the only thing we'll remove.
+//
+// When ``PipPath`` cannot derive a target (no ``HOME`` on Linux
+// user-scope, no ``APPDATA`` on Windows), the call is a soft no-op:
+// returns ``(res, nil)`` with empty ``Path``.  The orchestrator
+// inspects the result and logs a warning — a hard error here would
+// crash the agent on a misconfigured host where pip simply isn't
+// installed.
 func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (WritePipResult, error) {
 	res := WritePipResult{Path: PipPath(scope)}
 	if res.Path == "" {
-		return res, fmt.Errorf("installgate.WritePip: cannot derive path for scope %d on %s", scope, runtime.GOOS)
+		// Soft no-op — the orchestrator logs and moves on.
+		return res, nil
 	}
 	if m == nil {
 		return res, fmt.Errorf("installgate.WritePip: nil policy map")
@@ -143,9 +156,18 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 
 	endpoint := strings.TrimSpace(m.ProxyEndpoints["pypi"])
 	if endpoint == "" {
-		// Fail-open: no proxy configured for pypi.  If we previously
-		// wrote a config file, remove it so pip reverts to upstream
-		// behaviour; otherwise no-op.
+		// Fail-open: no proxy configured for pypi.  Remove only if
+		// the existing file is Sentari-managed; never touch an
+		// operator-curated pip.conf.  ``isSentariManaged`` returns
+		// false for absent files, so a host that never had pip
+		// configured stays inert.
+		managed, err := isSentariManaged(res.Path)
+		if err != nil {
+			return res, fmt.Errorf("installgate.WritePip: inspect existing config: %w", err)
+		}
+		if !managed {
+			return res, nil
+		}
 		removed, err := Remove(res.Path)
 		if err != nil {
 			return res, err

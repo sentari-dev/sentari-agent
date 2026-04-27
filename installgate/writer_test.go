@@ -141,6 +141,72 @@ func TestWriteAtomic_NoBackupBackup(t *testing.T) {
 	}
 }
 
+// Regression: a stranded .sentari-tmp from a prior failed run
+// must be cleaned up even when the current call is an idempotent
+// no-op.  Without this, a single transient error would leave the
+// tmp file on disk indefinitely (it's never the rename target on
+// the no-op path) and operators inspecting the dir would see
+// permanent half-written state.
+func TestWriteAtomic_NoOpClearsStrandedTmp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pip.conf")
+	tmp := path + ".sentari-tmp"
+
+	// Seed the final file with the exact content the next call
+	// will request — that triggers the no-op idempotency branch.
+	if err := os.WriteFile(path, []byte("same\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmp, []byte("partial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := WriteAtomic(newOpts(path, []byte("same\n")))
+	if err != nil {
+		t.Fatalf("WriteAtomic: %v", err)
+	}
+	if changed {
+		t.Error("expected no-op (Changed=false)")
+	}
+	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+		t.Errorf("stranded tmp survived no-op: stat err=%v", err)
+	}
+}
+
+// Regression: the backup helper used to copy the entire pre-
+// existing file unbounded.  A pre-Sentari pip.conf bigger than
+// the package's max-config cap (e.g. left over from a different
+// tool that mis-used the path as a log file) would (a) waste disk
+// proportional to its size and (b) recur on every install-gate
+// rewrite.  Refuse to back up rather than copy.
+func TestWriteAtomic_BackupRefusesOversizedOriginal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pip.conf")
+	oversize := make([]byte, MaxConfigFileBytes+1)
+	if err := os.WriteFile(path, oversize, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Force the backup branch by writing different content.
+	_, err := WriteAtomic(newOpts(path, []byte("sentari\n")))
+	if err == nil {
+		t.Fatal("expected error when backup of oversized original is refused")
+	}
+	// The backup file MUST NOT exist — refusing to back up means
+	// refusing to consume disk for the backup.  And the new content
+	// MUST NOT have been written, because we never reached the
+	// rename step.
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) != ".conf" && len(e.Name()) > len("pip.conf") {
+			// Anything other than the original file = backup or tmp leaked.
+			if e.Name() != "pip.conf" {
+				t.Errorf("unexpected leftover file after backup-refused: %s", e.Name())
+			}
+		}
+	}
+}
+
 func TestWriteAtomic_RejectsOversize(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pip.conf")
