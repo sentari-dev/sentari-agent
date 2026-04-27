@@ -38,6 +38,12 @@ type ApplyOptions struct {
 	// ($MAVEN_HOME/conf/settings.xml).  System scope is a soft
 	// no-op when MAVEN_HOME is unset.
 	MavenScope MavenScope
+
+	// NuGetScope picks ``user`` (per-user NuGet.Config) or
+	// ``system`` (Windows-only ``%ProgramData%\NuGet\Config\``
+	// drop-in).  System scope is a soft no-op on POSIX where
+	// NuGet has no system-wide config dir.
+	NuGetScope NuGetScope
 }
 
 // ApplyResult collects per-ecosystem outcomes.  One field per
@@ -54,7 +60,8 @@ type ApplyResult struct {
 	Pip   WritePipResult
 	Npm   WriteNpmResult
 	Maven WriteMavenResult
-	// future: NuGet …
+	NuGet WriteNuGetResult
+	// future: apt, yum
 }
 
 // AnyChanged reports whether any writer reported a change in
@@ -63,11 +70,12 @@ type ApplyResult struct {
 // → operator wants to know) or debug-level (everything was a
 // no-op → noise).
 //
-// Maven's ``SkippedOperator`` is intentionally NOT counted as a
-// change — skipping is the steady-state outcome on Artifactory
-// hosts and would otherwise spam info-level logs every cycle.
-// The orchestrator's caller surfaces SkippedOperator separately
-// in audit / structured logs so operators still see it.
+// Maven and NuGet's ``SkippedOperator`` is intentionally NOT
+// counted as a change — skipping is the steady-state outcome on
+// hosts whose package configs predate enrolment and would
+// otherwise spam info-level logs every cycle.  The orchestrator's
+// caller surfaces SkippedOperator separately in audit / structured
+// logs so operators still see it.
 func (r ApplyResult) AnyChanged() bool {
 	if r.Pip.Changed || r.Pip.Removed {
 		return true
@@ -76,6 +84,9 @@ func (r ApplyResult) AnyChanged() bool {
 		return true
 	}
 	if r.Maven.Changed || r.Maven.Removed {
+		return true
+	}
+	if r.NuGet.Changed || r.NuGet.Removed {
 		return true
 	}
 	return false
@@ -115,6 +126,12 @@ func Apply(m *scanner.InstallGateMap, opts ApplyOptions) (ApplyResult, []error) 
 	res.Maven = mavenRes
 	if err != nil {
 		errs = append(errs, fmt.Errorf("maven writer: %w", err))
+	}
+
+	nugetRes, err := WriteNuGet(m, opts.NuGetScope, opts.Marker)
+	res.NuGet = nugetRes
+	if err != nil {
+		errs = append(errs, fmt.Errorf("nuget writer: %w", err))
 	}
 
 	// Future writers register here.  Each one returns its own

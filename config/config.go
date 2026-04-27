@@ -97,6 +97,16 @@ type InstallGateConfig struct {
 	// stable across distros).  Empty resolves to ``user`` at apply
 	// time.
 	MavenScope string
+
+	// NuGetScope selects the NuGet config target on hosts with
+	// .NET installed.  ``user`` writes the per-user
+	// ``NuGet.Config`` (``%APPDATA%\NuGet\NuGet.Config`` on
+	// Windows, ``~/.nuget/NuGet/NuGet.Config`` on POSIX);
+	// ``system`` writes a Sentari-Config drop-in under
+	// ``%ProgramData%\NuGet\Config\`` (Windows only — POSIX has
+	// no system-wide NuGet config dir, the writer soft-no-ops).
+	// Empty resolves to ``user`` at apply time.
+	NuGetScope string
 }
 
 // DefaultConfig returns the default agent configuration.
@@ -275,6 +285,13 @@ func (c *AgentConfig) set(section, key, value string) error {
 				c.InstallGate.MavenScope = strings.ToLower(value)
 			default:
 				return fmt.Errorf("invalid maven_scope %q (want user/system)", value)
+			}
+		case "nuget_scope":
+			switch strings.ToLower(value) {
+			case "", "user", "system":
+				c.InstallGate.NuGetScope = strings.ToLower(value)
+			default:
+				return fmt.Errorf("invalid nuget_scope %q (want user/system)", value)
 			}
 		default:
 			log.Printf("config: unknown key [%s] %s — ignored", section, key)

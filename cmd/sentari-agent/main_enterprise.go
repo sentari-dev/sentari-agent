@@ -420,20 +420,32 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 				PipScope:   pipScopeFromConfig(agentCfg.InstallGate.PythonScope),
 				NpmScope:   npmScopeFromConfig(agentCfg.InstallGate.NodeScope),
 				MavenScope: mavenScopeFromConfig(agentCfg.InstallGate.MavenScope),
+				NuGetScope: nugetScopeFromConfig(agentCfg.InstallGate.NuGetScope),
 			})
 			for _, e := range errs {
 				log.Warn("install-gate writer", slog.String("err", e.Error()))
 			}
-			// Surface the Maven SkippedOperator state at info-level
-			// even when nothing else changed — operators of
-			// Artifactory hosts need to see that Maven is NOT being
-			// gated so they don't conclude install-gate is broken.
+			// Surface the SkippedOperator state at info-level even
+			// when nothing else changed — operators of hosts whose
+			// package configs predate enrolment need to see that
+			// install-gate isn't being applied there so they don't
+			// conclude the feature is broken.  Maven and NuGet are
+			// the two ecosystems where this matters today
+			// (settings.xml and NuGet.Config commonly carry
+			// operator-curated credentials).
 			if res.Maven.SkippedOperator {
 				log.Info("install-gate maven skipped (operator-curated settings.xml)",
 					slog.String("path", res.Maven.Path),
 				)
 				logAudit(auditLog, "install_gate.maven.skipped_operator",
 					fmt.Sprintf("path=%s version=%d", res.Maven.Path, igMap.Version))
+			}
+			if res.NuGet.SkippedOperator {
+				log.Info("install-gate nuget skipped (operator-curated NuGet.Config)",
+					slog.String("path", res.NuGet.Path),
+				)
+				logAudit(auditLog, "install_gate.nuget.skipped_operator",
+					fmt.Sprintf("path=%s version=%d", res.NuGet.Path, igMap.Version))
 			}
 			if res.AnyChanged() {
 				log.Info("install-gate applied",
@@ -447,15 +459,20 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 					slog.String("maven_path", res.Maven.Path),
 					slog.Bool("maven_changed", res.Maven.Changed),
 					slog.Bool("maven_removed", res.Maven.Removed),
+					slog.String("nuget_path", res.NuGet.Path),
+					slog.Bool("nuget_changed", res.NuGet.Changed),
+					slog.Bool("nuget_removed", res.NuGet.Removed),
 				)
 				logAudit(auditLog, "install_gate.applied",
 					fmt.Sprintf("version=%d pip_path=%s pip_changed=%t pip_removed=%t "+
 						"npm_path=%s npm_changed=%t npm_removed=%t "+
-						"maven_path=%s maven_changed=%t maven_removed=%t",
+						"maven_path=%s maven_changed=%t maven_removed=%t "+
+						"nuget_path=%s nuget_changed=%t nuget_removed=%t",
 						igMap.Version,
 						res.Pip.Path, res.Pip.Changed, res.Pip.Removed,
 						res.Npm.Path, res.Npm.Changed, res.Npm.Removed,
-						res.Maven.Path, res.Maven.Changed, res.Maven.Removed))
+						res.Maven.Path, res.Maven.Changed, res.Maven.Removed,
+						res.NuGet.Path, res.NuGet.Changed, res.NuGet.Removed))
 			}
 		}
 	}
@@ -696,6 +713,18 @@ func mavenScopeFromConfig(s string) installgate.MavenScope {
 		return installgate.MavenScopeSystem
 	default:
 		return installgate.MavenScopeUser
+	}
+}
+
+// nugetScopeFromConfig is the NuGet-side parallel.  System scope
+// is a soft no-op on POSIX (no system-wide NuGet config dir);
+// that decision lives downstream in NuGetPath.
+func nugetScopeFromConfig(s string) installgate.NuGetScope {
+	switch s {
+	case "system":
+		return installgate.NuGetScopeSystem
+	default:
+		return installgate.NuGetScopeUser
 	}
 }
 
