@@ -97,6 +97,27 @@ func TestInstallGate_PythonScopeRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestInstallGate_NodeScope(t *testing.T) {
+	for _, scope := range []string{"user", "system", ""} {
+		path := writeTempConfig(t, "[install_gate]\nnode_scope = "+scope+"\n")
+		cfg, err := LoadFromFile(path)
+		if err != nil {
+			t.Errorf("scope=%q: %v", scope, err)
+			continue
+		}
+		if cfg.InstallGate.NodeScope != scope {
+			t.Errorf("scope=%q: got %q", scope, cfg.InstallGate.NodeScope)
+		}
+	}
+}
+
+func TestInstallGate_NodeScopeRejectsUnknown(t *testing.T) {
+	path := writeTempConfig(t, "[install_gate]\nnode_scope = global\n")
+	if _, err := LoadFromFile(path); err == nil {
+		t.Error("expected error on node_scope=global")
+	}
+}
+
 func TestInstallGate_UnknownKeyIgnored(t *testing.T) {
 	// Unknown key under [install_gate] must be a warning, not a
 	// load error — operators on a newer INI shouldn't have to

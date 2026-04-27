@@ -183,6 +183,39 @@ func WriteAtomic(opts WriteOptions) (bool, error) {
 	return true, nil
 }
 
+// validateEndpoint refuses URL strings that contain bytes which
+// would let a tampered (or pathologically misconfigured) policy-map
+// inject additional config directives into a rendered file.  The
+// per-ecosystem renderers interpolate ``endpoint`` directly into a
+// line-oriented config (pip's ``index-url = ...``, npm's
+// ``registry=...``), so a CR or LF in the endpoint produces a
+// well-formed file with extra lines — for npm that means an
+// attacker-chosen ``registry=`` overrides ours; for pip an
+// extra ``[section]`` could disable the proxy entirely.
+//
+// Defence-in-depth: the policy-map signature has already been
+// verified upstream and the operator vetted the URL via the
+// dashboard, so injection requires server compromise + signature
+// forgery.  Even so, every renderer routes through this gate so
+// a future config path that's less protected (e.g. a local-file
+// override for dev) inherits the same guarantee.
+func validateEndpoint(endpoint string) error {
+	if endpoint == "" {
+		return fmt.Errorf("empty endpoint")
+	}
+	// Reject CR/LF and any other ASCII control byte (0x00–0x1F or
+	// 0x7F).  Spaces are also rejected because pip + npm both
+	// silently truncate at the first whitespace and an embedded
+	// space would produce a half-applied URL.
+	for i := 0; i < len(endpoint); i++ {
+		c := endpoint[i]
+		if c < 0x20 || c == 0x7F || c == ' ' {
+			return fmt.Errorf("endpoint contains forbidden byte 0x%02x at offset %d", c, i)
+		}
+	}
+	return nil
+}
+
 // sentariManagedSentinel is the byte sequence every rendered config
 // begins with.  Per design §4 every writer prepends a ``Managed by
 // Sentari`` comment block; matching the literal bytes here keeps

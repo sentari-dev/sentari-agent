@@ -29,6 +29,10 @@ type ApplyOptions struct {
 	// running the agent as root on servers should set
 	// ``system`` via the agent config.
 	PipScope PipScope
+
+	// NpmScope picks ``user`` or ``system`` ``.npmrc``.  Same
+	// defaulting story as ``PipScope``.
+	NpmScope NpmScope
 }
 
 // ApplyResult collects per-ecosystem outcomes.  One field per
@@ -43,7 +47,8 @@ type ApplyOptions struct {
 // when a new writer lands.
 type ApplyResult struct {
 	Pip WritePipResult
-	// future: Npm WriteNpmResult; Maven WriteMavenResult; …
+	Npm WriteNpmResult
+	// future: Maven WriteMavenResult; NuGet …
 }
 
 // AnyChanged reports whether any writer reported a change in
@@ -53,6 +58,9 @@ type ApplyResult struct {
 // no-op → noise).
 func (r ApplyResult) AnyChanged() bool {
 	if r.Pip.Changed || r.Pip.Removed {
+		return true
+	}
+	if r.Npm.Changed || r.Npm.Removed {
 		return true
 	}
 	return false
@@ -80,6 +88,12 @@ func Apply(m *scanner.InstallGateMap, opts ApplyOptions) (ApplyResult, []error) 
 	res.Pip = pipRes
 	if err != nil {
 		errs = append(errs, fmt.Errorf("pip writer: %w", err))
+	}
+
+	npmRes, err := WriteNpm(m, opts.NpmScope, opts.Marker)
+	res.Npm = npmRes
+	if err != nil {
+		errs = append(errs, fmt.Errorf("npm writer: %w", err))
 	}
 
 	// Future writers register here.  Each one returns its own

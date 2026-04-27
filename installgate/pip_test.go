@@ -221,6 +221,36 @@ func TestWritePip_NilMapRejected(t *testing.T) {
 	}
 }
 
+// Endpoint-injection guard parallel to the npm test: a CR / LF in
+// the proxy URL would let a tampered policy-map smuggle a second
+// ``index-url =`` line into pip.conf and silently swap out the
+// proxy.  validateEndpoint refuses control bytes before the
+// renderer touches the file.
+func TestWritePip_RejectsControlCharsInEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	path := userHomeOverride(t, dir)
+
+	cases := []string{
+		// Mid-string LF — would smuggle a second index-url line.
+		"https://proxy.example.test/pypi/simple/\nindex-url = https://evil/simple/",
+		// Mid-string CR.
+		"https://proxy.example.test/pypi/\rsimple/",
+		// Embedded space — pip silently truncates and ends up
+		// applying a half-URL.
+		"https://proxy.example.test/pypi /simple/",
+	}
+	for _, ep := range cases {
+		_, err := WritePip(makeMap(ep), PipScopeUser, MarkerFields{Applied: fixedTime})
+		if err == nil {
+			t.Errorf("expected error for endpoint %q", ep)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("file created for invalid endpoint %q: stat err=%v", ep, err)
+			_ = os.Remove(path)
+		}
+	}
+}
+
 // --- hostOf -----------------------------------------------------------
 
 func TestHostOf_Variants(t *testing.T) {

@@ -209,8 +209,8 @@ func renderPipConf(endpoint string, marker MarkerFields) ([]byte, error) {
 	// from a hand-edited config would land mid-INI on the
 	// ``index-url =`` line and break pip's parser.
 	endpoint = strings.TrimSpace(endpoint)
-	if endpoint == "" {
-		return nil, fmt.Errorf("renderPipConf: empty endpoint after trim")
+	if err := validateEndpoint(endpoint); err != nil {
+		return nil, fmt.Errorf("renderPipConf: %w", err)
 	}
 
 	host, err := hostOf(endpoint)

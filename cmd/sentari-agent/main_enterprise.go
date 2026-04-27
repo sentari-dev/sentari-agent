@@ -418,6 +418,7 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 					Applied: time.Now().UTC(),
 				},
 				PipScope: pipScopeFromConfig(agentCfg.InstallGate.PythonScope),
+				NpmScope: npmScopeFromConfig(agentCfg.InstallGate.NodeScope),
 			})
 			for _, e := range errs {
 				log.Warn("install-gate writer", slog.String("err", e.Error()))
@@ -428,10 +429,16 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 					slog.String("pip_path", res.Pip.Path),
 					slog.Bool("pip_changed", res.Pip.Changed),
 					slog.Bool("pip_removed", res.Pip.Removed),
+					slog.String("npm_path", res.Npm.Path),
+					slog.Bool("npm_changed", res.Npm.Changed),
+					slog.Bool("npm_removed", res.Npm.Removed),
 				)
 				logAudit(auditLog, "install_gate.applied",
-					fmt.Sprintf("version=%d pip_path=%s pip_changed=%t pip_removed=%t",
-						igMap.Version, res.Pip.Path, res.Pip.Changed, res.Pip.Removed))
+					fmt.Sprintf("version=%d pip_path=%s pip_changed=%t pip_removed=%t "+
+						"npm_path=%s npm_changed=%t npm_removed=%t",
+						igMap.Version,
+						res.Pip.Path, res.Pip.Changed, res.Pip.Removed,
+						res.Npm.Path, res.Npm.Changed, res.Npm.Removed))
 			}
 		}
 	}
@@ -649,6 +656,17 @@ func pipScopeFromConfig(s string) installgate.PipScope {
 		return installgate.PipScopeSystem
 	default:
 		return installgate.PipScopeUser
+	}
+}
+
+// npmScopeFromConfig is the npm-side parallel of pipScopeFromConfig.
+// Same defaulting story — empty / unrecognised → user.
+func npmScopeFromConfig(s string) installgate.NpmScope {
+	switch s {
+	case "system":
+		return installgate.NpmScopeSystem
+	default:
+		return installgate.NpmScopeUser
 	}
 }
 
