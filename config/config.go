@@ -107,6 +107,19 @@ type InstallGateConfig struct {
 	// no system-wide NuGet config dir, the writer soft-no-ops).
 	// Empty resolves to ``user`` at apply time.
 	NuGetScope string
+
+	// UvScope selects the uv.toml target on hosts with Astral's
+	// uv installed.  ``user`` writes the per-user ``uv.toml``;
+	// ``system`` writes ``/etc/uv/uv.toml`` (POSIX) or
+	// ``%PROGRAMDATA%\uv\uv.toml`` (Windows).  Empty resolves
+	// to ``user`` at apply time.
+	UvScope string
+
+	// PdmScope selects the pdm config target.  ``user`` writes
+	// the per-user pdm config; ``system`` is a soft no-op (pdm
+	// has no system-wide config path).  Empty resolves to
+	// ``user`` at apply time.
+	PdmScope string
 }
 
 // DefaultConfig returns the default agent configuration.
@@ -292,6 +305,20 @@ func (c *AgentConfig) set(section, key, value string) error {
 				c.InstallGate.NuGetScope = strings.ToLower(value)
 			default:
 				return fmt.Errorf("invalid nuget_scope %q (want user/system)", value)
+			}
+		case "uv_scope":
+			switch strings.ToLower(value) {
+			case "", "user", "system":
+				c.InstallGate.UvScope = strings.ToLower(value)
+			default:
+				return fmt.Errorf("invalid uv_scope %q (want user/system)", value)
+			}
+		case "pdm_scope":
+			switch strings.ToLower(value) {
+			case "", "user", "system":
+				c.InstallGate.PdmScope = strings.ToLower(value)
+			default:
+				return fmt.Errorf("invalid pdm_scope %q (want user/system)", value)
 			}
 		default:
 			log.Printf("config: unknown key [%s] %s — ignored", section, key)
