@@ -139,6 +139,27 @@ func TestInstallGate_MavenScopeRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestInstallGate_NuGetScope(t *testing.T) {
+	for _, scope := range []string{"user", "system", ""} {
+		path := writeTempConfig(t, "[install_gate]\nnuget_scope = "+scope+"\n")
+		cfg, err := LoadFromFile(path)
+		if err != nil {
+			t.Errorf("scope=%q: %v", scope, err)
+			continue
+		}
+		if cfg.InstallGate.NuGetScope != scope {
+			t.Errorf("scope=%q: got %q", scope, cfg.InstallGate.NuGetScope)
+		}
+	}
+}
+
+func TestInstallGate_NuGetScopeRejectsUnknown(t *testing.T) {
+	path := writeTempConfig(t, "[install_gate]\nnuget_scope = global\n")
+	if _, err := LoadFromFile(path); err == nil {
+		t.Error("expected error on nuget_scope=global")
+	}
+}
+
 func TestInstallGate_UnknownKeyIgnored(t *testing.T) {
 	// Unknown key under [install_gate] must be a warning, not a
 	// load error — operators on a newer INI shouldn't have to
