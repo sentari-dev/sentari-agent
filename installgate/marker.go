@@ -32,9 +32,6 @@ import (
 //
 // The trailing ``\n`` is included so callers can concatenate the
 // rendered config body without worrying about leading whitespace.
-//
-// XML-flavoured marker for ``settings.xml`` / ``NuGet.Config``
-// lands with the maven + nuget writers in a follow-up PR.
 func renderHashMarker(fields MarkerFields) string {
 	return strings.Join([]string{
 		fmt.Sprintf(
@@ -46,4 +43,25 @@ func renderHashMarker(fields MarkerFields) string {
 		"# Do not edit manually — changes are overwritten on the next policy sync.",
 		"",
 	}, "\n")
+}
+
+// renderXMLMarker produces the XML-comment variant for
+// ``settings.xml`` / ``NuGet.Config``.  Used by the Maven writer
+// (PR-5) and the NuGet writer (PR-6).  Format intent:
+//
+//	<!-- Managed by Sentari (version=..., signed=..., applied=...) -->
+//
+// Single-line so it can sit between the XML declaration and the
+// document's root element without disrupting parsers that have
+// strict-DTD expectations.  isSentariManaged matches the
+// ``<!-- Managed by Sentari`` prefix to identify these files
+// without rendering — same recognition pattern as the hash
+// marker, just XML-flavoured.
+func renderXMLMarker(fields MarkerFields) string {
+	return fmt.Sprintf(
+		"<!-- Managed by Sentari (version=%d, signed=%s, applied=%s) -->\n",
+		fields.Version,
+		fields.KeyID,
+		fields.Applied.UTC().Format(time.RFC3339),
+	)
 }

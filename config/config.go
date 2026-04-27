@@ -89,6 +89,14 @@ type InstallGateConfig struct {
 	// soft-no-ops there for system scope).  Empty resolves to
 	// ``user`` at apply time.
 	NodeScope string
+
+	// MavenScope selects the Maven settings.xml target on hosts
+	// with Maven installed.  ``user`` writes ``~/.m2/settings.xml``;
+	// ``system`` writes ``$MAVEN_HOME/conf/settings.xml`` (soft no-op
+	// when MAVEN_HOME is unset, since Maven's install path is non-
+	// stable across distros).  Empty resolves to ``user`` at apply
+	// time.
+	MavenScope string
 }
 
 // DefaultConfig returns the default agent configuration.
@@ -260,6 +268,13 @@ func (c *AgentConfig) set(section, key, value string) error {
 				c.InstallGate.NodeScope = strings.ToLower(value)
 			default:
 				return fmt.Errorf("invalid node_scope %q (want user/system)", value)
+			}
+		case "maven_scope":
+			switch strings.ToLower(value) {
+			case "", "user", "system":
+				c.InstallGate.MavenScope = strings.ToLower(value)
+			default:
+				return fmt.Errorf("invalid maven_scope %q (want user/system)", value)
 			}
 		default:
 			log.Printf("config: unknown key [%s] %s — ignored", section, key)
