@@ -162,6 +162,9 @@ func renderNpmrc(endpoint string, marker MarkerFields) ([]byte, error) {
 	if err := validateEndpoint(endpoint); err != nil {
 		return nil, fmt.Errorf("renderNpmrc: %w", err)
 	}
+	if err := validateMarkerKeyID(marker.KeyID); err != nil {
+		return nil, fmt.Errorf("renderNpmrc: %w", err)
+	}
 	// npm's registry URL must end with ``/`` — npm appends paths
 	// directly to it without inserting a separator, so a missing
 	// trailing slash silently breaks tarball lookups.  Add one if

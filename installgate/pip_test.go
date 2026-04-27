@@ -118,7 +118,7 @@ func TestWritePip_NoProxyEmptyHostNoOp(t *testing.T) {
 
 	// Empty endpoint → fail-open: no file written, nothing changed,
 	// nothing removed (because nothing existed).
-	res, err := WritePip(makeMap(""), PipScopeUser, MarkerFields{Applied: fixedTime})
+	res, err := WritePip(makeMap(""), PipScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 	if err != nil {
 		t.Fatalf("WritePip: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestWritePip_NoProxyExistingConfigRemoved(t *testing.T) {
 
 	// Policy now ships no proxy URL.  Fail-open semantic: remove
 	// the file so pip falls back to upstream.
-	res, err := WritePip(makeMap(""), PipScopeUser, MarkerFields{Applied: fixedTime})
+	res, err := WritePip(makeMap(""), PipScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 	if err != nil {
 		t.Fatalf("WritePip: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestWritePip_NoProxyOperatorCuratedSurvives(t *testing.T) {
 	}
 
 	// Empty endpoint should NOT touch this file.
-	res, err := WritePip(makeMap(""), PipScopeUser, MarkerFields{Applied: fixedTime})
+	res, err := WritePip(makeMap(""), PipScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 	if err != nil {
 		t.Fatalf("WritePip: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestWritePip_RejectsControlCharsInEndpoint(t *testing.T) {
 		"https://proxy.example.test/pypi /simple/",
 	}
 	for _, ep := range cases {
-		_, err := WritePip(makeMap(ep), PipScopeUser, MarkerFields{Applied: fixedTime})
+		_, err := WritePip(makeMap(ep), PipScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 		if err == nil {
 			t.Errorf("expected error for endpoint %q", ep)
 		}

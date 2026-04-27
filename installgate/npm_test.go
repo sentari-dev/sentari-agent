@@ -108,7 +108,7 @@ func TestWriteNpm_NormalisesTrailingSlash(t *testing.T) {
 	dir := t.TempDir()
 	path := npmHomeOverride(t, dir)
 
-	res, err := WriteNpm(makeNpmMap("https://proxy.example.test/npm"), NpmScopeUser, MarkerFields{Applied: fixedTime})
+	res, err := WriteNpm(makeNpmMap("https://proxy.example.test/npm"), NpmScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestWriteNpm_NoProxyEmptyHostNoOp(t *testing.T) {
 	dir := t.TempDir()
 	path := npmHomeOverride(t, dir)
 
-	res, err := WriteNpm(makeNpmMap(""), NpmScopeUser, MarkerFields{Applied: fixedTime})
+	res, err := WriteNpm(makeNpmMap(""), NpmScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 	if err != nil {
 		t.Fatalf("WriteNpm: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestWriteNpm_NoProxyOperatorCuratedSurvives(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := WriteNpm(makeNpmMap(""), NpmScopeUser, MarkerFields{Applied: fixedTime})
+	res, err := WriteNpm(makeNpmMap(""), NpmScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 	if err != nil {
 		t.Fatalf("WriteNpm: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestWriteNpm_NoProxyExistingSentariConfigRemoved(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := WriteNpm(makeNpmMap(""), NpmScopeUser, MarkerFields{Applied: fixedTime})
+	res, err := WriteNpm(makeNpmMap(""), NpmScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 	if err != nil {
 		t.Fatalf("WriteNpm: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestWriteNpm_RejectsControlCharsInEndpoint(t *testing.T) {
 		"https://proxy.example.test/npm/\x00",
 	}
 	for _, ep := range cases {
-		_, err := WriteNpm(makeNpmMap(ep), NpmScopeUser, MarkerFields{Applied: fixedTime})
+		_, err := WriteNpm(makeNpmMap(ep), NpmScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 		if err == nil {
 			t.Errorf("expected error for endpoint %q", ep)
 		}

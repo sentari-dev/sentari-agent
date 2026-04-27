@@ -24,6 +24,36 @@ import (
 	"time"
 )
 
+// validateMarkerKeyID refuses KeyIDs that would land in an XML
+// comment as ill-formed content (XML disallows ``--`` inside
+// comments and disallows comments ending in ``-``).  Even the
+// hash-marker variant routes through this so a misconfigured
+// KeyID can't smuggle a newline / control byte into pip's
+// ``signed=...`` line — defence-in-depth, the server-side
+// validator already guards against most of this.
+//
+// Returns nil on a clean KeyID; ``error`` describes the offending
+// character / sequence so an operator chasing a render failure
+// can correct the server-side configuration.
+func validateMarkerKeyID(keyID string) error {
+	if keyID == "" {
+		return fmt.Errorf("marker key_id is empty")
+	}
+	for i := 0; i < len(keyID); i++ {
+		c := keyID[i]
+		if c < 0x20 || c == 0x7F {
+			return fmt.Errorf("marker key_id contains forbidden control byte 0x%02x at offset %d", c, i)
+		}
+	}
+	if strings.Contains(keyID, "--") {
+		return fmt.Errorf("marker key_id contains ``--`` (illegal in XML comments)")
+	}
+	if strings.HasSuffix(keyID, "-") {
+		return fmt.Errorf("marker key_id ends with ``-`` (illegal in XML comments)")
+	}
+	return nil
+}
+
 // renderHashMarker produces the two-line ``#``-prefixed comment
 // block used by pip / npm / apt / yum config files.  Format intent:
 //

@@ -182,6 +182,14 @@ func renderSettingsXML(endpoint string, marker MarkerFields) ([]byte, error) {
 	if err := validateEndpoint(endpoint); err != nil {
 		return nil, fmt.Errorf("renderSettingsXML: %w", err)
 	}
+	// XML-comment safety: refuse ``--`` and trailing ``-`` in the
+	// KeyID so the embedded marker comment stays well-formed Maven
+	// XML.  Same gate the hash-marker uses on pip / npm via the
+	// pip render helper — keeps the failure mode consistent across
+	// ecosystems.
+	if err := validateMarkerKeyID(marker.KeyID); err != nil {
+		return nil, fmt.Errorf("renderSettingsXML: %w", err)
+	}
 
 	var b strings.Builder
 	b.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
@@ -200,10 +208,11 @@ func renderSettingsXML(endpoint string, marker MarkerFields) ([]byte, error) {
 }
 
 // xmlEscape returns ``s`` with the five XML predefined entities
-// escaped.  We don't import encoding/xml's escaper because we
-// already control the content (URL, no apostrophes / quotes /
-// ampersands in valid forms) and a sub-1 KiB inline escaper keeps
-// the writer's import surface auditable.
+// escaped.  URLs can legitimately carry XML-significant characters
+// (``&`` in query strings, etc.) so we always escape — the inline
+// escaper sits here rather than via ``encoding/xml`` solely to
+// keep the writer's import surface auditable, not because the
+// caller's content is known to be safe.
 func xmlEscape(s string) string {
 	r := strings.NewReplacer(
 		"&", "&amp;",

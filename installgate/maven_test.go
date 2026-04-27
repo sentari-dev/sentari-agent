@@ -140,7 +140,7 @@ func TestWriteMaven_OperatorCuratedSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := WriteMaven(makeMavenMap("https://proxy.example.test/maven/"), MavenScopeUser, MarkerFields{Applied: fixedTime})
+	res, err := WriteMaven(makeMavenMap("https://proxy.example.test/maven/"), MavenScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 	if err != nil {
 		t.Fatalf("WriteMaven: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestWriteMaven_NoProxyEmptyHostNoOp(t *testing.T) {
 	dir := t.TempDir()
 	path := mavenHomeOverride(t, dir)
 
-	res, err := WriteMaven(makeMavenMap(""), MavenScopeUser, MarkerFields{Applied: fixedTime})
+	res, err := WriteMaven(makeMavenMap(""), MavenScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 	if err != nil {
 		t.Fatalf("WriteMaven: %v", err)
 	}
@@ -224,13 +224,13 @@ func TestWriteMaven_NoProxyExistingSentariConfigRemoved(t *testing.T) {
 	dir := t.TempDir()
 	path := mavenHomeOverride(t, dir)
 
-	if _, err := WriteMaven(makeMavenMap("https://proxy.example.test/maven/"), MavenScopeUser, MarkerFields{Applied: fixedTime}); err != nil {
+	if _, err := WriteMaven(makeMavenMap("https://proxy.example.test/maven/"), MavenScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Policy now drops the proxy URL.  Sentari-managed file
 	// should be removed (fail-open revert).
-	res, err := WriteMaven(makeMavenMap(""), MavenScopeUser, MarkerFields{Applied: fixedTime})
+	res, err := WriteMaven(makeMavenMap(""), MavenScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 	if err != nil {
 		t.Fatalf("WriteMaven: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestWriteMaven_NoProxyOperatorCuratedSurvives(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := WriteMaven(makeMavenMap(""), MavenScopeUser, MarkerFields{Applied: fixedTime})
+	res, err := WriteMaven(makeMavenMap(""), MavenScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 	if err != nil {
 		t.Fatalf("WriteMaven: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestWriteMaven_RejectsControlCharsInEndpoint(t *testing.T) {
 		"https://proxy.example.test/maven /",
 	}
 	for _, ep := range cases {
-		_, err := WriteMaven(makeMavenMap(ep), MavenScopeUser, MarkerFields{Applied: fixedTime})
+		_, err := WriteMaven(makeMavenMap(ep), MavenScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
 		if err == nil {
 			t.Errorf("expected error for endpoint %q", ep)
 		}
@@ -298,6 +298,35 @@ func TestWriteMaven_NilMapRejected(t *testing.T) {
 	mavenHomeOverride(t, dir)
 	if _, err := WriteMaven(nil, MavenScopeUser, MarkerFields{}); err == nil {
 		t.Error("expected error on nil map")
+	}
+}
+
+// XML-comment safety regression: a KeyID containing ``--`` or
+// ending in ``-`` would produce ill-formed XML in the marker
+// comment, breaking Maven's parser.  validateMarkerKeyID refuses
+// before the renderer emits anything.
+func TestWriteMaven_RejectsUnsafeKeyID(t *testing.T) {
+	dir := t.TempDir()
+	path := mavenHomeOverride(t, dir)
+
+	cases := []string{
+		"primary--rotated",
+		"primary-",
+		"key\nid", // control byte
+	}
+	for _, kid := range cases {
+		_, err := WriteMaven(makeMavenMap("https://proxy.example.test/maven/"), MavenScopeUser, MarkerFields{
+			Version: 1,
+			KeyID:   kid,
+			Applied: fixedTime,
+		})
+		if err == nil {
+			t.Errorf("expected error for KeyID %q", kid)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("settings.xml created for unsafe KeyID %q", kid)
+			_ = os.Remove(path)
+		}
 	}
 }
 

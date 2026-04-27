@@ -255,8 +255,14 @@ func isSentariManaged(path string) (bool, error) {
 	}
 	defer f.Close()
 	head := make([]byte, markerSearchBytes)
-	n, err := f.Read(head)
-	if err != nil && err != io.EOF {
+	// io.ReadFull guarantees we get either a full buffer or an
+	// ``io.ErrUnexpectedEOF`` (file shorter than buffer — fine,
+	// scan what we got).  Plain ``f.Read`` is allowed to short-
+	// read with ``err == nil`` on POSIX, which on a slow disk
+	// could truncate the marker scan window mid-marker and
+	// misclassify a Sentari-managed file as operator-curated.
+	n, err := io.ReadFull(f, head)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return false, err
 	}
 	head = head[:n]
@@ -268,9 +274,8 @@ func isSentariManaged(path string) (bool, error) {
 
 // bytesContains returns true iff ``needle`` appears anywhere in
 // ``haystack``.  We hand-roll this rather than importing ``bytes``
-// to keep this package's import surface auditable — three other
-// helpers (``bytesEqual``, ``bytesPrefix``, ``bytesContains``)
-// share the same minimalist trade-off.
+// to keep this package's import surface auditable — same
+// minimalist trade-off as the local ``bytesEqual`` helper above.
 func bytesContains(haystack, needle []byte) bool {
 	if len(needle) == 0 {
 		return true
