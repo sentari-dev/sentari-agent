@@ -288,6 +288,52 @@ allprojects {
 	}
 }
 
+// Regression for the Copilot finding on PR #28: a legitimate
+// endpoint URL that happens to contain a Groovy-primitive
+// substring (e.g. ``eval-proxy``, ``execute-mirror``,
+// ``runtime-cache``) must NOT trip the forbidden-primitive
+// scan.  The fix is that the scan runs over the body AFTER the
+// def line, not over the def line itself.
+func TestValidateRenderedGradle_AllowsKeywordSubstringsInURL(t *testing.T) {
+	cases := []string{
+		"https://eval-proxy.corp.local/maven/",
+		"https://execute-mirror.corp.local/maven/",
+		"https://runtime-cache.corp.local/maven/",
+		"https://groovyshell-fake.example.test/maven/",
+	}
+	for _, url := range cases {
+		body, err := renderGradleInit(url, MarkerFields{
+			Version: 1, KeyID: "primary", Applied: fixedTime,
+		})
+		if err != nil {
+			t.Errorf("URL %q: render rejected an URL that should be allowed: %v", url, err)
+			continue
+		}
+		if err := validateRenderedGradle(body, url); err != nil {
+			t.Errorf("URL %q: canary tripped on a legitimate URL: %v", url, err)
+		}
+	}
+}
+
+// Same regression for KeyID — operator can use a KeyID that
+// contains a keyword-collision substring (e.g. for key-rotation
+// naming conventions like ``runtime-2026q2``).
+func TestValidateRenderedGradle_AllowsKeywordSubstringsInKeyID(t *testing.T) {
+	cases := []string{"runtime", "execute2026", "evaluator", "shell-key"}
+	for _, kid := range cases {
+		body, err := renderGradleInit("https://proxy.example.test/maven/", MarkerFields{
+			Version: 1, KeyID: kid, Applied: fixedTime,
+		})
+		if err != nil {
+			t.Errorf("KeyID %q: render rejected: %v", kid, err)
+			continue
+		}
+		if err := validateRenderedGradle(body, "https://proxy.example.test/maven/"); err != nil {
+			t.Errorf("KeyID %q: canary tripped on a legitimate KeyID: %v", kid, err)
+		}
+	}
+}
+
 func TestValidateRenderedGradle_RejectsSentariProxyUrlMiscount(t *testing.T) {
 	// 5 references — one too many.  Mimics a renderer regression
 	// that adds an extra repository declaration.
