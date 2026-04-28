@@ -22,6 +22,7 @@
 package installgate
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -210,5 +211,115 @@ func renderGradleInit(endpoint string, marker MarkerFields) ([]byte, error) {
 	b.WriteString("        repositories.maven { url sentariProxyUrl }\n")
 	b.WriteString("    }\n")
 	b.WriteString("}\n")
-	return []byte(b.String()), nil
+	rendered := []byte(b.String())
+
+	// Render-time structural check — paranoia + canary on top of
+	// the input gates above.  See ADR 0003 (sentari repo)
+	// "Mitigations against the gradle-writer expansion" for the
+	// rationale: we author Groovy that runs in gradle's JVM, so
+	// any future regression that lets unexpected content into the
+	// rendered script must be caught before it hits disk.
+	if err := validateRenderedGradle(rendered, endpoint); err != nil {
+		return nil, fmt.Errorf("renderGradleInit: structural check: %w", err)
+	}
+	return rendered, nil
+}
+
+// validateRenderedGradle is a defense-in-depth canary: it
+// re-validates the *rendered* gradle init script against a fixed
+// shape before the writer commits the bytes to disk.  Triggers
+// on:
+//
+//   - the marker prefix not being present at offset zero;
+//   - the closing ``}`` not appearing at the end;
+//   - the symbolic name ``sentariProxyUrl`` appearing anything other
+//     than the exact expected count of references (1 def + 6 uses
+//     across pluginManagement / buildscript / afterEvaluate);
+//   - the URL appearing other than once (only inside the ``def``
+//     line as a string literal — every other reference goes through
+//     the variable);
+//   - any of a small list of Groovy keywords associated with
+//     arbitrary code execution (``eval``, ``execute``,
+//     ``ProcessBuilder``, ``Runtime``, ``GroovyShell``,
+//     ``System.exec``).
+//
+// The check is deliberately cheap and over-strict: the render
+// function is a constant template with one variable substitution,
+// so any deviation from the expected shape indicates either a
+// regression in the renderer or — much less likely — a malicious
+// URL that slipped the input gates.  Refusing to write under
+// either condition is the right behaviour.
+func validateRenderedGradle(rendered []byte, endpoint string) error {
+	if !bytes.HasPrefix(rendered, []byte(sentariManagedSentinelSlash)) {
+		return fmt.Errorf("rendered script missing slash-marker prefix")
+	}
+	trimmed := bytes.TrimRight(rendered, "\n")
+	if !bytes.HasSuffix(trimmed, []byte("}")) {
+		return fmt.Errorf("rendered script does not end with closing brace")
+	}
+	// The variable name ``sentariProxyUrl`` appears 4 times in the
+	// canonical render: once on the def's left-hand side, then
+	// once each as the URL argument in pluginManagement,
+	// buildscript, and afterEvaluate (3 uses).  Total = 4.
+	const sentariProxyUrlOccurrences = 4
+	if got := bytes.Count(rendered, []byte("sentariProxyUrl")); got != sentariProxyUrlOccurrences {
+		return fmt.Errorf(
+			"rendered script has %d ``sentariProxyUrl`` references, want %d",
+			got, sentariProxyUrlOccurrences,
+		)
+	}
+	if got := bytes.Count(rendered, []byte(endpoint)); got != 1 {
+		return fmt.Errorf(
+			"rendered script has %d copies of the endpoint URL, want exactly 1 (only the def line)",
+			got,
+		)
+	}
+	// Groovy keywords associated with arbitrary code execution.
+	// This list is the minimum bar — a sophisticated attacker who
+	// owns the input could find non-listed primitives, but the
+	// signed-envelope + input-gate layers above are the primary
+	// defence.  This canary catches obvious regressions.
+	//
+	// Scan ONLY the Groovy body — everything after the def line.
+	// The marker header carries the operator-supplied KeyID and
+	// the endpoint URL (in the def's right-hand side), neither
+	// of which is restricted to a keyword-free alphabet by
+	// upstream validators.  A legitimate proxy URL like
+	// ``https://eval-proxy.corp.local/maven/`` or a KeyID like
+	// ``runtime-2026q2`` would otherwise false-positive.
+	body, err := gradleBodyAfterDef(rendered)
+	if err != nil {
+		return err
+	}
+	forbidden := []string{
+		"eval", "execute", "ProcessBuilder", "Runtime",
+		"GroovyShell", "System.exec", "@Grab", "Eval.",
+	}
+	for _, kw := range forbidden {
+		if bytes.Contains(body, []byte(kw)) {
+			return fmt.Errorf("rendered script contains forbidden Groovy primitive %q", kw)
+		}
+	}
+	return nil
+}
+
+// gradleBodyAfterDef returns the bytes of the rendered script
+// that follow the ``def sentariProxyUrl = '<URL>'`` line.  Used
+// by the forbidden-primitive scan so an operator-supplied URL
+// or KeyID containing keyword-collision substrings can't false-
+// positive the canary.  Returns an error if the def line is
+// missing or truncated; the structural checks above run before
+// this so that error path is unreachable on a valid render.
+func gradleBodyAfterDef(rendered []byte) ([]byte, error) {
+	defIdx := bytes.Index(rendered, []byte("def sentariProxyUrl "))
+	if defIdx < 0 {
+		return nil, fmt.Errorf("rendered script missing ``def sentariProxyUrl`` line")
+	}
+	// Find the newline that terminates the def line.
+	rest := rendered[defIdx:]
+	nl := bytes.IndexByte(rest, '\n')
+	if nl < 0 {
+		return nil, fmt.Errorf("rendered script def line is not newline-terminated")
+	}
+	return rest[nl+1:], nil
 }

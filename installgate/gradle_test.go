@@ -1,6 +1,7 @@
 package installgate
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,6 +222,131 @@ func TestWriteGradle_NilMapRejected(t *testing.T) {
 	gradleHomeOverride(t, dir)
 	if _, err := WriteGradle(nil, GradleScopeUser, MarkerFields{KeyID: "primary"}); err == nil {
 		t.Error("expected error on nil map")
+	}
+}
+
+// --- validateRenderedGradle (render-time structural canary) -----------
+
+// Happy path: the actual renderer's output passes the canary.
+// If this test fails, the renderer and validator have drifted.
+func TestValidateRenderedGradle_HappyPath(t *testing.T) {
+	body, err := renderGradleInit("https://proxy.example.test/maven/", MarkerFields{
+		Version: 1, KeyID: "primary", Applied: fixedTime,
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if err := validateRenderedGradle(body, "https://proxy.example.test/maven/"); err != nil {
+		t.Errorf("happy-path render failed canary: %v", err)
+	}
+}
+
+// Each canary branch has a regression test.  These are
+// hand-crafted invalid scripts that mimic the failure modes the
+// canary is meant to catch.
+
+func TestValidateRenderedGradle_RejectsMissingMarker(t *testing.T) {
+	body := []byte("def sentariProxyUrl = 'x'\nallprojects {}\n")
+	if err := validateRenderedGradle(body, "x"); err == nil {
+		t.Error("expected error when marker prefix is missing")
+	}
+}
+
+func TestValidateRenderedGradle_RejectsMissingClosingBrace(t *testing.T) {
+	body := []byte("// Managed by Sentari\ndef sentariProxyUrl = 'x'\nallprojects {\n")
+	if err := validateRenderedGradle(body, "x"); err == nil {
+		t.Error("expected error when closing brace is missing")
+	}
+}
+
+func TestValidateRenderedGradle_RejectsExtraURLOccurrences(t *testing.T) {
+	// Mimic a renderer bug that interpolates the URL twice.
+	body := []byte("// Managed by Sentari\ndef sentariProxyUrl = 'https://x/'\n// 'https://x/' should not be here\n}\n")
+	// The URL appears twice (once in def + once in comment).
+	// sentariProxyUrl appears once. Both checks should reject —
+	// the URL-count check trips first.
+	if err := validateRenderedGradle(body, "https://x/"); err == nil {
+		t.Error("expected error when URL appears more than once in rendered script")
+	}
+}
+
+func TestValidateRenderedGradle_RejectsForbiddenGroovyPrimitive(t *testing.T) {
+	cases := []string{"eval", "execute", "ProcessBuilder", "Runtime", "GroovyShell", "System.exec", "@Grab", "Eval."}
+	for _, kw := range cases {
+		body := []byte(fmt.Sprintf(`// Managed by Sentari
+def sentariProxyUrl = 'https://x/'
+allprojects {
+    %s
+    sentariProxyUrl
+    sentariProxyUrl
+    sentariProxyUrl
+}
+`, kw))
+		if err := validateRenderedGradle(body, "https://x/"); err == nil {
+			t.Errorf("expected error for forbidden primitive %q", kw)
+		}
+	}
+}
+
+// Regression for the Copilot finding on PR #28: a legitimate
+// endpoint URL that happens to contain a Groovy-primitive
+// substring (e.g. ``eval-proxy``, ``execute-mirror``,
+// ``runtime-cache``) must NOT trip the forbidden-primitive
+// scan.  The fix is that the scan runs over the body AFTER the
+// def line, not over the def line itself.
+func TestValidateRenderedGradle_AllowsKeywordSubstringsInURL(t *testing.T) {
+	cases := []string{
+		"https://eval-proxy.corp.local/maven/",
+		"https://execute-mirror.corp.local/maven/",
+		"https://runtime-cache.corp.local/maven/",
+		"https://groovyshell-fake.example.test/maven/",
+	}
+	for _, url := range cases {
+		body, err := renderGradleInit(url, MarkerFields{
+			Version: 1, KeyID: "primary", Applied: fixedTime,
+		})
+		if err != nil {
+			t.Errorf("URL %q: render rejected an URL that should be allowed: %v", url, err)
+			continue
+		}
+		if err := validateRenderedGradle(body, url); err != nil {
+			t.Errorf("URL %q: canary tripped on a legitimate URL: %v", url, err)
+		}
+	}
+}
+
+// Same regression for KeyID — operator can use a KeyID that
+// contains a keyword-collision substring (e.g. for key-rotation
+// naming conventions like ``runtime-2026q2``).
+func TestValidateRenderedGradle_AllowsKeywordSubstringsInKeyID(t *testing.T) {
+	cases := []string{"runtime", "execute2026", "evaluator", "shell-key"}
+	for _, kid := range cases {
+		body, err := renderGradleInit("https://proxy.example.test/maven/", MarkerFields{
+			Version: 1, KeyID: kid, Applied: fixedTime,
+		})
+		if err != nil {
+			t.Errorf("KeyID %q: render rejected: %v", kid, err)
+			continue
+		}
+		if err := validateRenderedGradle(body, "https://proxy.example.test/maven/"); err != nil {
+			t.Errorf("KeyID %q: canary tripped on a legitimate KeyID: %v", kid, err)
+		}
+	}
+}
+
+func TestValidateRenderedGradle_RejectsSentariProxyUrlMiscount(t *testing.T) {
+	// 5 references — one too many.  Mimics a renderer regression
+	// that adds an extra repository declaration.
+	body := []byte(`// Managed by Sentari
+def sentariProxyUrl = 'https://x/'
+sentariProxyUrl
+sentariProxyUrl
+sentariProxyUrl
+sentariProxyUrl
+}
+`)
+	if err := validateRenderedGradle(body, "https://x/"); err == nil {
+		t.Error("expected error when sentariProxyUrl reference count drifts")
 	}
 }
 
