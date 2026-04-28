@@ -124,9 +124,8 @@ func WriteYarnBerry(m *scanner.InstallGateMap, scope YarnBerryScope, marker Mark
 // ``.yarnrc.yml``.  YAML is whitespace-sensitive so we keep the
 // rendered file flat (top-level mappings only) and emit a
 // trailing newline.  ``npmRegistryServer`` is yarn-berry's
-// equivalent of npm's ``registry=`` setting; ``npmAlwaysAuth``
-// matches npm's ``always-auth`` so internal-CA proxies don't
-// fall back to anonymous resolution.
+// equivalent of npm's ``registry=`` setting and is the only
+// registry key emitted here.
 //
 // YAML rules: the URL value is double-quoted so YAML treats it as
 // a plain scalar regardless of embedded ``:`` characters (which

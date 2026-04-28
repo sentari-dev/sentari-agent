@@ -94,15 +94,32 @@ func TestWriteGradle_FreshHostFreshConfig(t *testing.T) {
 	got := string(body)
 	wantSubstrs := []string{
 		"// Managed by Sentari (version=1730901234, signed=primary, applied=2026-04-25T10:00:00Z)",
-		"allprojects",
-		"repositories",
-		"maven",
-		"url 'https://proxy.example.test/maven/'",
+		"def sentariProxyUrl = 'https://proxy.example.test/maven/'",
+		// Plugin resolution surface — must clear before adding so
+		// the Gradle Plugin Portal default doesn't survive.
+		"beforeSettings { settings ->",
+		"settings.pluginManagement.repositories.clear()",
+		"settings.pluginManagement.repositories.maven { url sentariProxyUrl }",
+		"allprojects {",
+		// Buildscript classpath — cleared per-project.
+		"buildscript {",
+		"repositories.clear()",
+		"repositories.maven { url sentariProxyUrl }",
+		// Dependency resolution — afterEvaluate runs AFTER any
+		// project-level repositories { ... } block.
+		"afterEvaluate {",
 	}
 	for _, s := range wantSubstrs {
 		if !strings.Contains(got, s) {
 			t.Errorf("init script missing %q\nfull body:\n%s", s, got)
 		}
+	}
+	// Negative assertion: the rendered script must NOT contain
+	// an "add-only" repositories block (no clear()), which would
+	// silently append rather than replace.
+	if strings.Contains(got, "repositories {\n            maven {") &&
+		!strings.Contains(got, "repositories.clear()") {
+		t.Errorf("init script appears to use append-only repositories block (Copilot finding regression):\n%s", got)
 	}
 }
 

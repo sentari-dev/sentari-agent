@@ -140,16 +140,31 @@ func WriteGradle(m *scanner.InstallGateMap, scope GradleScope, marker MarkerFiel
 }
 
 // renderGradleInit produces a fresh Sentari-managed Groovy init
-// script.  The script rewrites every project's repository list
-// to a single Sentari-Proxy URL — same semantic as Maven's
-// ``<mirrorOf>*</mirrorOf>``.
+// script.  The script CLEARS every repository list before adding
+// Sentari-Proxy as the sole entry — same semantic as Maven's
+// ``<mirrorOf>*</mirrorOf>``.  Three repository surfaces are
+// replaced (not appended to):
 //
-// We use ``allprojects { ... }`` rather than ``settingsEvaluated``
-// because the former is the more portable across Gradle 6 / 7 / 8
-// and doesn't break when projects override ``repositories {}``
-// later in their own build script: gradle re-evaluates the
-// ``allprojects`` closure on every project, so our mirror
-// declaration is always present.
+//  1. ``settings.pluginManagement.repositories`` — Gradle plugin
+//     resolution.  Without this, ``plugins { id 'foo' }`` still
+//     fetches from the Gradle Plugin Portal.  Hooked via
+//     ``beforeSettings`` so we intercept before settings.gradle
+//     evaluates and locks the configuration.
+//
+//  2. ``buildscript.repositories`` per-project — the classpath
+//     used by ``apply plugin:`` and similar.  Cleared inside
+//     ``allprojects`` so the rewrite applies to every subproject
+//     in a multi-module build.
+//
+//  3. ``project.repositories`` per-project — dependency
+//     resolution.  Hooked via ``afterEvaluate`` so we run AFTER
+//     the project's own ``repositories { ... }`` block; merely
+//     adding our mirror earlier wouldn't override an explicit
+//     ``mavenCentral()`` call later in the script.
+//
+// The clear-then-add pattern is the only reliable way to defeat
+// the "additional repositories block silently appends" bypass
+// pointed out by Copilot on PR #27.
 func renderGradleInit(endpoint string, marker MarkerFields) ([]byte, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if err := validateEndpoint(endpoint); err != nil {
@@ -169,18 +184,30 @@ func renderGradleInit(endpoint string, marker MarkerFields) ([]byte, error) {
 	var b strings.Builder
 	b.WriteString(renderSlashMarker(marker))
 	b.WriteString("\n")
+	fmt.Fprintf(&b, "def sentariProxyUrl = '%s'\n\n", endpoint)
+	// Plugin resolution surface.  beforeSettings runs before
+	// settings.gradle evaluates, so clearing the pluginManagement
+	// repositories here forces every ``plugins { ... }`` block to
+	// resolve through Sentari-Proxy.
+	b.WriteString("beforeSettings { settings ->\n")
+	b.WriteString("    settings.pluginManagement.repositories.clear()\n")
+	b.WriteString("    settings.pluginManagement.repositories.maven { url sentariProxyUrl }\n")
+	b.WriteString("}\n\n")
 	b.WriteString("allprojects {\n")
+	// Buildscript classpath surface — apply plugin: and other
+	// build-time deps go through here.  Cleared per-project so
+	// every module in a multi-project build is covered.
 	b.WriteString("    buildscript {\n")
-	b.WriteString("        repositories {\n")
-	b.WriteString("            maven {\n")
-	fmt.Fprintf(&b, "                url '%s'\n", endpoint)
-	b.WriteString("            }\n")
-	b.WriteString("        }\n")
+	b.WriteString("        repositories.clear()\n")
+	b.WriteString("        repositories.maven { url sentariProxyUrl }\n")
 	b.WriteString("    }\n")
-	b.WriteString("    repositories {\n")
-	b.WriteString("        maven {\n")
-	fmt.Fprintf(&b, "            url '%s'\n", endpoint)
-	b.WriteString("        }\n")
+	// Dependency resolution surface — afterEvaluate runs AFTER
+	// the project's own repositories { } block, so we override
+	// even projects that explicitly call mavenCentral() later
+	// in their build script.
+	b.WriteString("    afterEvaluate {\n")
+	b.WriteString("        repositories.clear()\n")
+	b.WriteString("        repositories.maven { url sentariProxyUrl }\n")
 	b.WriteString("    }\n")
 	b.WriteString("}\n")
 	return []byte(b.String()), nil
