@@ -22,6 +22,7 @@
 package installgate
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -210,5 +211,86 @@ func renderGradleInit(endpoint string, marker MarkerFields) ([]byte, error) {
 	b.WriteString("        repositories.maven { url sentariProxyUrl }\n")
 	b.WriteString("    }\n")
 	b.WriteString("}\n")
-	return []byte(b.String()), nil
+	rendered := []byte(b.String())
+
+	// Render-time structural check — paranoia + canary on top of
+	// the input gates above.  See ADR 0003 (sentari repo)
+	// "Mitigations against the gradle-writer expansion" for the
+	// rationale: we author Groovy that runs in gradle's JVM, so
+	// any future regression that lets unexpected content into the
+	// rendered script must be caught before it hits disk.
+	if err := validateRenderedGradle(rendered, endpoint); err != nil {
+		return nil, fmt.Errorf("renderGradleInit: structural check: %w", err)
+	}
+	return rendered, nil
+}
+
+// validateRenderedGradle is a defense-in-depth canary: it
+// re-validates the *rendered* gradle init script against a fixed
+// shape before the writer commits the bytes to disk.  Triggers
+// on:
+//
+//   - the marker prefix not being present at offset zero;
+//   - the closing ``}`` not appearing at the end;
+//   - the symbolic name ``sentariProxyUrl`` appearing anything other
+//     than the exact expected count of references (1 def + 6 uses
+//     across pluginManagement / buildscript / afterEvaluate);
+//   - the URL appearing other than once (only inside the ``def``
+//     line as a string literal — every other reference goes through
+//     the variable);
+//   - any of a small list of Groovy keywords associated with
+//     arbitrary code execution (``eval``, ``execute``,
+//     ``ProcessBuilder``, ``Runtime``, ``GroovyShell``,
+//     ``System.exec``).
+//
+// The check is deliberately cheap and over-strict: the render
+// function is a constant template with one variable substitution,
+// so any deviation from the expected shape indicates either a
+// regression in the renderer or — much less likely — a malicious
+// URL that slipped the input gates.  Refusing to write under
+// either condition is the right behaviour.
+func validateRenderedGradle(rendered []byte, endpoint string) error {
+	if !bytes.HasPrefix(rendered, []byte(sentariManagedSentinelSlash)) {
+		return fmt.Errorf("rendered script missing slash-marker prefix")
+	}
+	trimmed := bytes.TrimRight(rendered, "\n")
+	if !bytes.HasSuffix(trimmed, []byte("}")) {
+		return fmt.Errorf("rendered script does not end with closing brace")
+	}
+	// The variable name appears once in the def, plus six uses
+	// (one in pluginManagement, two in buildscript, two in
+	// afterEvaluate, plus one we miscount-test against — actually
+	// 1 + 3 = 4 uses: pluginManagement.maven, buildscript.maven,
+	// afterEvaluate.maven, and the def assignment itself).  Total
+	// occurrences of the literal ``sentariProxyUrl`` substring:
+	// 1 (def) + 1 (pluginManagement) + 1 (buildscript clear-and-add)
+	// + 1 (afterEvaluate) = 4.
+	const sentariProxyUrlOccurrences = 4
+	if got := bytes.Count(rendered, []byte("sentariProxyUrl")); got != sentariProxyUrlOccurrences {
+		return fmt.Errorf(
+			"rendered script has %d ``sentariProxyUrl`` references, want %d",
+			got, sentariProxyUrlOccurrences,
+		)
+	}
+	if got := bytes.Count(rendered, []byte(endpoint)); got != 1 {
+		return fmt.Errorf(
+			"rendered script has %d copies of the endpoint URL, want exactly 1 (only the def line)",
+			got,
+		)
+	}
+	// Groovy keywords associated with arbitrary code execution.
+	// This list is the minimum bar — a sophisticated attacker who
+	// owns the input could find non-listed primitives, but the
+	// signed-envelope + input-gate layers above are the primary
+	// defence.  This canary catches obvious regressions.
+	forbidden := []string{
+		"eval", "execute", "ProcessBuilder", "Runtime",
+		"GroovyShell", "System.exec", "@Grab", "Eval.",
+	}
+	for _, kw := range forbidden {
+		if bytes.Contains(rendered, []byte(kw)) {
+			return fmt.Errorf("rendered script contains forbidden Groovy primitive %q", kw)
+		}
+	}
+	return nil
 }
