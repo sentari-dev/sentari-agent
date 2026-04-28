@@ -223,6 +223,7 @@ func validateEndpoint(endpoint string) error {
 // because both share this prefix.
 var sentariManagedSentinel = []byte("# Managed by Sentari")
 var sentariManagedSentinelXML = []byte("<!-- Managed by Sentari")
+var sentariManagedSentinelSlash = []byte("// Managed by Sentari")
 
 // isSentariManaged reports whether ``path`` exists AND carries
 // the Sentari-managed marker within its first ``markerSearchBytes``
@@ -266,7 +267,9 @@ func isSentariManaged(path string) (bool, error) {
 		return false, err
 	}
 	head = head[:n]
-	if bytesContains(head, sentariManagedSentinel) || bytesContains(head, sentariManagedSentinelXML) {
+	if bytesContains(head, sentariManagedSentinel) ||
+		bytesContains(head, sentariManagedSentinelXML) ||
+		bytesContains(head, sentariManagedSentinelSlash) {
 		return true, nil
 	}
 	return false, nil

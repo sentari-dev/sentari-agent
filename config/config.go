@@ -120,6 +120,25 @@ type InstallGateConfig struct {
 	// has no system-wide config path).  Empty resolves to
 	// ``user`` at apply time.
 	PdmScope string
+
+	// GradleScope selects the gradle init-script target.
+	// ``user`` writes ``~/.gradle/init.d/sentari-proxy.gradle``;
+	// ``system`` writes ``$GRADLE_HOME/init.d/sentari-proxy.gradle``
+	// (soft no-op when GRADLE_HOME is unset).
+	GradleScope string
+
+	// SbtScope selects the sbt repositories-file target.
+	// ``user`` writes ``~/.sbt/repositories``; ``system`` writes
+	// ``$SBT_HOME/conf/repositories`` (soft no-op when SBT_HOME
+	// is unset).
+	SbtScope string
+
+	// YarnBerryScope selects the Yarn Berry .yarnrc.yml target.
+	// Yarn classic (1.x) reads .npmrc and is covered by the npm
+	// writer; this is the separate Berry-specific writer.
+	// ``user`` writes ``~/.yarnrc.yml``; ``system`` is a soft
+	// no-op (Yarn Berry has no system-wide config path).
+	YarnBerryScope string
 }
 
 // DefaultConfig returns the default agent configuration.
@@ -319,6 +338,27 @@ func (c *AgentConfig) set(section, key, value string) error {
 				c.InstallGate.PdmScope = strings.ToLower(value)
 			default:
 				return fmt.Errorf("invalid pdm_scope %q (want user/system)", value)
+			}
+		case "gradle_scope":
+			switch strings.ToLower(value) {
+			case "", "user", "system":
+				c.InstallGate.GradleScope = strings.ToLower(value)
+			default:
+				return fmt.Errorf("invalid gradle_scope %q (want user/system)", value)
+			}
+		case "sbt_scope":
+			switch strings.ToLower(value) {
+			case "", "user", "system":
+				c.InstallGate.SbtScope = strings.ToLower(value)
+			default:
+				return fmt.Errorf("invalid sbt_scope %q (want user/system)", value)
+			}
+		case "yarnberry_scope":
+			switch strings.ToLower(value) {
+			case "", "user", "system":
+				c.InstallGate.YarnBerryScope = strings.ToLower(value)
+			default:
+				return fmt.Errorf("invalid yarnberry_scope %q (want user/system)", value)
 			}
 		default:
 			log.Printf("config: unknown key [%s] %s — ignored", section, key)

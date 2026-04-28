@@ -202,6 +202,69 @@ func TestInstallGate_PdmScopeRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestInstallGate_GradleScope(t *testing.T) {
+	for _, scope := range []string{"user", "system", ""} {
+		path := writeTempConfig(t, "[install_gate]\ngradle_scope = "+scope+"\n")
+		cfg, err := LoadFromFile(path)
+		if err != nil {
+			t.Errorf("scope=%q: %v", scope, err)
+			continue
+		}
+		if cfg.InstallGate.GradleScope != scope {
+			t.Errorf("scope=%q: got %q", scope, cfg.InstallGate.GradleScope)
+		}
+	}
+}
+
+func TestInstallGate_GradleScopeRejectsUnknown(t *testing.T) {
+	path := writeTempConfig(t, "[install_gate]\ngradle_scope = global\n")
+	if _, err := LoadFromFile(path); err == nil {
+		t.Error("expected error on gradle_scope=global")
+	}
+}
+
+func TestInstallGate_SbtScope(t *testing.T) {
+	for _, scope := range []string{"user", "system", ""} {
+		path := writeTempConfig(t, "[install_gate]\nsbt_scope = "+scope+"\n")
+		cfg, err := LoadFromFile(path)
+		if err != nil {
+			t.Errorf("scope=%q: %v", scope, err)
+			continue
+		}
+		if cfg.InstallGate.SbtScope != scope {
+			t.Errorf("scope=%q: got %q", scope, cfg.InstallGate.SbtScope)
+		}
+	}
+}
+
+func TestInstallGate_SbtScopeRejectsUnknown(t *testing.T) {
+	path := writeTempConfig(t, "[install_gate]\nsbt_scope = global\n")
+	if _, err := LoadFromFile(path); err == nil {
+		t.Error("expected error on sbt_scope=global")
+	}
+}
+
+func TestInstallGate_YarnBerryScope(t *testing.T) {
+	for _, scope := range []string{"user", "system", ""} {
+		path := writeTempConfig(t, "[install_gate]\nyarnberry_scope = "+scope+"\n")
+		cfg, err := LoadFromFile(path)
+		if err != nil {
+			t.Errorf("scope=%q: %v", scope, err)
+			continue
+		}
+		if cfg.InstallGate.YarnBerryScope != scope {
+			t.Errorf("scope=%q: got %q", scope, cfg.InstallGate.YarnBerryScope)
+		}
+	}
+}
+
+func TestInstallGate_YarnBerryScopeRejectsUnknown(t *testing.T) {
+	path := writeTempConfig(t, "[install_gate]\nyarnberry_scope = global\n")
+	if _, err := LoadFromFile(path); err == nil {
+		t.Error("expected error on yarnberry_scope=global")
+	}
+}
+
 func TestInstallGate_UnknownKeyIgnored(t *testing.T) {
 	// Unknown key under [install_gate] must be a warning, not a
 	// load error — operators on a newer INI shouldn't have to

@@ -420,9 +420,12 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 				PipScope:   pipScopeFromConfig(agentCfg.InstallGate.PythonScope),
 				NpmScope:   npmScopeFromConfig(agentCfg.InstallGate.NodeScope),
 				MavenScope: mavenScopeFromConfig(agentCfg.InstallGate.MavenScope),
-				NuGetScope: nugetScopeFromConfig(agentCfg.InstallGate.NuGetScope),
-				UvScope:    uvScopeFromConfig(agentCfg.InstallGate.UvScope),
-				PdmScope:   pdmScopeFromConfig(agentCfg.InstallGate.PdmScope),
+				NuGetScope:     nugetScopeFromConfig(agentCfg.InstallGate.NuGetScope),
+				UvScope:        uvScopeFromConfig(agentCfg.InstallGate.UvScope),
+				PdmScope:       pdmScopeFromConfig(agentCfg.InstallGate.PdmScope),
+				GradleScope:    gradleScopeFromConfig(agentCfg.InstallGate.GradleScope),
+				SbtScope:       sbtScopeFromConfig(agentCfg.InstallGate.SbtScope),
+				YarnBerryScope: yarnBerryScopeFromConfig(agentCfg.InstallGate.YarnBerryScope),
 			})
 			for _, e := range errs {
 				log.Warn("install-gate writer", slog.String("err", e.Error()))
@@ -463,6 +466,20 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 				logAudit(auditLog, "install_gate.pdm.skipped_operator",
 					fmt.Sprintf("path=%s version=%d", res.Pdm.Path, igMap.Version))
 			}
+			if res.Sbt.SkippedOperator {
+				log.Info("install-gate sbt skipped (operator-curated repositories)",
+					slog.String("path", res.Sbt.Path),
+				)
+				logAudit(auditLog, "install_gate.sbt.skipped_operator",
+					fmt.Sprintf("path=%s version=%d", res.Sbt.Path, igMap.Version))
+			}
+			if res.YarnBerry.SkippedOperator {
+				log.Info("install-gate yarn-berry skipped (operator-curated .yarnrc.yml)",
+					slog.String("path", res.YarnBerry.Path),
+				)
+				logAudit(auditLog, "install_gate.yarnberry.skipped_operator",
+					fmt.Sprintf("path=%s version=%d", res.YarnBerry.Path, igMap.Version))
+			}
 			if res.AnyChanged() {
 				log.Info("install-gate applied",
 					slog.Int("version", igMap.Version),
@@ -484,6 +501,15 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 					slog.String("pdm_path", res.Pdm.Path),
 					slog.Bool("pdm_changed", res.Pdm.Changed),
 					slog.Bool("pdm_removed", res.Pdm.Removed),
+					slog.String("gradle_path", res.Gradle.Path),
+					slog.Bool("gradle_changed", res.Gradle.Changed),
+					slog.Bool("gradle_removed", res.Gradle.Removed),
+					slog.String("sbt_path", res.Sbt.Path),
+					slog.Bool("sbt_changed", res.Sbt.Changed),
+					slog.Bool("sbt_removed", res.Sbt.Removed),
+					slog.String("yarnberry_path", res.YarnBerry.Path),
+					slog.Bool("yarnberry_changed", res.YarnBerry.Changed),
+					slog.Bool("yarnberry_removed", res.YarnBerry.Removed),
 				)
 				logAudit(auditLog, "install_gate.applied",
 					fmt.Sprintf("version=%d pip_path=%s pip_changed=%t pip_removed=%t "+
@@ -491,14 +517,20 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 						"maven_path=%s maven_changed=%t maven_removed=%t "+
 						"nuget_path=%s nuget_changed=%t nuget_removed=%t "+
 						"uv_path=%s uv_changed=%t uv_removed=%t "+
-						"pdm_path=%s pdm_changed=%t pdm_removed=%t",
+						"pdm_path=%s pdm_changed=%t pdm_removed=%t "+
+						"gradle_path=%s gradle_changed=%t gradle_removed=%t "+
+						"sbt_path=%s sbt_changed=%t sbt_removed=%t "+
+						"yarnberry_path=%s yarnberry_changed=%t yarnberry_removed=%t",
 						igMap.Version,
 						res.Pip.Path, res.Pip.Changed, res.Pip.Removed,
 						res.Npm.Path, res.Npm.Changed, res.Npm.Removed,
 						res.Maven.Path, res.Maven.Changed, res.Maven.Removed,
 						res.NuGet.Path, res.NuGet.Changed, res.NuGet.Removed,
 						res.Uv.Path, res.Uv.Changed, res.Uv.Removed,
-						res.Pdm.Path, res.Pdm.Changed, res.Pdm.Removed))
+						res.Pdm.Path, res.Pdm.Changed, res.Pdm.Removed,
+						res.Gradle.Path, res.Gradle.Changed, res.Gradle.Removed,
+						res.Sbt.Path, res.Sbt.Changed, res.Sbt.Removed,
+						res.YarnBerry.Path, res.YarnBerry.Changed, res.YarnBerry.Removed))
 			}
 		}
 	}
@@ -774,6 +806,39 @@ func pdmScopeFromConfig(s string) installgate.PdmScope {
 		return installgate.PdmScopeSystem
 	default:
 		return installgate.PdmScopeUser
+	}
+}
+
+// gradleScopeFromConfig — System soft-no-ops downstream in
+// GradlePath when GRADLE_HOME is unset.
+func gradleScopeFromConfig(s string) installgate.GradleScope {
+	switch s {
+	case "system":
+		return installgate.GradleScopeSystem
+	default:
+		return installgate.GradleScopeUser
+	}
+}
+
+// sbtScopeFromConfig — System soft-no-ops downstream in SbtPath
+// when SBT_HOME is unset.
+func sbtScopeFromConfig(s string) installgate.SbtScope {
+	switch s {
+	case "system":
+		return installgate.SbtScopeSystem
+	default:
+		return installgate.SbtScopeUser
+	}
+}
+
+// yarnBerryScopeFromConfig — Yarn Berry has no system-wide config
+// path; system enum value soft-no-ops downstream.
+func yarnBerryScopeFromConfig(s string) installgate.YarnBerryScope {
+	switch s {
+	case "system":
+		return installgate.YarnBerryScopeSystem
+	default:
+		return installgate.YarnBerryScopeUser
 	}
 }
 

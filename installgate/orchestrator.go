@@ -55,6 +55,20 @@ type ApplyOptions struct {
 	// PdmScope picks ``user`` config.  pdm has no system-wide
 	// config path so PdmScopeSystem is a soft no-op.
 	PdmScope PdmScope
+
+	// GradleScope picks ``user`` (~/.gradle/init.d) or ``system``
+	// ($GRADLE_HOME/init.d).  System is a soft no-op when
+	// GRADLE_HOME is unset.
+	GradleScope GradleScope
+
+	// SbtScope picks ``user`` (~/.sbt/repositories) or ``system``
+	// ($SBT_HOME/conf/repositories).  System is a soft no-op
+	// when SBT_HOME is unset.
+	SbtScope SbtScope
+
+	// YarnBerryScope picks ``user`` (~/.yarnrc.yml).  Yarn berry
+	// has no system-wide config path so System is a soft no-op.
+	YarnBerryScope YarnBerryScope
 }
 
 // ApplyResult collects per-ecosystem outcomes.  One field per
@@ -68,13 +82,16 @@ type ApplyOptions struct {
 // field here, but that's the exact spot a reviewer should look at
 // when a new writer lands.
 type ApplyResult struct {
-	Pip   WritePipResult
-	Npm   WriteNpmResult
-	Maven WriteMavenResult
-	NuGet WriteNuGetResult
-	Uv    WriteUvResult
-	Pdm   WritePdmResult
-	// future: apt, yum, gradle, sbt, yarn-berry
+	Pip       WritePipResult
+	Npm       WriteNpmResult
+	Maven     WriteMavenResult
+	NuGet     WriteNuGetResult
+	Uv        WriteUvResult
+	Pdm       WritePdmResult
+	Gradle    WriteGradleResult
+	Sbt       WriteSbtResult
+	YarnBerry WriteYarnBerryResult
+	// future: apt, yum
 }
 
 // AnyChanged reports whether any writer reported a change in
@@ -106,6 +123,15 @@ func (r ApplyResult) AnyChanged() bool {
 		return true
 	}
 	if r.Pdm.Changed || r.Pdm.Removed {
+		return true
+	}
+	if r.Gradle.Changed || r.Gradle.Removed {
+		return true
+	}
+	if r.Sbt.Changed || r.Sbt.Removed {
+		return true
+	}
+	if r.YarnBerry.Changed || r.YarnBerry.Removed {
 		return true
 	}
 	return false
@@ -163,6 +189,24 @@ func Apply(m *scanner.InstallGateMap, opts ApplyOptions) (ApplyResult, []error) 
 	res.Pdm = pdmRes
 	if err != nil {
 		errs = append(errs, fmt.Errorf("pdm writer: %w", err))
+	}
+
+	gradleRes, err := WriteGradle(m, opts.GradleScope, opts.Marker)
+	res.Gradle = gradleRes
+	if err != nil {
+		errs = append(errs, fmt.Errorf("gradle writer: %w", err))
+	}
+
+	sbtRes, err := WriteSbt(m, opts.SbtScope, opts.Marker)
+	res.Sbt = sbtRes
+	if err != nil {
+		errs = append(errs, fmt.Errorf("sbt writer: %w", err))
+	}
+
+	yarnBerryRes, err := WriteYarnBerry(m, opts.YarnBerryScope, opts.Marker)
+	res.YarnBerry = yarnBerryRes
+	if err != nil {
+		errs = append(errs, fmt.Errorf("yarn-berry writer: %w", err))
 	}
 
 	// Future writers register here.  Each one returns its own
