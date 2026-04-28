@@ -95,3 +95,27 @@ func renderXMLMarker(fields MarkerFields) string {
 		fields.Applied.UTC().Format(time.RFC3339),
 	)
 }
+
+// renderSlashMarker produces the ``//``-prefixed comment block
+// used by Groovy / Java / sbt-style configs where ``#`` is not a
+// comment.  Format intent:
+//
+//	// Managed by Sentari (version=..., signed=..., applied=...)
+//	// Do not edit manually — changes are overwritten on the next policy sync.
+//
+// Trailing ``\n`` so callers can concatenate the rendered config
+// body without leading-whitespace gymnastics — same shape as
+// renderHashMarker.  isSentariManaged recognises the
+// ``// Managed by Sentari`` substring anywhere in the first 1 KiB.
+func renderSlashMarker(fields MarkerFields) string {
+	return strings.Join([]string{
+		fmt.Sprintf(
+			"// Managed by Sentari (version=%d, signed=%s, applied=%s)",
+			fields.Version,
+			fields.KeyID,
+			fields.Applied.UTC().Format(time.RFC3339),
+		),
+		"// Do not edit manually — changes are overwritten on the next policy sync.",
+		"",
+	}, "\n")
+}
