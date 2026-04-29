@@ -5,7 +5,7 @@ package config
 import (
 	"bufio"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -226,7 +226,7 @@ func (c *AgentConfig) set(section, key, value string) error {
 			}
 			c.Server.PollInterval = v
 		default:
-			log.Printf("config: unknown key [%s] %s — ignored", section, key)
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}
 	case "scanner":
 		switch key {
@@ -262,7 +262,7 @@ func (c *AgentConfig) set(section, key, value string) error {
 				return fmt.Errorf("invalid containers value %q (want true/false)", value)
 			}
 		default:
-			log.Printf("config: unknown key [%s] %s — ignored", section, key)
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}
 	case "proxy":
 		switch key {
@@ -275,7 +275,7 @@ func (c *AgentConfig) set(section, key, value string) error {
 		case "proxy_auth_pass_file":
 			c.Proxy.AuthPassFile = value
 		default:
-			log.Printf("config: unknown key [%s] %s — ignored", section, key)
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}
 	case "logging":
 		switch key {
@@ -284,7 +284,7 @@ func (c *AgentConfig) set(section, key, value string) error {
 		case "file":
 			c.Logging.File = value
 		default:
-			log.Printf("config: unknown key [%s] %s — ignored", section, key)
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}
 	case "install_gate":
 		switch key {
@@ -361,10 +361,10 @@ func (c *AgentConfig) set(section, key, value string) error {
 				return fmt.Errorf("invalid yarnberry_scope %q (want user/system)", value)
 			}
 		default:
-			log.Printf("config: unknown key [%s] %s — ignored", section, key)
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}
 	default:
-		log.Printf("config: unknown section [%s] — ignored", section)
+		slog.Warn("config: unknown section ignored", slog.String("section", section))
 	}
 	return nil
 }

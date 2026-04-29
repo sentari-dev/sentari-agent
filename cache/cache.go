@@ -7,7 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -95,7 +95,9 @@ func (c *Cache) DequeuePending() ([]CachedScan, error) {
 		}
 		var result scanner.ScanResult
 		if err := json.Unmarshal([]byte(data), &result); err != nil {
-			log.Printf("cache: skipping corrupted entry id=%d: %v", id, err)
+			slog.Warn("cache: skipping corrupted entry",
+				slog.Int64("id", id),
+				slog.String("err", err.Error()))
 			continue
 		}
 		results = append(results, CachedScan{QueueID: id, Result: &result})
