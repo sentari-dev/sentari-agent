@@ -114,7 +114,7 @@ func (a *AuditLog) UnshippedEntries() ([]map[string]string, error) {
 		var id int
 		var eventType, detail, contentHash, prevHash, createdAt string
 		if err := rows.Scan(&id, &eventType, &detail, &contentHash, &prevHash, &createdAt); err != nil {
-			slog.Warn("audit: skipping corrupted entry", "error", err)
+			slog.Warn("audit: skipping corrupted entry", slog.String("err", err.Error()))
 			continue
 		}
 		entries = append(entries, map[string]string{

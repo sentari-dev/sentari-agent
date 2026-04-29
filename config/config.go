@@ -226,7 +226,7 @@ func (c *AgentConfig) set(section, key, value string) error {
 			}
 			c.Server.PollInterval = v
 		default:
-			slog.Warn("config: unknown key ignored", "section", section, "key", key)
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}
 	case "scanner":
 		switch key {
@@ -262,7 +262,7 @@ func (c *AgentConfig) set(section, key, value string) error {
 				return fmt.Errorf("invalid containers value %q (want true/false)", value)
 			}
 		default:
-			slog.Warn("config: unknown key ignored", "section", section, "key", key)
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}
 	case "proxy":
 		switch key {
@@ -275,7 +275,7 @@ func (c *AgentConfig) set(section, key, value string) error {
 		case "proxy_auth_pass_file":
 			c.Proxy.AuthPassFile = value
 		default:
-			slog.Warn("config: unknown key ignored", "section", section, "key", key)
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}
 	case "logging":
 		switch key {
@@ -284,7 +284,7 @@ func (c *AgentConfig) set(section, key, value string) error {
 		case "file":
 			c.Logging.File = value
 		default:
-			slog.Warn("config: unknown key ignored", "section", section, "key", key)
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}
 	case "install_gate":
 		switch key {
@@ -361,10 +361,10 @@ func (c *AgentConfig) set(section, key, value string) error {
 				return fmt.Errorf("invalid yarnberry_scope %q (want user/system)", value)
 			}
 		default:
-			slog.Warn("config: unknown key ignored", "section", section, "key", key)
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}
 	default:
-		slog.Warn("config: unknown section ignored", "section", section)
+		slog.Warn("config: unknown section ignored", slog.String("section", section))
 	}
 	return nil
 }
