@@ -6,6 +6,12 @@ Living document tracking deferred work and future improvements. Items here are i
 
 ---
 
+## Recently shipped
+
+- **2026-05-04 — Install-gate disable-header reaction** (sentari §15a.2 follow-up). Agent now reacts to the server's `X-Sentari-Install-Gate-Disabled: true` response on `/policy-map` by tearing down host configs immediately + persisting a marker so a process restart between disable and re-enable doesn't re-write configs from a stale local cache. Also: when an operator flips `[install_gate] enabled = false` in `agent.conf`, the agent now actively removes any pre-existing Sentari-managed configs (previously it just no-op'd until the 7-day fail-open grace expired). Plan: [`docs/plans/2026-05-04-install-gate-disable-reaction.md`](docs/plans/2026-05-04-install-gate-disable-reaction.md).
+
+---
+
 ## Strategic — Aikido response (added 2026-04-24)
 
 Items driven by the v2 competitive read of Aikido Endpoint (see the companion server doc). Promotes specific agent-side work onto the roadmap with clear scope + reasoning. **Sizes:** S ≤ 3 days, M ≤ 1.5 weeks, L ≤ a full sprint, XL multi-sprint.
