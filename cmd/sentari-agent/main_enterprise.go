@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -405,28 +406,47 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 		} else if cachedMap != nil {
 			currentVersion = cachedMap.Version
 		}
-		if igMap, envelope, err := client.FetchInstallGateMap(ctx, currentVersion); err != nil {
+		igMap, envelope, err := client.FetchInstallGateMap(ctx, currentVersion)
+		switch {
+		case errors.Is(err, comms.ErrInstallGateServerDisabled):
+			// Server has explicitly disabled install-gate for this
+			// tenant (404 + X-Sentari-Install-Gate-Disabled: true).
+			// Tear down host configs immediately + persist a marker
+			// so an agent restart between this and the next 200
+			// doesn't re-write configs from the local cache.
+			res, errs := installgate.RemoveAll(installGateApplyOptions(agentCfg, installgate.MarkerFields{}))
+			for _, e := range errs {
+				log.Warn("install-gate teardown (server disabled)", slog.String("err", e.Error()))
+			}
+			if mErr := installgate.WriteServerDisabledMarker(dataDir); mErr != nil {
+				log.Warn("write server-disabled marker", slog.String("err", mErr.Error()))
+			}
+			log.Info("install-gate disabled by server (X-Sentari-Install-Gate-Disabled: true); removed host configs",
+				slog.Bool("any_changed", res.AnyChanged()))
+			logAudit(auditLog, "install_gate.disabled_by_server",
+				fmt.Sprintf("any_changed=%t", res.AnyChanged()))
+		case err != nil:
 			log.Warn("install-gate refresh failed (using cached)", slog.String("err", err.Error()))
-		} else if igMap != nil {
+		case igMap != nil:
+			// 200 with a fresher envelope.  If a previous cycle had
+			// stamped the server-disabled marker, the server has
+			// re-enabled — clear the marker + log + proceed with the
+			// normal apply path.
+			if installgate.HasServerDisabledMarker(dataDir) {
+				if cErr := installgate.ClearServerDisabledMarker(dataDir); cErr != nil {
+					log.Warn("clear server-disabled marker", slog.String("err", cErr.Error()))
+				}
+				log.Info("install-gate re-enabled by server; resuming policy enforcement")
+				logAudit(auditLog, "install_gate.reenabled_by_server", "")
+			}
 			if err := scanner.SaveVerifiedInstallGateEnvelopeToFile(igCachePath, envelope); err != nil {
 				log.Warn("failed to cache install-gate map", slog.String("err", err.Error()))
 			}
-			res, errs := installgate.Apply(igMap, installgate.ApplyOptions{
-				Marker: installgate.MarkerFields{
-					Version: igMap.Version,
-					KeyID:   envelopeKeyID(envelope),
-					Applied: time.Now().UTC(),
-				},
-				PipScope:   pipScopeFromConfig(agentCfg.InstallGate.PythonScope),
-				NpmScope:   npmScopeFromConfig(agentCfg.InstallGate.NodeScope),
-				MavenScope: mavenScopeFromConfig(agentCfg.InstallGate.MavenScope),
-				NuGetScope:     nugetScopeFromConfig(agentCfg.InstallGate.NuGetScope),
-				UvScope:        uvScopeFromConfig(agentCfg.InstallGate.UvScope),
-				PdmScope:       pdmScopeFromConfig(agentCfg.InstallGate.PdmScope),
-				GradleScope:    gradleScopeFromConfig(agentCfg.InstallGate.GradleScope),
-				SbtScope:       sbtScopeFromConfig(agentCfg.InstallGate.SbtScope),
-				YarnBerryScope: yarnBerryScopeFromConfig(agentCfg.InstallGate.YarnBerryScope),
-			})
+			res, errs := installgate.Apply(igMap, installGateApplyOptions(agentCfg, installgate.MarkerFields{
+				Version: igMap.Version,
+				KeyID:   envelopeKeyID(envelope),
+				Applied: time.Now().UTC(),
+			}))
 			for _, e := range errs {
 				log.Warn("install-gate writer", slog.String("err", e.Error()))
 			}
@@ -532,6 +552,36 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 						res.Sbt.Path, res.Sbt.Changed, res.Sbt.Removed,
 						res.YarnBerry.Path, res.YarnBerry.Changed, res.YarnBerry.Removed))
 			}
+		}
+	} else {
+		// Per-host opt-out: agent.conf [install_gate] enabled = false.
+		// If we previously ran with enabled=true, host config files
+		// may still be in place — tear them down on first cycle so
+		// the disable transition takes effect immediately rather
+		// than waiting for the host to be re-imaged.  No-op when
+		// nothing was Sentari-managed (operator-curated configs are
+		// preserved by the per-writer isSentariManaged guard).
+		res, errs := installgate.RemoveAll(installGateApplyOptions(agentCfg, installgate.MarkerFields{}))
+		for _, e := range errs {
+			log.Warn("install-gate teardown (per-host disable)", slog.String("err", e.Error()))
+		}
+		if res.AnyChanged() {
+			log.Info("install-gate disabled by agent.conf; removed pre-existing host configs",
+				slog.Bool("pip_removed", res.Pip.Removed),
+				slog.Bool("npm_removed", res.Npm.Removed),
+				slog.Bool("maven_removed", res.Maven.Removed),
+				slog.Bool("nuget_removed", res.NuGet.Removed),
+				slog.Bool("uv_removed", res.Uv.Removed),
+				slog.Bool("pdm_removed", res.Pdm.Removed),
+				slog.Bool("gradle_removed", res.Gradle.Removed),
+				slog.Bool("sbt_removed", res.Sbt.Removed),
+				slog.Bool("yarnberry_removed", res.YarnBerry.Removed),
+			)
+			logAudit(auditLog, "install_gate.disabled_by_config",
+				fmt.Sprintf("pip_removed=%t npm_removed=%t maven_removed=%t nuget_removed=%t "+
+					"uv_removed=%t pdm_removed=%t gradle_removed=%t sbt_removed=%t yarnberry_removed=%t",
+					res.Pip.Removed, res.Npm.Removed, res.Maven.Removed, res.NuGet.Removed,
+					res.Uv.Removed, res.Pdm.Removed, res.Gradle.Removed, res.Sbt.Removed, res.YarnBerry.Removed))
 		}
 	}
 
@@ -860,6 +910,27 @@ func envelopeKeyID(envelope []byte) string {
 		return meta.KeyID
 	}
 	return "primary"
+}
+
+// installGateApplyOptions packages the per-ecosystem scope decisions
+// from agent.conf into a single ApplyOptions struct.  Used both when
+// applying a verified policy map (caller fills in marker) and when
+// removing all configs on disable transitions (RemoveAll uses an
+// empty marker — writers don't reference Marker on the no-endpoint
+// removal branch).
+func installGateApplyOptions(cfg config.AgentConfig, marker installgate.MarkerFields) installgate.ApplyOptions {
+	return installgate.ApplyOptions{
+		Marker:         marker,
+		PipScope:       pipScopeFromConfig(cfg.InstallGate.PythonScope),
+		NpmScope:       npmScopeFromConfig(cfg.InstallGate.NodeScope),
+		MavenScope:     mavenScopeFromConfig(cfg.InstallGate.MavenScope),
+		NuGetScope:     nugetScopeFromConfig(cfg.InstallGate.NuGetScope),
+		UvScope:        uvScopeFromConfig(cfg.InstallGate.UvScope),
+		PdmScope:       pdmScopeFromConfig(cfg.InstallGate.PdmScope),
+		GradleScope:    gradleScopeFromConfig(cfg.InstallGate.GradleScope),
+		SbtScope:       sbtScopeFromConfig(cfg.InstallGate.SbtScope),
+		YarnBerryScope: yarnBerryScopeFromConfig(cfg.InstallGate.YarnBerryScope),
+	}
 }
 
 // logAudit writes an audit entry and logs to stderr on failure.
