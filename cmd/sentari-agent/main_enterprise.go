@@ -406,6 +406,15 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 		} else if cachedMap != nil {
 			currentVersion = cachedMap.Version
 		}
+		// When the server-disabled marker is present, force a full
+		// fetch (currentVersion=0).  Otherwise FetchInstallGateMap's
+		// "version <= currentVersion → return (nil, nil, nil)" path
+		// would mask a server re-enable that publishes the same
+		// version we already have cached, leaving the marker stuck
+		// and configs un-applied indefinitely.
+		if installgate.HasServerDisabledMarker(dataDir) {
+			currentVersion = 0
+		}
 		igMap, envelope, err := client.FetchInstallGateMap(ctx, currentVersion)
 		switch {
 		case errors.Is(err, comms.ErrInstallGateServerDisabled):

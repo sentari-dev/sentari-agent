@@ -65,9 +65,24 @@ func ClearServerDisabledMarker(dataDir string) error {
 }
 
 // HasServerDisabledMarker reports whether the marker exists.  Used
-// at agent startup to decide whether to skip writers on the first
-// cycle until the next /policy-map response clears the marker.
+// to decide whether the agent should force a full /policy-map
+// fetch this cycle (so the next 200 reliably clears the marker).
+//
+// Fail-safe semantics: any stat error other than os.ErrNotExist —
+// e.g., a permission/IO error after the operator chowned the
+// data dir — is treated as "marker present".  Reasoning: when
+// we can't tell whether the marker exists, treating it as
+// present means we err on the side of forcing a fresh fetch
+// (cheap, idempotent) rather than re-applying configs we may
+// already have torn down.
 func HasServerDisabledMarker(dataDir string) bool {
-	_, err := os.Stat(MarkerPath(dataDir))
-	return err == nil
+	if _, err := os.Stat(MarkerPath(dataDir)); err == nil {
+		return true
+	} else if !os.IsNotExist(err) {
+		// Stat failed for some reason other than "file absent" —
+		// e.g., permission denied on the data dir.  Fail-safe: treat
+		// as marker-present so we force a fresh fetch this cycle.
+		return true
+	}
+	return false
 }
