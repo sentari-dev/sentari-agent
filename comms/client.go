@@ -662,6 +662,13 @@ func (c *Client) FetchInstallGateMap(ctx context.Context, currentVersion int) (*
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// 404 + X-Sentari-Install-Gate-Disabled: true is an explicit
+		// tenant-wide disable signal.  Surface it as a distinct error
+		// so the main loop can tear down host configs immediately
+		// (rather than waiting for the 7-day fail-open grace).
+		if isInstallGateServerDisabled(resp) {
+			return nil, nil, ErrInstallGateServerDisabled
+		}
 		return nil, nil, fmt.Errorf("install-gate fetch: status %d", resp.StatusCode)
 	}
 
