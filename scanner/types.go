@@ -111,6 +111,33 @@ type ScanResult struct {
 	// Populated only when ScanContainers is true OR when the caller
 	// explicitly invokes the discoverer; otherwise nil.
 	ContainerTargets []ContainerTargetSummary `json:"container_targets,omitempty"`
+
+	// Tags is the operator-supplied per-host metadata from
+	// ``[agent] tags = ...`` in agent.conf.  Pointer-to-slice
+	// because we need three distinguishable wire states:
+	//
+	//   nil           → field omitted on the wire entirely
+	//                   (older agent / config has no [agent] section)
+	//                   → server leaves device.tags_agent untouched
+	//   &[]string{}   → field serialises as ``"tags": []``
+	//                   (operator wrote ``tags =`` with no values)
+	//                   → server clears device.tags_agent
+	//   &[]string{…}  → field serialises as ``"tags": [...]``
+	//                   → server applies the canonical list
+	//
+	// Plain ``[]string`` + ``omitempty`` would conflate the first
+	// two cases (Go encoding/json treats nil and empty slices both
+	// as "empty" → both omitted from JSON), making "explicit clear"
+	// indistinguishable from "no tags configured".
+	Tags *[]string `json:"tags,omitempty"`
+
+	// Runtime is the auto-detected host classification — one of
+	// ``bare_metal``, ``container``, ``k8s``, ``unknown``.  Sent
+	// on every scan; the server runs the propose-then-approve
+	// workflow (sentari PR #79).  Empty string is back-compat for
+	// older agents — server treats as "field absent" and leaves
+	// ``device.runtime`` untouched.
+	Runtime string `json:"runtime,omitempty"`
 }
 
 // ContainerTargetSummary is the informational shape of a discovered

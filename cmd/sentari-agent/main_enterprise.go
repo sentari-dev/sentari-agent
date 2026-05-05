@@ -26,6 +26,7 @@ import (
 	"github.com/sentari-dev/sentari-agent/comms"
 	"github.com/sentari-dev/sentari-agent/config"
 	"github.com/sentari-dev/sentari-agent/installgate"
+	hostruntime "github.com/sentari-dev/sentari-agent/runtime"
 	"github.com/sentari-dev/sentari-agent/sbom"
 	"github.com/sentari-dev/sentari-agent/scanner"
 	"github.com/sentari-dev/sentari-agent/scanner/containers"
@@ -646,6 +647,14 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 		logAudit(auditLog,"scan.failed", err.Error())
 		return fmt.Errorf("scan: %w", err)
 	}
+
+	// Operator-supplied tags from agent.conf [agent] tags = ...
+	// + auto-detected runtime.  Both shipped on every /scan;
+	// server-side machinery in sentari PR #77 (tags) + #79 (runtime).
+	// Set here rather than inside scanner.Run so the scanner package
+	// stays free of agent-config + runtime-detect awareness.
+	result.Tags = agentCfg.Agent.Tags
+	result.Runtime = hostruntime.Detect()
 
 	// Opt-in container-scan phase.  Failures here never bubble up
 	// — the host scan already succeeded and we don't want one

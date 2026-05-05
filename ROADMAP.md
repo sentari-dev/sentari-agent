@@ -8,6 +8,7 @@ Living document tracking deferred work and future improvements. Items here are i
 
 ## Recently shipped
 
+- **2026-05-05 — Agent tags + runtime emit** (sentari §15a.1 Phase 1b + 2b). Agent now reads `[agent] tags = …` from `agent.conf` and emits operator-supplied tags on every `/scan`. Also auto-detects host runtime (`bare_metal` / `container` / `k8s` / `unknown`) via env + cgroup probes and emits it on every scan. Server-side machinery shipped in [sentari#77](https://github.com/sentari-dev/sentari/pull/77) (tags) + [sentari#79](https://github.com/sentari-dev/sentari/pull/79) (runtime). Plan: [`docs/plans/2026-05-05-agent-tags-runtime-emit.md`](docs/plans/2026-05-05-agent-tags-runtime-emit.md).
 - **2026-05-04 — Install-gate disable-header reaction** (sentari §15a.2 follow-up). Agent now reacts to the server's `X-Sentari-Install-Gate-Disabled: true` response on `/policy-map` by tearing down host configs immediately + persisting a marker so a process restart between disable and re-enable doesn't re-write configs from a stale local cache. Also: when an operator flips `[install_gate] enabled = false` in `agent.conf`, the agent now actively removes any pre-existing Sentari-managed configs (previously it just no-op'd until the 7-day fail-open grace expired). Plan: [`docs/plans/2026-05-04-install-gate-disable-reaction.md`](docs/plans/2026-05-04-install-gate-disable-reaction.md).
 
 ---
