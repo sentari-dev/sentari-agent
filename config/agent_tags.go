@@ -31,14 +31,19 @@ const maxAgentTags = 32
 // parseAgentTags splits an ``[agent] tags`` line on commas, trims
 // whitespace, validates each entry against the regex, dedupes, and
 // sorts.  Invalid entries are logged at WARN and dropped (don't
-// block startup on a typo).  Returns the canonical (sorted, deduped,
-// capped) list — possibly empty.
-func parseAgentTags(value string) []string {
+// block startup on a typo).
+//
+// Returns a *pointer* to a (possibly empty) slice — see
+// ``AgentSection.Tags`` for the wire-state semantics.  This
+// function is only called when the ``tags`` key was actually
+// present in the config, so the return value is always non-nil
+// (caller treats absence-of-key as nil at the AgentSection level).
+func parseAgentTags(value string) *[]string {
+	out := []string{}
 	if strings.TrimSpace(value) == "" {
-		return nil
+		return &out
 	}
 	seen := make(map[string]struct{})
-	var out []string
 	for _, raw := range strings.Split(value, ",") {
 		t := strings.TrimSpace(raw)
 		if t == "" {
@@ -62,5 +67,5 @@ func parseAgentTags(value string) []string {
 			slog.Int("max", maxAgentTags))
 		out = out[:maxAgentTags]
 	}
-	return out
+	return &out
 }

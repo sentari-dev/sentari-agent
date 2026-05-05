@@ -20,8 +20,18 @@ const (
 )
 
 // Detect returns one of the four enum values.  Always succeeds —
-// returns Unknown on any probe error rather than propagating it
-// so the agent's scan cycle is never blocked by detection.
+// the per-OS implementations swallow probe errors.
+//
+// Behaviour today: when a Linux-specific probe (``/proc/1/cgroup``,
+// ``/run/.containerenv``) fails or doesn't exist (macOS, hardened
+// containers with masked ``/proc``, permission denied), the
+// implementation falls through to ``BareMetal`` rather than
+// returning ``Unknown``.  ``Unknown`` is reserved for future
+// scenarios where the detector itself can't make an informed call
+// — e.g. a Windows WMI follow-up that explicitly errors out.
+// Operators who know the auto-detection guessed wrong can override
+// the value via the dashboard's
+// ``PUT /api/v1/inventory/devices/{id}/runtime`` admin endpoint.
 func Detect() string {
 	return detect()
 }

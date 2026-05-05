@@ -38,8 +38,19 @@ type AgentConfig struct {
 // Invalid entries are logged + dropped — don't block agent startup
 // on a single typo.  Cap at 32 entries (parser truncates with a
 // warning if more).
+//
+// ``Tags`` is a *pointer* to a slice so we can distinguish three
+// states on the wire:
+//
+//	nil          → ``[agent]`` section absent OR no ``tags`` key →
+//	               omit the field on /scan → server leaves
+//	               ``device.tags_agent`` untouched (back-compat).
+//	&[]string{}  → operator wrote ``tags =`` with no values →
+//	               serialise as ``"tags": []`` → server clears
+//	               ``device.tags_agent``.
+//	&[]string{…} → populated → server applies the canonical list.
 type AgentSection struct {
-	Tags []string
+	Tags *[]string
 }
 
 // ServerConfig holds server connection settings.
