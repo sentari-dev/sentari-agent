@@ -18,6 +18,28 @@ type AgentConfig struct {
 	Proxy       ProxyConfig
 	Logging     LoggingConfig
 	InstallGate InstallGateConfig
+	Agent       AgentSection
+}
+
+// AgentSection holds operator-supplied per-host metadata that the
+// agent emits on every scan upload.  Sentari §15a.1 Phase 1b —
+// the dashboard-side filtering against these tags shipped in
+// sentari PR #77.
+//
+// INI section:
+//
+//	[agent]
+//	tags = environment:production, team:platform, service:web
+//
+// Each entry must match the same regex the server enforces:
+//
+//	^[a-z][a-z0-9_-]{0,63}:[A-Za-z0-9._-]{1,128}$
+//
+// Invalid entries are logged + dropped — don't block agent startup
+// on a single typo.  Cap at 32 entries (parser truncates with a
+// warning if more).
+type AgentSection struct {
+	Tags []string
 }
 
 // ServerConfig holds server connection settings.
@@ -360,6 +382,13 @@ func (c *AgentConfig) set(section, key, value string) error {
 			default:
 				return fmt.Errorf("invalid yarnberry_scope %q (want user/system)", value)
 			}
+		default:
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
+		}
+	case "agent":
+		switch key {
+		case "tags":
+			c.Agent.Tags = parseAgentTags(value)
 		default:
 			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}
