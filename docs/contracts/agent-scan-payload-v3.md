@@ -17,9 +17,16 @@ fields as empty arrays.
 
 One entry per direct or transitive dependency edge in any project the
 agent discovered. Direct edges have `type='direct'` and `depth=0`.
-Transitive edges have `type='transitive'` and `depth>=1`, with an
-`introduced_by_path` chain of intermediate package names that link
-the transitive back to a direct dependency.
+Transitive edges have `type='transitive'` and `depth>=1`. The
+`introduced_by_path` field is the full resolution path from root to
+leaf, **inclusive of both endpoints** — for the example below,
+`["myapp", "express", "lodash"]` means: root project (`myapp`) →
+`express` → `lodash`.
+
+npm-specific edge types `peer`, `optional`, `dev`, and `test` (the
+latter rare; npm has no first-class `test` scope but the contract
+reserves it for Maven `test` scope and similar) follow the same
+`depth` and `introduced_by_path` rules as `direct`/`transitive`.
 
 ```json
 {
@@ -36,6 +43,11 @@ the transitive back to a direct dependency.
 }
 ```
 
+`scope` is an ecosystem-specific free-form string. Expected values
+include `runtime`, `dev`, `optional`, `peer` for npm;
+`compile`/`runtime`/`test`/`provided` for Maven; the contract does
+not enforce an enum so each scanner emits the native scope label.
+
 `resolved=false` is reserved for Maven BOM-imported deps that the
 agent could not fully resolve without a `mvn` invocation (out of
 scope per the no-binary-invocation constraint).
@@ -51,7 +63,7 @@ between scans.
   "path": "/home/dev/project/package-lock.json",
   "format": "package_lock_v3",
   "ecosystem": "npm",
-  "sha256": "abc123...",
+  "sha256": "a3b4c5d6e7f8a3b4c5d6e7f8a3b4c5d6e7f8a3b4c5d6e7f8a3b4c5d6e7f8a3b4",
   "last_modified": "2026-05-15T10:00:00Z",
   "declared_packages_count": 247,
   "drift_status": "in_sync"
@@ -79,6 +91,16 @@ agent payload.
 Signal-type enum (agent subset):
 `postinstall_script`, `preinstall_script`, `install_script`,
 `unsigned`, `provenance_attested`, `yanked`.
+
+The JSON Schema enum additionally includes server-only values
+(`deprecated`, `maintainer_changed`, `typosquat_suspect`,
+`npm_malware_advisory`) that Celery enrichment tasks write to the
+same table. Agents MUST NOT emit these.
+
+`source` is a free-form string. Agent-emitted signals should set it
+to the scanner module name (e.g. `npm-postinstall-scanner`,
+`pypi-yanked-cache`); the literal `agent` is reserved as a generic
+fallback when no more specific module name applies.
 
 ### `license_evidence: LicenseEvidence[]`
 
