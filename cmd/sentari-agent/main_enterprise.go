@@ -63,6 +63,8 @@ func main() {
 		"Output format for --scan: pretty | explain | json | csv  (default: pretty on stdout, json to --output)")
 	explainFlag := flag.Bool("explain", false,
 		"Shorthand for --format=explain when used with --scan")
+	debugFlag := flag.Bool("debug", false,
+		"Print scan-result field counts (packages, dep edges, lockfiles, supply-chain signals, license evidence) to stderr after the scan")
 
 	serverURLFlag := flag.String("server-url", "", "Override server URL from config (e.g. https://sentari.example.com)")
 	configFlag := flag.String("config", "", "Path to agent config file")
@@ -118,6 +120,7 @@ func main() {
 			outputPath: *outputFlag,
 			format:     *formatFlag,
 			explain:    *explainFlag,
+			debug:      *debugFlag,
 		}))
 	}
 

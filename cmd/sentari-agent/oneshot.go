@@ -23,9 +23,10 @@ import (
 // oneShotOptions carries the flag values a caller resolved from the
 // CLI.  All fields optional: resolveFormat below settles defaults.
 type oneShotOptions struct {
-	outputPath  string // "" = stdout
-	format      string // "" = auto-pick (pretty on stdout, json to file)
-	explain     bool   // shorthand for format="explain"
+	outputPath string // "" = stdout
+	format     string // "" = auto-pick (pretty on stdout, json to file)
+	explain    bool   // shorthand for format="explain"
+	debug      bool   // dump scan-result field counts to stderr after scan
 }
 
 // runOneShot executes a single scan using the supplied scanner
@@ -48,6 +49,18 @@ func runOneShot(ctx context.Context, cfg scanner.Config, opts oneShotOptions) in
 	// sub-scans into the same result.
 	if cfg.ScanContainers {
 		containers.ScanAndAppend(ctx, cfg, result)
+	}
+
+	// --debug: emit v3 payload field counts to stderr so an operator
+	// can sanity-check that the new modules picked something up
+	// without having to grep the formatted output.  Stderr is used
+	// so it doesn't interleave with --output redirection.
+	if opts.debug {
+		fmt.Fprintf(os.Stderr, "Packages: %d\n", len(result.Packages))
+		fmt.Fprintf(os.Stderr, "Dep edges: %d\n", len(result.DepEdges))
+		fmt.Fprintf(os.Stderr, "Lockfiles: %d\n", len(result.Lockfiles))
+		fmt.Fprintf(os.Stderr, "Supply-chain signals: %d\n", len(result.SupplyChainSignals))
+		fmt.Fprintf(os.Stderr, "License evidence: %d\n", len(result.LicenseEvidence))
 	}
 
 	format := resolveOneShotFormat(opts)

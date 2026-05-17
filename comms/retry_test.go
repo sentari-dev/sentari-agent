@@ -243,6 +243,30 @@ func TestDoRequest_OmitsXRequestIDWhenUnbound(t *testing.T) {
 	}
 }
 
+// TestUploadScan_SetsV3PayloadVersionHeader asserts that every
+// /scan upload carries ``X-Sentari-Payload-Version: 3``.  The
+// server's v3 ingest path relies on the header to distinguish
+// "agent looked and found nothing" from "agent doesn't speak v3";
+// if this regresses, v2 agents and v3 agents become
+// indistinguishable on the wire.
+func TestUploadScan_SetsV3PayloadVersionHeader(t *testing.T) {
+	var seen string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("X-Sentari-Payload-Version")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	result := &scanner.ScanResult{DeviceID: "dev-1"}
+	if err := c.UploadScan(context.Background(), result); err != nil {
+		t.Fatalf("UploadScan: %v", err)
+	}
+	if seen != "3" {
+		t.Fatalf("expected X-Sentari-Payload-Version: 3, got %q", seen)
+	}
+}
+
 func TestUploadScan_RetriesOnTransient503(t *testing.T) {
 	// End-to-end: UploadScan goes through the retry path.  Two 503s
 	// then a 200, caller sees nil error.
