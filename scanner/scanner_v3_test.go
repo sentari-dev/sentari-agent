@@ -57,3 +57,63 @@ func TestEnrichWithV3_findsLockfileInSampleProject(t *testing.T) {
 		t.Fatalf("expected an npm package-lock.json entry, got %+v", result.Lockfiles)
 	}
 }
+
+// TestEnrichWithV3_dispatchesNuGetPackagesLock confirms the fix for
+// the previously-empty `case "packages_lock_json"` branch: a project
+// that ships packages.lock.json without a sibling
+// obj/project.assets.json must still produce dep_edges via the
+// lock-only parser.
+func TestEnrichWithV3_dispatchesNuGetPackagesLock(t *testing.T) {
+	root := t.TempDir()
+	lockJSON := `{
+  "version": 1,
+  "dependencies": {
+    "net6.0": {
+      "Newtonsoft.Json": {
+        "type": "Direct",
+        "requested": "[13.0.3, )",
+        "resolved": "13.0.3",
+        "contentHash": "test"
+      }
+    }
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(root, "packages.lock.json"), []byte(lockJSON), 0o644); err != nil {
+		t.Fatalf("write packages.lock.json: %v", err)
+	}
+
+	result := &ScanResult{}
+	enrichWithV3(result, []string{root})
+
+	if len(result.DepEdges) == 0 {
+		t.Fatalf("expected dep edges from packages.lock.json fallback, got 0 (lockfiles=%+v)", result.Lockfiles)
+	}
+}
+
+// TestEnrichWithV3_skipsHomeCacheWalksWhenEcosystemNotDiscovered
+// confirms the fix that gates ~/.m2/repository and ~/.nuget/packages
+// walks behind a discovered project of that ecosystem.  Strategy:
+// run enrichWithV3 against a tempdir containing only a pypi lockfile
+// and assert no Maven/NuGet supply-chain signals or license rows ever
+// appear, regardless of what's in the operator's actual home dir.
+func TestEnrichWithV3_skipsHomeCacheWalksWhenEcosystemNotDiscovered(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "requirements.txt"), []byte("requests==2.31.0\n"), 0o644); err != nil {
+		t.Fatalf("write requirements.txt: %v", err)
+	}
+
+	result := &ScanResult{}
+	enrichWithV3(result, []string{root})
+
+	for _, s := range result.SupplyChainSignals {
+		if s.Ecosystem == "maven" || s.Ecosystem == "nuget" {
+			t.Errorf("unexpected %s supply-chain signal from scoped pypi-only scan: %+v", s.Ecosystem, s)
+		}
+	}
+	for _, lic := range result.LicenseEvidence {
+		if lic.Ecosystem == "maven" || lic.Ecosystem == "nuget" {
+			t.Errorf("unexpected %s license evidence from scoped pypi-only scan: %+v", lic.Ecosystem, lic)
+		}
+	}
+}

@@ -14,10 +14,16 @@
 //     parser panic or a single malformed lockfile must never abort
 //     the v2 scan path — the scan is already complete when this
 //     runs, and the worst case is "v3 sections empty for this host".
+//     Panic safety is enforced by routing every module call through
+//     safeCall below, which recovers and logs the panic so fleet
+//     telemetry surfaces the underlying bug.
 //
 //   - Maven (~/.m2/repository) and NuGet (~/.nuget/packages) caches
 //     are user-global, not per-project.  They're walked once per
-//     scan invocation, not per detected root.
+//     scan invocation, and only when the scan actually discovered a
+//     project of that ecosystem — walking these caches on every
+//     scoped invocation would surprise operators who pinned
+//     --scan-root to an unrelated tree.
 //
 //   - PyPI license / supply-chain extraction needs a site-packages
 //     directory.  Lockfile discovery only points us at the project
@@ -45,6 +51,19 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner/lockfiles"
 	"github.com/sentari-dev/sentari-agent/scanner/supplychain"
 )
+
+// safeCall runs fn and absorbs any panic, logging it with a label so
+// the underlying bug surfaces in fleet telemetry without aborting the
+// scan.  This is the implementation of the panic-safety guarantee
+// documented at the top of this file.
+func safeCall(label string, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("v3 enrichment panicked; continuing", "module", label, "panic", r)
+		}
+	}()
+	fn()
+}
 
 // v3DiscoveryRoots returns the list of filesystem roots that should
 // be walked for lockfile discovery.
@@ -96,87 +115,125 @@ func enrichWithV3(result *ScanResult, roots []string) {
 		if root == "" {
 			continue
 		}
-		metas, err := lockfiles.DiscoverInRoot(root)
-		if err != nil {
-			slog.Warn("v3 lockfile discovery encountered errors", "root", root, "err", err.Error())
-			// Non-fatal — metas may still contain partial results.
-		}
+		var metas []deptree.LockfileMeta
+		safeCall("lockfiles.DiscoverInRoot", func() {
+			var derr error
+			metas, derr = lockfiles.DiscoverInRoot(root)
+			if derr != nil {
+				slog.Warn("v3 lockfile discovery encountered errors", "root", root, "err", derr.Error())
+				// Non-fatal — metas may still contain partial results.
+			}
+		})
 		result.Lockfiles = append(result.Lockfiles, metas...)
 
 		for _, meta := range metas {
+			meta := meta // capture for closures
 			dir := filepath.Dir(meta.Path)
 			switch meta.Format {
 			case "package_lock_v2", "package_lock_v3":
 				npmProjectDirs[dir] = struct{}{}
-				if edges, err := deptree.ParseNpmPackageLock(meta.Path); err != nil {
-					slog.Warn("v3 npm package-lock parse failed", "path", meta.Path, "err", err.Error())
-				} else {
-					result.DepEdges = append(result.DepEdges, edges...)
-				}
-			case "yarn_v1":
-				npmProjectDirs[dir] = struct{}{}
-				pkgJSON := filepath.Join(dir, "package.json")
-				if edges, err := deptree.ParseYarnLock(meta.Path, pkgJSON); err != nil {
-					slog.Warn("v3 yarn lock parse failed", "path", meta.Path, "err", err.Error())
-				} else {
-					result.DepEdges = append(result.DepEdges, edges...)
-				}
-			case "pnpm_lock":
-				npmProjectDirs[dir] = struct{}{}
-				if edges, err := deptree.ParsePnpmLock(meta.Path); err != nil {
-					slog.Warn("v3 pnpm lock parse failed", "path", meta.Path, "err", err.Error())
-				} else {
-					result.DepEdges = append(result.DepEdges, edges...)
-				}
-			case "pom_xml":
-				if home, herr := os.UserHomeDir(); herr == nil {
-					m2 := filepath.Join(home, ".m2", "repository")
-					if edges, err := deptree.ParseMavenPom(meta.Path, m2); err != nil {
-						slog.Warn("v3 maven pom parse failed", "path", meta.Path, "err", err.Error())
+				safeCall("deptree.ParseNpmPackageLock", func() {
+					if edges, err := deptree.ParseNpmPackageLock(meta.Path); err != nil {
+						slog.Warn("v3 npm package-lock parse failed", "path", meta.Path, "err", err.Error())
 					} else {
 						result.DepEdges = append(result.DepEdges, edges...)
 					}
-				}
+				})
+			case "yarn_v1":
+				npmProjectDirs[dir] = struct{}{}
+				pkgJSON := filepath.Join(dir, "package.json")
+				safeCall("deptree.ParseYarnLock", func() {
+					if edges, err := deptree.ParseYarnLock(meta.Path, pkgJSON); err != nil {
+						slog.Warn("v3 yarn lock parse failed", "path", meta.Path, "err", err.Error())
+					} else {
+						result.DepEdges = append(result.DepEdges, edges...)
+					}
+				})
+			case "pnpm_lock":
+				npmProjectDirs[dir] = struct{}{}
+				safeCall("deptree.ParsePnpmLock", func() {
+					if edges, err := deptree.ParsePnpmLock(meta.Path); err != nil {
+						slog.Warn("v3 pnpm lock parse failed", "path", meta.Path, "err", err.Error())
+					} else {
+						result.DepEdges = append(result.DepEdges, edges...)
+					}
+				})
+			case "pom_xml":
+				safeCall("deptree.ParseMavenPom", func() {
+					if home, herr := os.UserHomeDir(); herr == nil {
+						m2 := filepath.Join(home, ".m2", "repository")
+						if edges, err := deptree.ParseMavenPom(meta.Path, m2); err != nil {
+							slog.Warn("v3 maven pom parse failed", "path", meta.Path, "err", err.Error())
+						} else {
+							result.DepEdges = append(result.DepEdges, edges...)
+						}
+					}
+				})
 			case "project_assets_json":
-				if edges, err := deptree.ParseNuGetProjectAssets(meta.Path); err != nil {
-					slog.Warn("v3 nuget project.assets parse failed", "path", meta.Path, "err", err.Error())
-				} else {
-					result.DepEdges = append(result.DepEdges, edges...)
-				}
+				safeCall("deptree.ParseNuGetProjectAssets", func() {
+					if edges, err := deptree.ParseNuGetProjectAssets(meta.Path); err != nil {
+						slog.Warn("v3 nuget project.assets parse failed", "path", meta.Path, "err", err.Error())
+					} else {
+						result.DepEdges = append(result.DepEdges, edges...)
+					}
+				})
 			case "uv_lock":
 				pypiProjectDirs[dir] = struct{}{}
-				if edges, err := deptree.ParseUvLock(meta.Path); err != nil {
-					slog.Warn("v3 uv.lock parse failed", "path", meta.Path, "err", err.Error())
-				} else {
-					result.DepEdges = append(result.DepEdges, edges...)
-				}
+				safeCall("deptree.ParseUvLock", func() {
+					if edges, err := deptree.ParseUvLock(meta.Path); err != nil {
+						slog.Warn("v3 uv.lock parse failed", "path", meta.Path, "err", err.Error())
+					} else {
+						result.DepEdges = append(result.DepEdges, edges...)
+					}
+				})
 			case "poetry_lock":
 				pypiProjectDirs[dir] = struct{}{}
-				if edges, err := deptree.ParsePoetryLock(meta.Path); err != nil {
-					slog.Warn("v3 poetry.lock parse failed", "path", meta.Path, "err", err.Error())
-				} else {
-					result.DepEdges = append(result.DepEdges, edges...)
-				}
+				safeCall("deptree.ParsePoetryLock", func() {
+					if edges, err := deptree.ParsePoetryLock(meta.Path); err != nil {
+						slog.Warn("v3 poetry.lock parse failed", "path", meta.Path, "err", err.Error())
+					} else {
+						result.DepEdges = append(result.DepEdges, edges...)
+					}
+				})
 			case "pipfile_lock":
 				pypiProjectDirs[dir] = struct{}{}
-				if edges, err := deptree.ParsePipfileLock(meta.Path); err != nil {
-					slog.Warn("v3 Pipfile.lock parse failed", "path", meta.Path, "err", err.Error())
-				} else {
-					result.DepEdges = append(result.DepEdges, edges...)
-				}
+				safeCall("deptree.ParsePipfileLock", func() {
+					if edges, err := deptree.ParsePipfileLock(meta.Path); err != nil {
+						slog.Warn("v3 Pipfile.lock parse failed", "path", meta.Path, "err", err.Error())
+					} else {
+						result.DepEdges = append(result.DepEdges, edges...)
+					}
+				})
 			case "requirements_txt":
 				pypiProjectDirs[dir] = struct{}{}
-				if edges, err := deptree.ParseRequirementsTxt(meta.Path); err != nil {
-					slog.Warn("v3 requirements.txt parse failed", "path", meta.Path, "err", err.Error())
-				} else {
-					result.DepEdges = append(result.DepEdges, edges...)
-				}
+				safeCall("deptree.ParseRequirementsTxt", func() {
+					if edges, err := deptree.ParseRequirementsTxt(meta.Path); err != nil {
+						slog.Warn("v3 requirements.txt parse failed", "path", meta.Path, "err", err.Error())
+					} else {
+						result.DepEdges = append(result.DepEdges, edges...)
+					}
+				})
 			case "packages_lock_json":
-				// No dep-tree parser for packages.lock.json yet — the
-				// project.assets.json sibling (always present after
-				// `dotnet restore`) carries the resolved graph and is
-				// handled by the project_assets_json case above.  The
-				// lockfile metadata itself is still recorded.
+				// Some SDK-style projects ship packages.lock.json without
+				// a sibling obj/project.assets.json (the latter is
+				// produced by `dotnet restore` and carries a richer dep
+				// graph).  Dispatch the lock-only parser when no
+				// assets.json was discovered for the same project to
+				// avoid double-counting.
+				siblingAssets := filepath.Join(dir, "obj", "project.assets.json")
+				if _, err := os.Stat(siblingAssets); err == nil {
+					// assets.json is present → it's already handled by
+					// the project_assets_json case (which exposes the
+					// resolved dep graph).  Skip the lock-only fallback.
+					continue
+				}
+				safeCall("deptree.ParseNuGetPackagesLock", func() {
+					if edges, err := deptree.ParseNuGetPackagesLock(meta.Path); err != nil {
+						slog.Warn("v3 nuget packages.lock parse failed", "path", meta.Path, "err", err.Error())
+					} else {
+						result.DepEdges = append(result.DepEdges, edges...)
+					}
+				})
 			}
 		}
 	}
@@ -188,60 +245,99 @@ func enrichWithV3(result *ScanResult, roots []string) {
 		if err != nil || !st.IsDir() {
 			continue
 		}
-		if signals, err := supplychain.DetectInNodeModules(nm); err != nil {
-			slog.Warn("v3 npm supply-chain detection failed", "node_modules", nm, "err", err.Error())
-		} else {
-			result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
-		}
-		if evidence, err := licenses.ExtractNpm(nm); err != nil {
-			slog.Warn("v3 npm license extraction failed", "node_modules", nm, "err", err.Error())
-		} else {
-			result.LicenseEvidence = append(result.LicenseEvidence, evidence...)
-		}
+		safeCall("supplychain.DetectInNodeModules", func() {
+			if signals, err := supplychain.DetectInNodeModules(nm); err != nil {
+				slog.Warn("v3 npm supply-chain detection failed", "node_modules", nm, "err", err.Error())
+			} else {
+				result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
+			}
+		})
+		safeCall("licenses.ExtractNpm", func() {
+			if evidence, err := licenses.ExtractNpm(nm); err != nil {
+				slog.Warn("v3 npm license extraction failed", "node_modules", nm, "err", err.Error())
+			} else {
+				result.LicenseEvidence = append(result.LicenseEvidence, evidence...)
+			}
+		})
 	}
 
 	// Phase 3: PyPI venv site-packages — best-effort under each project dir.
 	for dir := range pypiProjectDirs {
 		for _, sp := range candidateSitePackages(dir) {
-			if signals, err := supplychain.DetectInPipCache(sp); err != nil {
-				slog.Warn("v3 pypi supply-chain detection failed", "site_packages", sp, "err", err.Error())
-			} else {
-				result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
-			}
-			if evidence, err := licenses.ExtractPyPI(sp); err != nil {
-				slog.Warn("v3 pypi license extraction failed", "site_packages", sp, "err", err.Error())
-			} else {
-				result.LicenseEvidence = append(result.LicenseEvidence, evidence...)
-			}
+			sp := sp
+			safeCall("supplychain.DetectInPipCache", func() {
+				if signals, err := supplychain.DetectInPipCache(sp); err != nil {
+					slog.Warn("v3 pypi supply-chain detection failed", "site_packages", sp, "err", err.Error())
+				} else {
+					result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
+				}
+			})
+			safeCall("licenses.ExtractPyPI", func() {
+				if evidence, err := licenses.ExtractPyPI(sp); err != nil {
+					slog.Warn("v3 pypi license extraction failed", "site_packages", sp, "err", err.Error())
+				} else {
+					result.LicenseEvidence = append(result.LicenseEvidence, evidence...)
+				}
+			})
 		}
 	}
 
-	// Phase 4: user-global Maven + NuGet caches — once per scan run.
-	if home, err := os.UserHomeDir(); err == nil {
-		m2 := filepath.Join(home, ".m2", "repository")
-		if st, err := os.Stat(m2); err == nil && st.IsDir() {
-			if signals, err := supplychain.DetectInM2(m2); err != nil {
-				slog.Warn("v3 maven supply-chain detection failed", "m2", m2, "err", err.Error())
-			} else {
-				result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
-			}
-			if evidence, err := licenses.ExtractMaven(m2); err != nil {
-				slog.Warn("v3 maven license extraction failed", "m2", m2, "err", err.Error())
-			} else {
-				result.LicenseEvidence = append(result.LicenseEvidence, evidence...)
-			}
+	// Phase 4: user-global Maven + NuGet caches — once per scan run,
+	// gated on whether the scan actually discovered a project of that
+	// ecosystem.  Walking these caches on every scoped --scan-root
+	// invocation is surprising; the user asked for a specific tree and
+	// the scanner enumerating package caches under $HOME violates that
+	// scope unless we have a concrete reason (a discovered pom.xml /
+	// NuGet lockfile) to believe the operator cares.
+	hasMaven, hasNuget := false, false
+	for _, lf := range result.Lockfiles {
+		switch lf.Ecosystem {
+		case "maven":
+			hasMaven = true
+		case "nuget":
+			hasNuget = true
 		}
-		nuget := filepath.Join(home, ".nuget", "packages")
-		if st, err := os.Stat(nuget); err == nil && st.IsDir() {
-			if signals, err := supplychain.DetectInNuGetCache(nuget); err != nil {
-				slog.Warn("v3 nuget supply-chain detection failed", "cache", nuget, "err", err.Error())
-			} else {
-				result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
+	}
+
+	if hasMaven || hasNuget {
+		if home, err := os.UserHomeDir(); err == nil {
+			if hasMaven {
+				m2 := filepath.Join(home, ".m2", "repository")
+				if st, err := os.Stat(m2); err == nil && st.IsDir() {
+					safeCall("supplychain.DetectInM2", func() {
+						if signals, err := supplychain.DetectInM2(m2); err != nil {
+							slog.Warn("v3 maven supply-chain detection failed", "m2", m2, "err", err.Error())
+						} else {
+							result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
+						}
+					})
+					safeCall("licenses.ExtractMaven", func() {
+						if evidence, err := licenses.ExtractMaven(m2); err != nil {
+							slog.Warn("v3 maven license extraction failed", "m2", m2, "err", err.Error())
+						} else {
+							result.LicenseEvidence = append(result.LicenseEvidence, evidence...)
+						}
+					})
+				}
 			}
-			if evidence, err := licenses.ExtractNuGet(nuget); err != nil {
-				slog.Warn("v3 nuget license extraction failed", "cache", nuget, "err", err.Error())
-			} else {
-				result.LicenseEvidence = append(result.LicenseEvidence, evidence...)
+			if hasNuget {
+				nuget := filepath.Join(home, ".nuget", "packages")
+				if st, err := os.Stat(nuget); err == nil && st.IsDir() {
+					safeCall("supplychain.DetectInNuGetCache", func() {
+						if signals, err := supplychain.DetectInNuGetCache(nuget); err != nil {
+							slog.Warn("v3 nuget supply-chain detection failed", "cache", nuget, "err", err.Error())
+						} else {
+							result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
+						}
+					})
+					safeCall("licenses.ExtractNuGet", func() {
+						if evidence, err := licenses.ExtractNuGet(nuget); err != nil {
+							slog.Warn("v3 nuget license extraction failed", "cache", nuget, "err", err.Error())
+						} else {
+							result.LicenseEvidence = append(result.LicenseEvidence, evidence...)
+						}
+					})
+				}
 			}
 		}
 	}
