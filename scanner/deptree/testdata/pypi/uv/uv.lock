@@ -1,0 +1,19 @@
+version = 1
+
+[[package]]
+name = "myapp"
+version = "0.1.0"
+
+[[package.dependencies]]
+name = "requests"
+
+[[package]]
+name = "requests"
+version = "2.31.0"
+
+[[package.dependencies]]
+name = "urllib3"
+
+[[package]]
+name = "urllib3"
+version = "2.0.7"

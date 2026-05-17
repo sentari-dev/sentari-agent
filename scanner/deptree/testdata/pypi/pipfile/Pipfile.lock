@@ -1,0 +1,9 @@
+{
+  "_meta": {"hash": {"sha256": "test"}, "pipfile-spec": 6},
+  "default": {
+    "requests": {"version": "==2.31.0"}
+  },
+  "develop": {
+    "pytest": {"version": "==7.4.0"}
+  }
+}
