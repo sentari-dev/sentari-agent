@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sentari.dev/contracts/agent-scan-payload-v3.json",
+  "title": "Sentari agent scan payload v3 — additions",
+  "description": "Schema for the 4 new array fields added in v3.",
+  "type": "object",
+  "properties": {
+    "dep_edges": { "type": "array", "items": { "$ref": "#/definitions/DepEdge" } },
+    "lockfiles": { "type": "array", "items": { "$ref": "#/definitions/LockfileMeta" } },
+    "supply_chain_signals": { "type": "array", "items": { "$ref": "#/definitions/SupplyChainSignal" } },
+    "license_evidence": { "type": "array", "items": { "$ref": "#/definitions/LicenseEvidence" } }
+  },
+  "definitions": {
+    "DepEdge": {
+      "type": "object",
+      "required": ["parent_name", "parent_version", "child_name", "child_version", "ecosystem", "type", "scope", "depth", "introduced_by_path", "resolved"],
+      "properties": {
+        "parent_name": { "type": "string" },
+        "parent_version": { "type": "string" },
+        "child_name": { "type": "string" },
+        "child_version": { "type": "string" },
+        "ecosystem": { "type": "string", "enum": ["pypi", "npm", "maven", "nuget"] },
+        "type": { "type": "string", "enum": ["direct", "transitive", "peer", "optional", "dev", "test"] },
+        "scope": { "type": "string" },
+        "depth": { "type": "integer", "minimum": 0 },
+        "introduced_by_path": { "type": "array", "items": { "type": "string" } },
+        "resolved": { "type": "boolean" }
+      }
+    },
+    "LockfileMeta": {
+      "type": "object",
+      "required": ["path", "format", "ecosystem", "sha256", "last_modified", "declared_packages_count", "drift_status"],
+      "properties": {
+        "path": { "type": "string" },
+        "format": { "type": "string", "enum": ["package_lock_v2", "package_lock_v3", "yarn_v1", "yarn_berry", "pnpm_lock", "pom_xml", "packages_lock_json", "project_assets_json", "poetry_lock", "uv_lock", "pipfile_lock", "requirements_txt"] },
+        "ecosystem": { "type": "string", "enum": ["pypi", "npm", "maven", "nuget"] },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "last_modified": { "type": "string", "format": "date-time" },
+        "declared_packages_count": { "type": "integer", "minimum": 0 },
+        "drift_status": { "type": "string", "enum": ["in_sync", "drift_detected", "unknown"] }
+      }
+    },
+    "SupplyChainSignal": {
+      "type": "object",
+      "required": ["package_name", "package_version", "ecosystem", "signal_type", "severity", "source"],
+      "properties": {
+        "package_name": { "type": "string" },
+        "package_version": { "type": "string" },
+        "ecosystem": { "type": "string" },
+        "signal_type": { "type": "string", "enum": ["postinstall_script", "preinstall_script", "install_script", "unsigned", "provenance_attested", "yanked", "deprecated", "maintainer_changed", "typosquat_suspect", "npm_malware_advisory"] },
+        "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
+        "source": { "type": "string" },
+        "raw": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "LicenseEvidence": {
+      "type": "object",
+      "required": ["package_name", "package_version", "ecosystem", "source", "confidence"],
+      "properties": {
+        "package_name": { "type": "string" },
+        "package_version": { "type": "string" },
+        "ecosystem": { "type": "string" },
+        "spdx_id": { "type": ["string", "null"] },
+        "source": { "type": "string", "enum": ["trove", "spdx_pkg", "pom", "nuspec", "copyright_file", "rpm_header", "server_enriched"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "raw_text": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
