@@ -22,6 +22,12 @@ func DetectInM2(m2Dir string) ([]deptree.SupplyChainSignal, error) {
 		if err != nil {
 			return nil
 		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if d.IsDir() {
 			return nil
 		}

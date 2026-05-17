@@ -9,7 +9,12 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
+
+// maxNuspecBytes caps a single .nuspec read.  These are XML metadata
+// files; 1 MiB is generous (typical < 4 KiB).
+const maxNuspecBytes = 1 << 20 // 1 MiB
 
 // DetectInNuGetCache walks ~/.nuget/packages (or whatever path is
 // passed) and emits `unsigned` for any package that lacks an adjacent
@@ -23,7 +28,16 @@ func DetectInNuGetCache(cacheRoot string) ([]deptree.SupplyChainSignal, error) {
 	var signals []deptree.SupplyChainSignal
 
 	walkErr := filepath.WalkDir(cacheRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() {
 			return nil
 		}
 		// We want to inspect leaf "version" directories. Heuristic:
@@ -69,7 +83,7 @@ func findNuspec(dir string) string {
 }
 
 func nugetCoordsFromNuspec(path string) (string, string) {
-	raw, err := os.ReadFile(path)
+	raw, err := safeio.ReadFile(path, maxNuspecBytes)
 	if err != nil {
 		return "", ""
 	}

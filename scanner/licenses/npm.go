@@ -9,7 +9,12 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
+
+// maxPackageJSONBytes caps a single ``package.json`` read in
+// node_modules.  Mirrors scanner/npm/parser.go's local constant.
+const maxPackageJSONBytes = 4 << 20 // 4 MiB
 
 // ExtractNpm walks node_modules and reads each package's package.json
 // for the `license` (string SPDX) or `licenses` (array of {type,url}).
@@ -18,14 +23,23 @@ import (
 func ExtractNpm(nodeModulesDir string) ([]deptree.LicenseEvidence, error) {
 	var out []deptree.LicenseEvidence
 	walkErr := filepath.WalkDir(nodeModulesDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() {
 			return nil
 		}
 		if d.Name() == "node_modules" || strings.HasPrefix(d.Name(), "@") {
 			return nil
 		}
 		pkgJSON := filepath.Join(path, "package.json")
-		raw, err := os.ReadFile(pkgJSON)
+		raw, err := safeio.ReadFile(pkgJSON, maxPackageJSONBytes)
 		if err != nil {
 			return nil
 		}

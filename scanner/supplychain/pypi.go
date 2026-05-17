@@ -8,7 +8,13 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
+
+// maxMETADATABytes caps METADATA / YANKED reads under dist-info.  PyPI
+// METADATA can run a few hundred KB for verbose descriptions; 1 MiB is
+// well above realistic and below abusive.
+const maxMETADATABytes = 1 << 20 // 1 MiB
 
 // DetectInPipCache walks pip's installed-distribution metadata in
 // `sitePackagesDir` (e.g. `<venv>/lib/python3.X/site-packages`). For
@@ -31,14 +37,23 @@ func DetectInPipCache(sitePackagesDir string) ([]deptree.SupplyChainSignal, erro
 	var signals []deptree.SupplyChainSignal
 
 	walkErr := filepath.WalkDir(sitePackagesDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() {
 			return nil
 		}
 		if !strings.HasSuffix(d.Name(), ".dist-info") {
 			return nil
 		}
 		metadataPath := filepath.Join(path, "METADATA")
-		raw, err := os.ReadFile(metadataPath)
+		raw, err := safeio.ReadFile(metadataPath, maxMETADATABytes)
 		if err != nil {
 			return nil
 		}
@@ -48,7 +63,7 @@ func DetectInPipCache(sitePackagesDir string) ([]deptree.SupplyChainSignal, erro
 		}
 		if _, err := os.Stat(filepath.Join(path, "YANKED")); err == nil {
 			reason := ""
-			if y, err := os.ReadFile(filepath.Join(path, "YANKED")); err == nil {
+			if y, err := safeio.ReadFile(filepath.Join(path, "YANKED"), maxMETADATABytes); err == nil {
 				reason = strings.TrimSpace(string(y))
 			}
 			rawSignal := map[string]interface{}{}

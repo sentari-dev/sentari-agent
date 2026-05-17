@@ -20,7 +20,12 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
+
+// maxMETADATABytes caps a single dist-info/METADATA read.  1 MiB is
+// well above realistic PyPI metadata sizes.
+const maxMETADATABytes = 1 << 20 // 1 MiB
 
 // ExtractPyPI walks a site-packages dir, reading each *.dist-info/METADATA
 // for one of: PEP 639 License-Expression (preferred, conf 0.95),
@@ -29,11 +34,20 @@ import (
 func ExtractPyPI(sitePackagesDir string) ([]deptree.LicenseEvidence, error) {
 	var out []deptree.LicenseEvidence
 	walkErr := filepath.WalkDir(sitePackagesDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() || !strings.HasSuffix(d.Name(), ".dist-info") {
+		if err != nil {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() || !strings.HasSuffix(d.Name(), ".dist-info") {
 			return nil
 		}
 		metaPath := filepath.Join(path, "METADATA")
-		raw, err := os.ReadFile(metaPath)
+		raw, err := safeio.ReadFile(metaPath, maxMETADATABytes)
 		if err != nil {
 			return filepath.SkipDir
 		}

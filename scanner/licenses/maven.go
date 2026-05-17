@@ -9,7 +9,12 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
+
+// maxPOMBytes caps a single .pom read in ~/.m2/repository.  POMs are
+// declarative XML; 1 MiB is well above realistic sizes.
+const maxPOMBytes = 1 << 20 // 1 MiB
 
 // ExtractMaven walks ~/.m2/repository for *.pom files and reads each
 // pom's <licenses><license><name> entries. Confidence 0.9 — POM
@@ -18,13 +23,22 @@ import (
 func ExtractMaven(m2Dir string) ([]deptree.LicenseEvidence, error) {
 	var out []deptree.LicenseEvidence
 	walkErr := filepath.WalkDir(m2Dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		if !strings.HasSuffix(path, ".pom") {
 			return nil
 		}
-		raw, err := os.ReadFile(path)
+		raw, err := safeio.ReadFile(path, maxPOMBytes)
 		if err != nil {
 			return nil
 		}

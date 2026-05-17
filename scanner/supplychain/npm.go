@@ -14,7 +14,14 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
+
+// maxPackageJSONBytes caps any single ``package.json`` read.  Mirrors
+// scanner/npm/parser.go's local constant — a hostile node_modules
+// dependency cannot use safeio's symlink-refusal + size cap to push
+// arbitrary content into a scan payload.
+const maxPackageJSONBytes = 4 << 20 // 4 MiB
 
 // DetectInNodeModules walks `nodeModulesRoot` (typically
 // `<project>/node_modules`) and produces one or more signals per
@@ -43,6 +50,15 @@ func DetectInNodeModules(nodeModulesRoot string) ([]deptree.SupplyChainSignal, e
 		if err != nil {
 			return nil
 		}
+		// Symlinks: skip dirs entirely, ignore file leaves.  Defends
+		// against a node_modules entry symlinking to /etc or to an
+		// attacker-controlled tree.
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if !d.IsDir() {
 			return nil
 		}
@@ -52,7 +68,7 @@ func DetectInNodeModules(nodeModulesRoot string) ([]deptree.SupplyChainSignal, e
 			return nil
 		}
 		pkgJSON := filepath.Join(path, "package.json")
-		raw, err := os.ReadFile(pkgJSON)
+		raw, err := safeio.ReadFile(pkgJSON, maxPackageJSONBytes)
 		if err != nil {
 			return nil
 		}

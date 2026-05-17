@@ -9,7 +9,12 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
+
+// maxNuspecBytes caps a single .nuspec read.  Tight cap (1 MiB) since
+// these are short XML metadata files.
+const maxNuspecBytes = 1 << 20 // 1 MiB
 
 // ExtractNuGet walks the NuGet packages cache for *.nuspec files. The
 // modern nuspec uses <license type="expression">SPDX</license> (conf
@@ -17,13 +22,22 @@ import (
 func ExtractNuGet(cacheRoot string) ([]deptree.LicenseEvidence, error) {
 	var out []deptree.LicenseEvidence
 	walkErr := filepath.WalkDir(cacheRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		if !strings.HasSuffix(path, ".nuspec") {
 			return nil
 		}
-		raw, err := os.ReadFile(path)
+		raw, err := safeio.ReadFile(path, maxNuspecBytes)
 		if err != nil {
 			return nil
 		}
