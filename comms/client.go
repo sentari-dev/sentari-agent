@@ -562,6 +562,14 @@ func (c *Client) UploadScan(ctx context.Context, result *scanner.ScanResult) err
 			return nil, err
 		}
 		r.Header.Set("Content-Type", "application/json")
+		// Phase 3 payload version marker.  The server uses this to
+		// distinguish v2 payloads (no dep_edges/lockfiles/supply_chain_
+		// signals/license_evidence) from v3 ones, so missing v3 fields
+		// on a v3-tagged payload mean "agent looked and found nothing"
+		// rather than "agent doesn't speak v3".  Older servers tolerate
+		// the header (unknown headers are ignored per HTTP semantics);
+		// newer servers route on it.
+		r.Header.Set("X-Sentari-Payload-Version", "3")
 		return r, nil
 	})
 	if err != nil {
