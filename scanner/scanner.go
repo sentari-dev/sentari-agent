@@ -123,6 +123,23 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 		result.Errors = append(result.Errors, res.errors...)
 	}
 
+	// Phase 3 (v3 payload): cross-ecosystem enrichment.
+	//
+	// Runs after the v2 worker pool finishes so the existing scan
+	// surface (packages, errors) is unaffected by any v3 module
+	// failure.  All four new fields default to nil/empty when the
+	// modules find nothing relevant for this host.
+	//
+	// Root selection: when the operator runs a scoped scan (e.g.
+	// ``--scan /opt/app``), we honour that scope.  When the scan
+	// root is filesystem root (``/`` on POSIX, drive root on
+	// Windows), we substitute user home directories — lockfile
+	// discovery walking ``/`` would be prohibitively expensive
+	// on production hosts and most lockfiles live under user
+	// home + repo trees anyway.
+	v3Roots := v3DiscoveryRoots(r.cfg.ScanRoot)
+	enrichWithV3(result, v3Roots)
+
 	// macOS TCC warning: when running as root (launchd daemon) with a full
 	// system scan, TCC silently blocks access to ~/Documents, ~/Desktop,
 	// and ~/Downloads unless the binary has Full Disk Access. The scanner
