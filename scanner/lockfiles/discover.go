@@ -20,8 +20,25 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 	"gopkg.in/yaml.v3"
 )
+
+// Per-lockfile read caps.  Lockfiles in large monorepos can be tens of
+// megabytes; metadata files (pom.xml, .nuspec) are tiny.  These caps
+// are loose enough to never reject a legitimate lockfile and tight
+// enough to refuse pathological inputs.
+const (
+	maxLockfileBytes = 50 << 20 // 50 MiB — package-lock / yarn.lock / pnpm-lock
+	maxMetadataBytes = 1 << 20  // 1 MiB  — pom.xml / .nuspec
+)
+
+// errSkipLockfile is returned by buildMeta when a discovered file
+// matches a known filename but the agent intentionally drops it from
+// the v3 payload (e.g. a v1 npm package-lock.json — no schema enum
+// entry exists for it, and silently remapping to v3 makes downstream
+// parsers log warnings).  See detectPackageLockVersion for details.
+var errSkipLockfile = errors.New("lockfile intentionally skipped")
 
 // filenameMatcher pairs a filename pattern with the format + ecosystem
 // it represents. Patterns are exact basename matches (case-sensitive
@@ -91,6 +108,17 @@ func DiscoverInRoot(root string) ([]deptree.LockfileMeta, error) {
 			// Inaccessible paths shouldn't abort the whole walk.
 			return nil
 		}
+		// Refuse to descend through symlinked directories and refuse to
+		// read symlinked file leaves — defends against a vendored dep
+		// linking into /etc or an attacker-controlled tree (safeio
+		// already enforces leaf refusal on the read path, but skipping
+		// here also saves the open() syscall).
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if d.IsDir() {
 			if path != rootClean {
 				name := d.Name()
@@ -112,6 +140,11 @@ func DiscoverInRoot(root string) ([]deptree.LockfileMeta, error) {
 			}
 			meta, mErr := buildMeta(path, matcher)
 			if mErr != nil {
+				if errors.Is(mErr, errSkipLockfile) {
+					// Intentional drop (e.g. v1 package-lock).  Not an
+					// error — emit nothing and move on.
+					return nil
+				}
 				if firstErr == nil {
 					firstErr = mErr
 				}
@@ -136,11 +169,27 @@ func depthOf(rel string) int {
 }
 
 func buildMeta(path string, matcher filenameMatcher) (deptree.LockfileMeta, error) {
+	// Detect npm package-lock format version BEFORE we commit to
+	// emitting metadata — v1 lockfiles intentionally drop out (see
+	// detectPackageLockVersion for rationale).
+	format := matcher.format
+	if matcher.basename == "package-lock.json" {
+		v, err := detectPackageLockVersion(path)
+		if err == nil && v == "" {
+			return deptree.LockfileMeta{}, errSkipLockfile
+		}
+		if err == nil {
+			format = v
+		}
+	}
+
 	st, err := os.Stat(path)
 	if err != nil {
 		return deptree.LockfileMeta{}, fmt.Errorf("stat %s: %w", path, err)
 	}
-	f, err := os.Open(path)
+	// Use safeio.Open so that a symlinked leaf (caught only after the
+	// walker hands us the path) is still refused.
+	f, err := safeio.Open(path)
 	if err != nil {
 		return deptree.LockfileMeta{}, fmt.Errorf("open %s: %w", path, err)
 	}
@@ -151,13 +200,6 @@ func buildMeta(path string, matcher filenameMatcher) (deptree.LockfileMeta, erro
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
 
-	// Detect npm package-lock format version at read time.
-	format := matcher.format
-	if matcher.basename == "package-lock.json" {
-		if v, err := detectPackageLockVersion(path); err == nil {
-			format = v
-		}
-	}
 	count := declaredCount(path, matcher.basename)
 	return deptree.LockfileMeta{
 		Path:                  path,
@@ -170,8 +212,17 @@ func buildMeta(path string, matcher filenameMatcher) (deptree.LockfileMeta, erro
 	}, nil
 }
 
+// detectPackageLockVersion inspects the lockfileVersion field of an
+// npm package-lock.json and maps it to the on-wire format enum.
+//
+// Returns ("", nil) for v1 (and any other unknown version): the v3
+// contract enum lists only package_lock_v2 / package_lock_v3, and
+// silently remapping v1 → v3 used to cause the downstream parser to
+// emit warnings.  v1 is rare with npm 7+, so dropping it from the
+// payload entirely is the least-noisy outcome.  Callers (buildMeta)
+// translate the empty sentinel into errSkipLockfile.
 func detectPackageLockVersion(path string) (string, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := safeio.ReadFile(path, maxLockfileBytes)
 	if err != nil {
 		return "", err
 	}
@@ -187,9 +238,8 @@ func detectPackageLockVersion(path string) (string, error) {
 	case 3:
 		return "package_lock_v3", nil
 	default:
-		// v1 or unknown — keep contract enum stable by reporting v3
-		// (the server has no enum entry for v1 and v1 is rare with npm 7+).
-		return "package_lock_v3", nil
+		// v1 or unknown — drop intentionally.  See docstring.
+		return "", nil
 	}
 }
 
@@ -197,7 +247,7 @@ func detectPackageLockVersion(path string) (string, error) {
 // Returns 0 on parse failure rather than propagating an error —
 // drift detection doesn't rely on this field's accuracy.
 func declaredCount(path, basename string) int {
-	raw, err := os.ReadFile(path)
+	raw, err := safeio.ReadFile(path, maxLockfileBytes)
 	if err != nil {
 		return 0
 	}

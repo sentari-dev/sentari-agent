@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -96,7 +95,12 @@ func TestDetectPackageLockVersion(t *testing.T) {
 	cases := map[string]string{
 		`{"lockfileVersion":2,"packages":{}}`: "package_lock_v2",
 		`{"lockfileVersion":3,"packages":{}}`: "package_lock_v3",
-		`{"lockfileVersion":1,"packages":{}}`: "package_lock_v3", // unknown → fallback
+		// v1 is intentionally dropped from the v3 payload (no enum
+		// entry on the server; silently remapping to v3 used to
+		// produce downstream parser warnings).  The empty-string
+		// sentinel is buildMeta's signal to translate into
+		// errSkipLockfile.
+		`{"lockfileVersion":1,"packages":{}}`: "",
 	}
 	for content, want := range cases {
 		p := filepath.Join(root, "package-lock.json")
@@ -111,6 +115,22 @@ func TestDetectPackageLockVersion(t *testing.T) {
 		if got != want {
 			t.Errorf("for content %q: got %q, want %q", content, got, want)
 		}
+	}
+}
+
+// TestDiscoverInRoot_skipsV1PackageLock confirms that a v1
+// package-lock.json drops out of the discovered metadata silently
+// (no entry, no error).
+func TestDiscoverInRoot_skipsV1PackageLock(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "package-lock.json"), `{"lockfileVersion":1,"packages":{}}`)
+
+	results, err := DiscoverInRoot(root)
+	if err != nil {
+		t.Fatalf("discover returned error for v1 lockfile: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected 0 lockfiles for v1 package-lock, got %d: %+v", len(results), results)
 	}
 }
 
@@ -130,5 +150,4 @@ func mustWrite(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_ = strings.TrimSpace // suppress unused-import if strings becomes unused
 }
