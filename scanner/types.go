@@ -5,6 +5,8 @@ package scanner
 
 import (
 	"time"
+
+	"github.com/sentari-dev/sentari-agent/scanner/deptree"
 )
 
 // Per-file-type size caps.  Every metadata parse must go through
@@ -138,6 +140,15 @@ type ScanResult struct {
 	// older agents — server treats as "field absent" and leaves
 	// ``device.runtime`` untouched.
 	Runtime string `json:"runtime,omitempty"`
+
+	// --- v3 payload extensions (Phase 3 Family-1 data pipeline) ---
+	// All four are nil/empty when the relevant agent modules detect nothing
+	// or aren't applicable for the device's installed ecosystems. The server
+	// tolerates missing fields (v2 compatibility).
+	DepEdges           []deptree.DepEdge           `json:"dep_edges,omitempty"`
+	Lockfiles          []deptree.LockfileMeta      `json:"lockfiles,omitempty"`
+	SupplyChainSignals []deptree.SupplyChainSignal `json:"supply_chain_signals,omitempty"`
+	LicenseEvidence    []deptree.LicenseEvidence   `json:"license_evidence,omitempty"`
 }
 
 // ContainerTargetSummary is the informational shape of a discovered
