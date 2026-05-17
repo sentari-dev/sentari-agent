@@ -45,6 +45,8 @@ func main() {
 		"Shorthand for --format=explain; verbose human-readable scan report with "+
 			"recent-install and AI-agent highlights")
 	configFlag := flag.String("config", "", "Path to agent config file")
+	debugFlag := flag.Bool("debug", false,
+		"Print scan-result field counts (packages, dep edges, lockfiles, supply-chain signals, license evidence) to stderr after the scan")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 
 	flag.Parse()
@@ -88,5 +90,6 @@ func main() {
 		outputPath: *outputFlag,
 		format:     *formatFlag,
 		explain:    *explainFlag,
+		debug:      *debugFlag,
 	}))
 }
