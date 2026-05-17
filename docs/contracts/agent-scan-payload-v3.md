@@ -50,7 +50,11 @@ not enforce an enum so each scanner emits the native scope label.
 
 `resolved=false` is reserved for Maven BOM-imported deps that the
 agent could not fully resolve without a `mvn` invocation (out of
-scope per the no-binary-invocation constraint).
+scope per the no-binary-invocation constraint). When `resolved=false`,
+`parent_version` and/or `child_version` may be the empty string `""`
+if the agent could not determine the version from local files; the
+JSON Schema still requires the keys to be present so downstream
+consumers can rely on the field shape.
 
 ### `lockfiles: LockfileMeta[]`
 
@@ -122,6 +126,17 @@ ingests these rows directly — see `services/license_ingest.py`.
   "raw_text": "Apache-2.0"
 }
 ```
+
+`source` enum:
+
+- Agent-emitted in Phase 3: `spdx_pkg` (npm `package.json`, PyPI PEP
+  639), `trove` (PyPI Trove classifiers), `pom` (Maven), `nuspec`
+  (NuGet).
+- Reserved for the OS-package scan paths (APT/YUM agents — Phase 1):
+  `copyright_file` (Debian DEP-5), `rpm_header` (RPM spec metadata).
+  Agents for the 4 Phase-3 ecosystems MUST NOT emit these.
+- Reserved for server-side enrichment writes (Celery tasks against
+  `package_licenses`): `server_enriched`. Agents MUST NOT emit it.
 
 ## Backwards compatibility
 
