@@ -3,6 +3,8 @@
 Phase 3 of the multi-ecosystem workspace contract bumps the
 `/agent/scan` payload from v2 to v3 by adding 4 new array fields:
 `dep_edges`, `lockfiles`, `supply_chain_signals`, `license_evidence`.
+Phase 4 adds a 5th v3 array field, `installed_runtimes`, transported
+under the same v3 payload version.
 
 ## Versioning
 

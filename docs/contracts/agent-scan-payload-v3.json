@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://sentari.dev/contracts/agent-scan-payload-v3.json",
   "title": "Sentari agent scan payload v3 — additions",
-  "description": "Schema for the 4 new array fields added in v3.",
+  "description": "Schema for the 5 v3 array fields (4 from Phase 3, installed_runtimes from Phase 4).",
   "type": "object",
   "properties": {
     "dep_edges": { "type": "array", "items": { "$ref": "#/definitions/DepEdge" } },
