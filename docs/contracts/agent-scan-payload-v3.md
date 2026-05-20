@@ -138,6 +138,39 @@ ingests these rows directly — see `services/license_ingest.py`.
 - Reserved for server-side enrichment writes (Celery tasks against
   `package_licenses`): `server_enriched`. Agents MUST NOT emit it.
 
+### `installed_runtimes: InstalledRuntime[]`
+
+Per-device language-runtime detections. Phase 4 covers `python`, `node`,
+and `jdk`. Other runtimes (e.g. `dotnet`) are reserved for future
+phases and the schema enum lists only the 3 Phase-4 names.
+
+```json
+{
+  "name": "jdk",
+  "version": "17.0.5+8",
+  "cycle": "17",
+  "distro": "Temurin",
+  "install_path": "/usr/lib/jvm/temurin-17"
+}
+```
+
+`cycle` is derived agent-side using the regex documented per runtime:
+
+| Runtime | Version example | Cycle | Rule |
+|---------|-----------------|-------|------|
+| python  | `3.11.5`        | `3.11` | First two dot-separated components. |
+| node    | `20.10.0`       | `20`   | Major version only. |
+| jdk     | `17.0.5+8`      | `17`   | Major version only. |
+| jdk     | `1.8.0_392`     | `8`    | Legacy `1.X` → `X`. |
+
+Server re-derives `cycle` independently and logs a warning when the
+agent's value disagrees, but always uses the server-derived value.
+
+`distro` is currently emitted only for JDK (Temurin, Corretto,
+Microsoft, Zulu, Eclipse Adoptium, OpenJDK) — read from the
+`IMPLEMENTOR` field of `<JAVA_HOME>/release`. Other runtimes set it
+to `null`.
+
 ## Backwards compatibility
 
 - Old agents (no v3 fields) → server stores empty arrays; the workspace
