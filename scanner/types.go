@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/runtimeversions"
 )
 
 // Per-file-type size caps.  Every metadata parse must go through
@@ -149,6 +150,12 @@ type ScanResult struct {
 	Lockfiles          []deptree.LockfileMeta      `json:"lockfiles,omitempty"`
 	SupplyChainSignals []deptree.SupplyChainSignal `json:"supply_chain_signals,omitempty"`
 	LicenseEvidence    []deptree.LicenseEvidence   `json:"license_evidence,omitempty"`
+
+	// --- v3.1 (Phase 4) ---
+	// Installed language runtime versions on the device. Detected by
+	// scanner/runtimeversions/. Empty when no detectors find anything
+	// or when the relevant install dirs aren't accessible.
+	InstalledRuntimes []runtimeversions.InstalledRuntime `json:"installed_runtimes,omitempty"`
 }
 
 // ContainerTargetSummary is the informational shape of a discovered

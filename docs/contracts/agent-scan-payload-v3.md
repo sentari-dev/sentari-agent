@@ -3,6 +3,8 @@
 Phase 3 of the multi-ecosystem workspace contract bumps the
 `/agent/scan` payload from v2 to v3 by adding 4 new array fields:
 `dep_edges`, `lockfiles`, `supply_chain_signals`, `license_evidence`.
+Phase 4 adds a 5th v3 array field, `installed_runtimes`, transported
+under the same v3 payload version.
 
 ## Versioning
 
@@ -137,6 +139,44 @@ ingests these rows directly — see `services/license_ingest.py`.
   Agents for the 4 Phase-3 ecosystems MUST NOT emit these.
 - Reserved for server-side enrichment writes (Celery tasks against
   `package_licenses`): `server_enriched`. Agents MUST NOT emit it.
+
+### `installed_runtimes: InstalledRuntime[]`
+
+Per-device language-runtime detections. Phase 4 covers `python`, `node`,
+and `jdk`. Other runtimes (e.g. `dotnet`) are reserved for future
+phases and the schema enum lists only the 3 Phase-4 names.
+
+```json
+{
+  "name": "jdk",
+  "version": "17.0.5+8",
+  "cycle": "17",
+  "distro": "Temurin",
+  "install_path": "/usr/lib/jvm/temurin-17"
+}
+```
+
+`cycle` is derived agent-side using the regex documented per runtime:
+
+| Runtime | Version example | Cycle | Rule |
+|---------|-----------------|-------|------|
+| python  | `3.11.5`        | `3.11` | First two dot-separated components. |
+| node    | `20.10.0`       | `20`   | Major version only. |
+| jdk     | `17.0.5+8`      | `17`   | Major version only. |
+| jdk     | `1.8.0_392`     | `8`    | Legacy `1.X` → `X`. |
+
+Server re-derives `cycle` independently and logs a warning when the
+agent's value disagrees, but always uses the server-derived value.
+
+`distro` is emitted only for JDK installs, normalized from the
+`IMPLEMENTOR` field of `<JAVA_HOME>/release`. Recognized canonical
+values: `Temurin` (normalized from `Eclipse Adoptium` / `AdoptOpenJDK`),
+`Corretto` (Amazon), `Zulu` (Azul), `Microsoft`, `Oracle`. Unknown
+vendor strings pass through unchanged so the dashboard can surface
+whatever the JDK reports. For Python and Node runtimes, the field is
+omitted entirely (the Go struct uses `omitempty`); JSON Schema
+permits `null` for back-compat with consumers that read the field
+unconditionally.
 
 ## Backwards compatibility
 

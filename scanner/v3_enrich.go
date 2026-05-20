@@ -49,6 +49,7 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
 	"github.com/sentari-dev/sentari-agent/scanner/licenses"
 	"github.com/sentari-dev/sentari-agent/scanner/lockfiles"
+	"github.com/sentari-dev/sentari-agent/scanner/runtimeversions"
 	"github.com/sentari-dev/sentari-agent/scanner/supplychain"
 )
 
@@ -341,6 +342,39 @@ func enrichWithV3(result *ScanResult, roots []string) {
 			}
 		}
 	}
+
+	// --- v3.1: installed language runtimes (Phase 4) ---
+	//
+	// Detect JDK, Python (venv), and Node installs on the host. Each
+	// detector is best-effort: missing candidate roots → skip silently.
+	// Wrapped in safeCall so a parser panic on a malformed binary or
+	// release file never aborts the rest of the scan.
+	//
+	// Runtime detection runs unconditionally. The walkers below enforce
+	// a shallow depth cap (4 levels) so unscoped scans of /opt + /srv +
+	// /usr/lib/jvm don't materially impact scan latency on large
+	// filesystems. JDKs typically live at depth 1; Python venvs at
+	// depth 1-3.
+	safeCall("runtimeversions.JDK", func() {
+		roots := jdkCandidateRoots()
+		if len(roots) > 0 {
+			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllJDKs(roots)...)
+		}
+	})
+
+	safeCall("runtimeversions.Python", func() {
+		roots := pythonCandidateRoots()
+		if len(roots) > 0 {
+			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllPythons(roots)...)
+		}
+	})
+
+	safeCall("runtimeversions.Node", func() {
+		paths := nodeCandidateBinaries()
+		if len(paths) > 0 {
+			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllNodes(paths)...)
+		}
+	})
 }
 
 // candidateSitePackages returns plausible site-packages dirs under
@@ -375,6 +409,95 @@ func candidateSitePackages(projectDir string) []string {
 			if s, err := os.Stat(sp); err == nil && s.IsDir() {
 				out = append(out, sp)
 			}
+		}
+	}
+	return out
+}
+
+// jdkCandidateRoots returns directories under which JDK installs may
+// live (one subdir per JDK version, each holding a `release` file).
+// Only existing directories are returned, so the runtimeversions
+// detector doesn't waste a walk on hosts where the standard JDK
+// install paths are absent.
+func jdkCandidateRoots() []string {
+	candidates := []string{
+		"/usr/lib/jvm",
+		"/usr/local/java",
+		"/opt",
+		"/Library/Java/JavaVirtualMachines", // macOS
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(home, ".sdkman", "candidates", "java"),
+			filepath.Join(home, ".jdks"),
+		)
+	}
+	if runtime.GOOS == "windows" {
+		if pf := os.Getenv("ProgramFiles"); pf != "" {
+			candidates = append(candidates, filepath.Join(pf, "Java"))
+		}
+	}
+	return existingDirs(candidates)
+}
+
+// pythonCandidateRoots returns directories under which Python venvs
+// (carrying pyvenv.cfg) typically live. System Pythons are out of
+// scope for Phase 4.
+func pythonCandidateRoots() []string {
+	candidates := []string{"/opt", "/srv"}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(home, ".virtualenvs"),
+			filepath.Join(home, ".pyenv", "versions"),
+		)
+	}
+	return existingDirs(candidates)
+}
+
+// nodeCandidateBinaries returns concrete `node` binary paths the
+// detector should inspect. Includes well-known system locations plus
+// any per-version installs under ~/.nvm.
+func nodeCandidateBinaries() []string {
+	candidates := []string{
+		"/usr/local/bin/node",
+		"/usr/bin/node",
+		"/opt/node/bin/node",
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		nvmDir := filepath.Join(home, ".nvm", "versions", "node")
+		if entries, err := os.ReadDir(nvmDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() {
+					candidates = append(candidates, filepath.Join(nvmDir, e.Name(), "bin", "node"))
+				}
+			}
+		}
+	}
+	if runtime.GOOS == "windows" {
+		if pf := os.Getenv("ProgramFiles"); pf != "" {
+			candidates = append(candidates, filepath.Join(pf, "nodejs", "node.exe"))
+		}
+	}
+	return existingFiles(candidates)
+}
+
+// existingDirs filters paths down to those that exist and are dirs.
+func existingDirs(paths []string) []string {
+	var out []string
+	for _, p := range paths {
+		if info, err := os.Stat(p); err == nil && info.IsDir() {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// existingFiles filters paths down to those that exist and are not dirs.
+func existingFiles(paths []string) []string {
+	var out []string
+	for _, p := range paths {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			out = append(out, p)
 		}
 	}
 	return out

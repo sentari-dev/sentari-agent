@@ -117,3 +117,23 @@ func TestEnrichWithV3_skipsHomeCacheWalksWhenEcosystemNotDiscovered(t *testing.T
 		}
 	}
 }
+
+// TestEnrichWithV3_handlesRuntimeDetectionFailureGracefully verifies
+// that the Phase-4 runtime detectors (jdk/python/node) wired into
+// enrichWithV3 don't panic when the candidate paths don't exist.
+// Pointing $HOME at an empty tempdir eliminates per-user candidate
+// roots; system roots (/usr/lib/jvm etc.) may still match on the
+// test host, which is fine — we only assert that the call completes.
+func TestEnrichWithV3_handlesRuntimeDetectionFailureGracefully(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+
+	result := &ScanResult{}
+	// Must not panic; InstalledRuntimes may be empty (or non-empty if
+	// the test host happens to have a /usr/lib/jvm install).
+	enrichWithV3(result, []string{root})
+
+	if len(result.InstalledRuntimes) != 0 {
+		t.Logf("note: detected %d runtimes from empty home — likely picked up /usr/lib/jvm etc on this host", len(result.InstalledRuntimes))
+	}
+}
