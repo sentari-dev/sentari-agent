@@ -349,6 +349,12 @@ func enrichWithV3(result *ScanResult, roots []string) {
 	// detector is best-effort: missing candidate roots → skip silently.
 	// Wrapped in safeCall so a parser panic on a malformed binary or
 	// release file never aborts the rest of the scan.
+	//
+	// Runtime detection runs unconditionally. The walkers below enforce
+	// a shallow depth cap (4 levels) so unscoped scans of /opt + /srv +
+	// /usr/lib/jvm don't materially impact scan latency on large
+	// filesystems. JDKs typically live at depth 1; Python venvs at
+	// depth 1-3.
 	safeCall("runtimeversions.JDK", func() {
 		roots := jdkCandidateRoots()
 		if len(roots) > 0 {

@@ -1,6 +1,7 @@
 package runtimeversions
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -53,6 +54,42 @@ func TestDetectJDKInDir_missingReleaseFile(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("expected nil, got %+v", got)
+	}
+}
+
+// TestDetectAllJDKs_respectsDepthCap covers the perf fix: an unbounded
+// WalkDir under /opt or /srv on hosts with deep nested container
+// volumes used to dominate scan latency. The depth cap (4) skips any
+// JDK that lives more than 4 levels below a candidate root.
+func TestDetectAllJDKs_respectsDepthCap(t *testing.T) {
+	root := t.TempDir()
+	// Deep JDK at depth 6 — beyond the default cap of 4.
+	deep := filepath.Join(root, "a", "b", "c", "d", "e", "f")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "release"), []byte(`JAVA_VERSION="11.0.20"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Shallow JDK at depth 1 — within the cap.
+	shallow := filepath.Join(root, "shallow-jdk")
+	if err := os.MkdirAll(shallow, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shallow, "release"), []byte(`JAVA_VERSION="17.0.5"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DetectAllJDKs([]string{root})
+	versions := make(map[string]bool)
+	for _, r := range got {
+		versions[r.Version] = true
+	}
+	if !versions["17.0.5"] {
+		t.Errorf("expected to find shallow 17.0.5 JDK, got %+v", got)
+	}
+	if versions["11.0.20"] {
+		t.Errorf("should NOT have found deep 11.0.20 JDK (beyond depth cap), got %+v", got)
 	}
 }
 

@@ -14,6 +14,14 @@ import (
 
 const maxPyvenvCfgBytes = 64 * 1024
 
+// _defaultPythonWalkDepth caps how deep DetectAllPythons descends below
+// each candidate root. Python venvs typically live at depth 1-3
+// (`~/.virtualenvs/<name>/pyvenv.cfg`, `/opt/<svc>/.venv/pyvenv.cfg`,
+// `/srv/<app>/<env>/.venv/pyvenv.cfg`). A cap of 4 keeps the walk cheap
+// on hosts with deep container/volume mounts while still finding every
+// real-world layout we know about.
+const _defaultPythonWalkDepth = 4
+
 // DetectPythonInDir reads <dir>/pyvenv.cfg for a Python virtualenv;
 // the `version = X.Y.Z` line gives us the runtime version. Returns
 // (nil, nil) when no pyvenv.cfg or no version field is present.
@@ -42,19 +50,34 @@ func DetectPythonInDir(dir string) (*InstalledRuntime, error) {
 	}, nil
 }
 
-// DetectAllPythons walks candidate roots looking for venvs.
+// DetectAllPythons walks candidate roots looking for venvs.  Depth is
+// capped at _defaultPythonWalkDepth levels below each root.
 func DetectAllPythons(roots []string) []InstalledRuntime {
+	return detectAllPythonsWithDepth(roots, _defaultPythonWalkDepth)
+}
+
+func detectAllPythonsWithDepth(roots []string, maxDepth int) []InstalledRuntime {
 	var out []InstalledRuntime
 	for _, root := range roots {
-		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		rootClean := filepath.Clean(root)
+		_ = filepath.WalkDir(rootClean, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || !d.IsDir() {
 				return nil
 			}
 			if d.Type()&os.ModeSymlink != 0 {
 				return filepath.SkipDir
 			}
-			rt, err := DetectPythonInDir(path)
-			if err != nil || rt == nil {
+			// Depth cap — measured in path separators below rootClean.
+			if path != rootClean {
+				rel, rerr := filepath.Rel(rootClean, path)
+				if rerr == nil {
+					if strings.Count(rel, string(filepath.Separator))+1 > maxDepth {
+						return filepath.SkipDir
+					}
+				}
+			}
+			rt, derr := DetectPythonInDir(path)
+			if derr != nil || rt == nil {
 				return nil
 			}
 			out = append(out, *rt)

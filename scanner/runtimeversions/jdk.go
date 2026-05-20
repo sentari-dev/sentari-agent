@@ -14,6 +14,13 @@ import (
 
 const maxReleaseFileBytes = 64 * 1024
 
+// _defaultJDKWalkDepth caps how deep DetectAllJDKs descends below each
+// candidate root. JDKs live at depth 1 (`/usr/lib/jvm/<jdk>/release`)
+// or 2 (`/opt/<vendor>/<jdk>/release`). A cap of 4 keeps the walk cheap
+// on hosts with deep container/volume mounts under /opt or /srv while
+// still finding every real-world layout we know about.
+const _defaultJDKWalkDepth = 4
+
 // DetectJDKInDir reads <dir>/release and produces an InstalledRuntime
 // if the file exists + parses. Returns (nil, nil) when no release
 // file is found (the dir isn't a JDK install).
@@ -41,10 +48,16 @@ func DetectJDKInDir(dir string) (*InstalledRuntime, error) {
 
 // DetectAllJDKs walks a set of candidate roots looking for JDK installs.
 // Each candidate that contains a `release` file is treated as one JDK.
+// Depth is capped at _defaultJDKWalkDepth levels below each root.
 func DetectAllJDKs(roots []string) []InstalledRuntime {
+	return detectAllJDKsWithDepth(roots, _defaultJDKWalkDepth)
+}
+
+func detectAllJDKsWithDepth(roots []string, maxDepth int) []InstalledRuntime {
 	var out []InstalledRuntime
 	for _, root := range roots {
-		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		rootClean := filepath.Clean(root)
+		_ = filepath.WalkDir(rootClean, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
@@ -54,8 +67,17 @@ func DetectAllJDKs(roots []string) []InstalledRuntime {
 			if d.Type()&os.ModeSymlink != 0 {
 				return filepath.SkipDir
 			}
-			rt, err := DetectJDKInDir(path)
-			if err != nil || rt == nil {
+			// Depth cap — measured in path separators below rootClean.
+			if path != rootClean {
+				rel, rerr := filepath.Rel(rootClean, path)
+				if rerr == nil {
+					if strings.Count(rel, string(filepath.Separator))+1 > maxDepth {
+						return filepath.SkipDir
+					}
+				}
+			}
+			rt, derr := DetectJDKInDir(path)
+			if derr != nil || rt == nil {
 				return nil
 			}
 			out = append(out, *rt)
