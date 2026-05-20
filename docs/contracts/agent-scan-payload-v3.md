@@ -168,10 +168,15 @@ phases and the schema enum lists only the 3 Phase-4 names.
 Server re-derives `cycle` independently and logs a warning when the
 agent's value disagrees, but always uses the server-derived value.
 
-`distro` is currently emitted only for JDK (Temurin, Corretto,
-Microsoft, Zulu, Eclipse Adoptium, OpenJDK) — read from the
-`IMPLEMENTOR` field of `<JAVA_HOME>/release`. Other runtimes set it
-to `null`.
+`distro` is emitted only for JDK installs, normalized from the
+`IMPLEMENTOR` field of `<JAVA_HOME>/release`. Recognized canonical
+values: `Temurin` (normalized from `Eclipse Adoptium` / `AdoptOpenJDK`),
+`Corretto` (Amazon), `Zulu` (Azul), `Microsoft`, `Oracle`. Unknown
+vendor strings pass through unchanged so the dashboard can surface
+whatever the JDK reports. For Python and Node runtimes, the field is
+omitted entirely (the Go struct uses `omitempty`); JSON Schema
+permits `null` for back-compat with consumers that read the field
+unconditionally.
 
 ## Backwards compatibility
 
