@@ -86,6 +86,15 @@ func TestContractV3_payloadValidatesAgainstSharedSchema(t *testing.T) {
 				RawText:        "MIT",
 			},
 		},
+		"installed_runtimes": []map[string]any{
+			{
+				"name":         "jdk",
+				"version":      "17.0.5",
+				"cycle":        "17",
+				"distro":       "Temurin",
+				"install_path": "/usr/lib/jvm/temurin-17",
+			},
+		},
 	}
 
 	body, err := json.Marshal(payload)
