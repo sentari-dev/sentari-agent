@@ -30,6 +30,7 @@ import (
 	"github.com/sentari-dev/sentari-agent/sbom"
 	"github.com/sentari-dev/sentari-agent/scanner"
 	"github.com/sentari-dev/sentari-agent/scanner/containers"
+	"github.com/sentari-dev/sentari-agent/scanner/pathfilter"
 	// Blank imports: pull in plugin packages so their init()
 	// registers with scanner's registry at binary startup.  See
 	// the matching comment in main.go (OSS build).
@@ -73,9 +74,19 @@ func main() {
 	sbomOutFlag := flag.String("sbom-out", "", "Write CycloneDX SBOM to this file path after each scan (optional)")
 	dataDirFlag := flag.String("data-dir", "", "Override data directory (default: /var/lib/sentari)")
 	bootstrapCAFP := flag.String("bootstrap-ca-fingerprint", "", "SHA-256 fingerprint of server TLS certificate for bootstrap pinning (hex, colon-separated)")
+	excludeNetworkPathsFlag := flag.Bool(
+		"exclude-network-paths",
+		false,
+		"Skip runtime detection inside network-mounted filesystems (NFS, SMB/CIFS, WebDAV, FUSE remotes). Defaults to off — every filesystem is scanned. Cloud-synced subtrees (iCloud, Dropbox, OneDrive, Google Drive on macOS) are always skipped regardless of this flag.",
+	)
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 
 	flag.Parse()
+
+	// Wire the network-path exclusion through the package-level toggle
+	// the runtime walkers consult.  Done immediately after flag.Parse
+	// so any subsequent code path sees the configured value.
+	pathfilter.ExcludeNetworkPaths = *excludeNetworkPathsFlag
 
 	// Structured logging goes first — every line emitted after this
 	// point inherits the JSON format + the request_id contextvar.

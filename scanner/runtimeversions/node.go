@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 
+	"github.com/sentari-dev/sentari-agent/scanner/pathfilter"
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
@@ -102,7 +103,20 @@ func DetectNodeInDir(dir string) []InstalledRuntime {
 	var out []InstalledRuntime
 	for _, name := range candidates {
 		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
+			if err != nil {
+				return nil
+			}
+			// Prune cloud-synced and (opt-in) network-mounted subtrees
+			// at the directory level so we never descend into them.
+			if d.IsDir() {
+				if pathfilter.IsCloudSyncedPath(path) {
+					return filepath.SkipDir
+				}
+				if pathfilter.ExcludeNetworkPaths {
+					if isNet, _ := pathfilter.IsNetworkFilesystem(path); isNet {
+						return filepath.SkipDir
+					}
+				}
 				return nil
 			}
 			if d.Type()&os.ModeSymlink != 0 {
