@@ -4,26 +4,32 @@ package update
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 )
 
-// restartService asks launchd to bounce the sentari-agent daemon so
-// the freshly-installed binary takes effect.  The daemon label is the
-// reverse-DNS form used by the install-time plist; if the operator
-// installed under a different label the kickstart will fail and the
-// caller surfaces the wrap.
-const darwinLaunchdLabel = "system/com.sentari.agent"
+// defaultDarwinLaunchdLabel matches the label used by the install-time
+// LaunchDaemons plist (deploy/macos/...).  Operators who install
+// under a different label override via SENTARI_AGENT_LAUNCHD_LABEL.
+const defaultDarwinLaunchdLabel = "system/dev.sentari.agent"
 
-// restartService implements the darwin half of the cross-platform
-// restart hook called by Apply / Rollback.  ``binaryPath`` is the
-// install path of the just-replaced binary; on darwin we only need
-// the launchd label, but linux uses it to choose between systemd
-// unit names, so the interface stays consistent.
+// restartService asks launchd to bounce the sentari-agent daemon so
+// the freshly-installed binary takes effect.  ``binaryPath`` is the
+// install path of the just-replaced binary; on darwin we don't use
+// it directly but the cross-platform interface stays consistent.
+//
+// The label can be overridden via the SENTARI_AGENT_LAUNCHD_LABEL env
+// var, e.g. ``system/com.example.sentari``.  An empty value falls
+// back to ``defaultDarwinLaunchdLabel``.
 func restartService(_ string) error {
-	cmd := exec.Command("/bin/launchctl", "kickstart", "-k", darwinLaunchdLabel)
+	label := os.Getenv("SENTARI_AGENT_LAUNCHD_LABEL")
+	if label == "" {
+		label = defaultDarwinLaunchdLabel
+	}
+	cmd := exec.Command("/bin/launchctl", "kickstart", "-k", label)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("launchctl kickstart %s: %w (output: %s)", darwinLaunchdLabel, err, out)
+		return fmt.Errorf("launchctl kickstart %s: %w (output: %s)", label, err, out)
 	}
 	return nil
 }
