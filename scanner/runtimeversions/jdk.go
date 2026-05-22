@@ -68,13 +68,8 @@ func detectAllJDKsWithDepth(roots []string, maxDepth int) []InstalledRuntime {
 			if d.Type()&os.ModeSymlink != 0 {
 				return filepath.SkipDir
 			}
-			if pathfilter.IsCloudSyncedPath(path) {
+			if pathfilter.ShouldSkipDir(path) {
 				return filepath.SkipDir
-			}
-			if pathfilter.ExcludeNetworkPaths {
-				if isNet, _ := pathfilter.IsNetworkFilesystem(path); isNet {
-					return filepath.SkipDir
-				}
 			}
 			// Depth cap — measured in path separators below rootClean.
 			if path != rootClean {

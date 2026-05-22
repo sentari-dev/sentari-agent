@@ -36,6 +36,27 @@ import (
 // changed — the flag is read-only after process startup.
 var ExcludeNetworkPaths bool
 
+// ShouldSkipDir returns true when a walker should ``filepath.SkipDir``
+// at ``path``.  Combines both exclusions so each walker site is a
+// single call instead of repeating the cloud-then-network ladder.
+//
+// Cheap when both exclusions are off: a cloud-path prefix check on
+// darwin only and a constant ``false`` everywhere else.  The
+// network-FS branch only fires when an operator opted in via
+// --exclude-network-paths, since IsNetworkFilesystem syscalls per
+// path.  Tests assert short-circuit behaviour matches this contract.
+func ShouldSkipDir(path string) bool {
+	if IsCloudSyncedPath(path) {
+		return true
+	}
+	if ExcludeNetworkPaths {
+		if isNet, _ := IsNetworkFilesystem(path); isNet {
+			return true
+		}
+	}
+	return false
+}
+
 // cloudPathPrefixes lists absolute path prefixes that indicate a
 // cloud-synced filesystem on macOS.  Other operating systems do not
 // have analogous standardised locations: Windows cloud sync clients

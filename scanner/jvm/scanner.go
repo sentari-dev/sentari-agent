@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
+	"github.com/sentari-dev/sentari-agent/scanner/pathfilter"
 )
 
 func init() {
@@ -152,6 +153,9 @@ func scanDirTree(root string) ([]scanner.PackageRecord, []scanner.ScanError) {
 			return nil
 		}
 		if d.IsDir() {
+			if pathfilter.ShouldSkipDir(path) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !isJARLike(d.Name()) {

@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/pathfilter"
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
@@ -42,6 +43,9 @@ func ExtractPyPI(sitePackagesDir string) ([]deptree.LicenseEvidence, error) {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if d.IsDir() && pathfilter.ShouldSkipDir(path) {
+			return filepath.SkipDir
 		}
 		if !d.IsDir() || !strings.HasSuffix(d.Name(), ".dist-info") {
 			return nil

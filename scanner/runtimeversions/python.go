@@ -68,20 +68,12 @@ func detectAllPythonsWithDepth(roots []string, maxDepth int) []InstalledRuntime 
 			if d.Type()&os.ModeSymlink != 0 {
 				return filepath.SkipDir
 			}
-			// Cloud-synced subtrees (iCloud, Dropbox, OneDrive, ...)
-			// are always skipped: a single dir read can stall for
-			// minutes pulling files from the cloud provider, and
-			// runtimes legitimately deployed on cloud-synced storage
-			// don't exist in any operator deployment we've seen.
-			if pathfilter.IsCloudSyncedPath(path) {
+			// Skip cloud-synced subtrees (always) and network-mounted
+			// subtrees (opt-in via --exclude-network-paths) before
+			// descending — iCloud Drive on macOS otherwise stalls the
+			// walker for minutes pulling files on demand.
+			if pathfilter.ShouldSkipDir(path) {
 				return filepath.SkipDir
-			}
-			// Network-mounted subtrees are skipped only when the
-			// operator opted in via --exclude-network-paths.
-			if pathfilter.ExcludeNetworkPaths {
-				if isNet, _ := pathfilter.IsNetworkFilesystem(path); isNet {
-					return filepath.SkipDir
-				}
 			}
 			// Depth cap — measured in path separators below rootClean.
 			if path != rootClean {

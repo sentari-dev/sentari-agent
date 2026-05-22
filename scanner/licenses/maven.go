@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/pathfilter"
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
@@ -33,6 +34,9 @@ func ExtractMaven(m2Dir string) ([]deptree.LicenseEvidence, error) {
 			return nil
 		}
 		if d.IsDir() {
+			if pathfilter.ShouldSkipDir(path) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".pom") {

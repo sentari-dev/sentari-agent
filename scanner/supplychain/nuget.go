@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/pathfilter"
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
@@ -36,6 +37,9 @@ func DetectInNuGetCache(cacheRoot string) ([]deptree.SupplyChainSignal, error) {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if d.IsDir() && pathfilter.ShouldSkipDir(path) {
+			return filepath.SkipDir
 		}
 		if !d.IsDir() {
 			return nil

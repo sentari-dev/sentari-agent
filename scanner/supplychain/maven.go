@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/pathfilter"
 )
 
 // DetectInM2 walks ~/.m2/repository looking for installed JARs and
@@ -29,6 +30,9 @@ func DetectInM2(m2Dir string) ([]deptree.SupplyChainSignal, error) {
 			return nil
 		}
 		if d.IsDir() {
+			if pathfilter.ShouldSkipDir(path) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".jar") {

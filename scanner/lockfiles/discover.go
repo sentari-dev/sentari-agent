@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/pathfilter"
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 	"gopkg.in/yaml.v3"
 )
@@ -123,6 +124,12 @@ func DiscoverInRoot(root string) ([]deptree.LockfileMeta, error) {
 			if path != rootClean {
 				name := d.Name()
 				if _, skip := skipDirs[name]; skip {
+					return filepath.SkipDir
+				}
+				// Skip cloud-synced subtrees (always) and network mounts
+				// (opt-in) so lockfile discovery on a Mac doesn't stall
+				// the agent for minutes pulling files from iCloud.
+				if pathfilter.ShouldSkipDir(path) {
 					return filepath.SkipDir
 				}
 				// Depth cap.

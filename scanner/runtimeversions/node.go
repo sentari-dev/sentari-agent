@@ -106,16 +106,9 @@ func DetectNodeInDir(dir string) []InstalledRuntime {
 			if err != nil {
 				return nil
 			}
-			// Prune cloud-synced and (opt-in) network-mounted subtrees
-			// at the directory level so we never descend into them.
 			if d.IsDir() {
-				if pathfilter.IsCloudSyncedPath(path) {
+				if pathfilter.ShouldSkipDir(path) {
 					return filepath.SkipDir
-				}
-				if pathfilter.ExcludeNetworkPaths {
-					if isNet, _ := pathfilter.IsNetworkFilesystem(path); isNet {
-						return filepath.SkipDir
-					}
 				}
 				return nil
 			}
