@@ -138,7 +138,7 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 				Type:             edgeType,
 				Scope:            "",
 				Depth:            depthByName[name],
-				IntroducedByPath: pathByName[name],
+				IntroducedByPath: SafePath(pathByName[name], rootName, name),
 				Resolved:         true,
 			})
 		}
@@ -183,7 +183,7 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 				Type:             "transitive",
 				Scope:            "",
 				Depth:            depthByName[childName],
-				IntroducedByPath: pathByName[childName],
+				IntroducedByPath: SafePath(pathByName[childName], parentName, childName),
 				Resolved:         true,
 			})
 		}

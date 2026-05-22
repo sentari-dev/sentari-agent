@@ -168,7 +168,7 @@ func ParsePnpmLock(lockPath string) ([]DepEdge, error) {
 				Type:             "transitive",
 				Scope:            "",
 				Depth:            depthByName[childName],
-				IntroducedByPath: pathByName[childName],
+				IntroducedByPath: SafePath(pathByName[childName], info.name, childName),
 				Resolved:         true,
 			})
 		}

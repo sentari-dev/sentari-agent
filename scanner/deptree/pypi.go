@@ -282,7 +282,7 @@ func buildPypiEdges(pkgs map[string]pypiPkgInfo, rootName, rootVersion string) [
 				Type:             edgeType,
 				Scope:            "",
 				Depth:            depthByName[child],
-				IntroducedByPath: pathByName[child],
+				IntroducedByPath: SafePath(pathByName[child], parent, child),
 				Resolved:         true,
 			})
 		}

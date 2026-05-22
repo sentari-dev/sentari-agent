@@ -131,7 +131,7 @@ func ParseNuGetProjectAssets(path string) ([]DepEdge, error) {
 				Type:             "direct",
 				Scope:            tfm,
 				Depth:            1,
-				IntroducedByPath: pathByName[direct],
+				IntroducedByPath: SafePath(pathByName[direct], rootName, nameToOriginalCase[direct]),
 				Resolved:         true,
 			})
 		}
@@ -162,7 +162,7 @@ func ParseNuGetProjectAssets(path string) ([]DepEdge, error) {
 					Type:             "transitive",
 					Scope:            tfm,
 					Depth:            depthByName[child],
-					IntroducedByPath: pathByName[child],
+					IntroducedByPath: SafePath(pathByName[child], nameToOriginalCase[parent], nameToOriginalCase[child]),
 					Resolved:         true,
 				})
 			}

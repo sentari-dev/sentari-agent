@@ -10,6 +10,15 @@ import "time"
 // DepEdge is one direct or transitive dependency edge from a project's
 // dep graph. introduced_by_path is the full root-to-leaf chain
 // inclusive of both endpoints (see contract doc for examples).
+//
+// The v3 schema requires introduced_by_path to have minItems=2;
+// emitters that look the chain up in a precomputed map MUST go through
+// SafePath so an orphan (parent not BFS-reached from root) cannot
+// produce a nil slice — Go's encoding/json would marshal that as
+// `null`, which the server rejects with 422 and which violates
+// minItems=2 anyway.  Discovered on 2026-05-20: pypi orphans were
+// shipping ~9% of dep_edges as `null` and the server's Pydantic model
+// silently dropped them with HTTP 422.
 type DepEdge struct {
 	ParentName       string   `json:"parent_name"`
 	ParentVersion    string   `json:"parent_version"`
@@ -21,6 +30,19 @@ type DepEdge struct {
 	Depth            int      `json:"depth"`
 	IntroducedByPath []string `json:"introduced_by_path"`
 	Resolved         bool     `json:"resolved"`
+}
+
+// SafePath returns an introduced_by_path that satisfies the v3 schema's
+// minItems=2 constraint.  When the precomputed path is nil or shorter
+// than 2 entries (e.g. a BFS-unreached orphan in the parsed dep map),
+// it falls back to the minimal valid [parent, child] chain.  This is
+// the localized defense against the "null introduced_by_path" bug; the
+// server also coerces None→[] on ingest as belt-and-braces.
+func SafePath(path []string, parent, child string) []string {
+	if len(path) >= 2 {
+		return path
+	}
+	return []string{parent, child}
 }
 
 // LockfileMeta is one discovered lockfile's metadata. The agent does
