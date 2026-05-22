@@ -79,6 +79,10 @@ func main() {
 		false,
 		"Skip runtime detection inside network-mounted filesystems (NFS, SMB/CIFS, WebDAV, FUSE remotes). Defaults to off — every filesystem is scanned. Cloud-synced subtrees (iCloud, Dropbox, OneDrive, Google Drive on macOS) are always skipped regardless of this flag.",
 	)
+	updateCheckFlag := flag.Bool("update-check", false, "Probe the server for a newer agent release; print the plan and exit (no mutation, no service restart)")
+	updateApplyFlag := flag.Bool("update-apply", false, "Probe, download, verify, atomically replace this binary, and restart the agent service")
+	updateRollbackFlag := flag.Bool("update-rollback", false, "Restore the previous binary (kept at <install-path>.prev by --update-apply) and restart the service")
+	updateInstallPathFlag := flag.String("update-install-path", "", "Override the install-path target of --update-apply / --update-rollback (default: this binary's own path via os.Executable())")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 
 	flag.Parse()
@@ -104,6 +108,53 @@ func main() {
 	// exclusive with --upload and --serve: a host either
 	// scans locally or scans-and-uploads, not both in the
 	// same invocation.
+	// Update mode — mutually exclusive with --scan / --upload /
+	// --serve.  Runs the self-update flow against the server's
+	// signed release manifest and exits.
+	updateModeSelected := 0
+	if *updateCheckFlag {
+		updateModeSelected++
+	}
+	if *updateApplyFlag {
+		updateModeSelected++
+	}
+	if *updateRollbackFlag {
+		updateModeSelected++
+	}
+	if updateModeSelected > 0 {
+		if updateModeSelected > 1 {
+			fmt.Fprintln(os.Stderr, "--update-check / --update-apply / --update-rollback are mutually exclusive")
+			os.Exit(1)
+		}
+		if *scanFlag || *uploadFlag || *serveFlag {
+			fmt.Fprintln(os.Stderr, "--update-* flags are mutually exclusive with --scan / --upload / --serve")
+			os.Exit(1)
+		}
+		// Load agent config the same way the upload/serve paths do
+		// so --config and the default-config code path both work.
+		agentCfgLocal := config.DefaultConfig()
+		if *configFlag != "" {
+			var err error
+			agentCfgLocal, err = config.LoadFromFile(*configFlag)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to load config %s: %v\n", *configFlag, err)
+				os.Exit(1)
+			}
+		}
+		dataDirLocal := defaultDataDir
+		if *dataDirFlag != "" {
+			dataDirLocal = *dataDirFlag
+		}
+		mode := updateModeCheck
+		switch {
+		case *updateApplyFlag:
+			mode = updateModeApply
+		case *updateRollbackFlag:
+			mode = updateModeRollback
+		}
+		os.Exit(runUpdate(mode, agentCfgLocal, *serverURLFlag, dataDirLocal, *updateInstallPathFlag))
+	}
+
 	if *scanFlag {
 		if *uploadFlag || *serveFlag {
 			fmt.Fprintln(os.Stderr, "--scan is mutually exclusive with --upload / --serve")

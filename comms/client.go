@@ -112,6 +112,14 @@ func (c *Client) SetRetryConfig(cfg RetryConfig) {
 	c.retry = &cfg
 }
 
+// HTTPClient returns the underlying *http.Client so consumers in
+// other packages (e.g. scanner/update) can issue requests with the
+// same mTLS/proxy/timeout configuration the agent uses everywhere
+// else.  Intentionally read-only — callers must not mutate it.
+func (c *Client) HTTPClient() *http.Client {
+	return c.httpClient
+}
+
 // NewClient creates a new mTLS client. If cert/key files are not provided,
 // it creates a plain TLS client (no client cert) for initial registration only.
 // If ProxyConfig.HTTPSProxy is set, all requests are routed through the proxy.
