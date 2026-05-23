@@ -148,6 +148,44 @@ func TestWriteGradle_RewritesSentariManaged(t *testing.T) {
 	}
 }
 
+// Finding 3 (operator-config auditability): if the writer's owned
+// init-script path (sentari-proxy.gradle) somehow already exists
+// WITHOUT the Sentari marker — an operator hand-placed a file at that
+// exact name — overwriting it must (a) back up the original and
+// (b) surface ReplacedOperator so the replacement is auditable rather
+// than a silent clobber.
+func TestWriteGradle_ReplacingOperatorScriptIsFlaggedAndBackedUp(t *testing.T) {
+	dir := t.TempDir()
+	path := gradleHomeOverride(t, dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	operatorBody := "// operator hand-rolled init script\nallprojects { }\n"
+	if err := os.WriteFile(path, []byte(operatorBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mark := MarkerFields{Version: 1730901234, KeyID: "primary", Applied: fixedTime}
+	res, err := WriteGradle(makeGradleMap("https://proxy.example.test/maven/"), GradleScopeUser, mark)
+	if err != nil {
+		t.Fatalf("WriteGradle: %v", err)
+	}
+	if !res.Changed {
+		t.Error("expected Changed=true")
+	}
+	if !res.ReplacedOperator {
+		t.Error("expected ReplacedOperator=true when overwriting a non-Sentari init script")
+	}
+	backup := path + ".sentari-backup-2026-04-25T10-00-00Z"
+	got, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatalf("operator backup not written: %v", err)
+	}
+	if string(got) != operatorBody {
+		t.Errorf("backup mismatch:\ngot  %q\nwant %q", got, operatorBody)
+	}
+}
+
 func TestWriteGradle_NoProxyEmptyHostNoOp(t *testing.T) {
 	dir := t.TempDir()
 	path := gradleHomeOverride(t, dir)

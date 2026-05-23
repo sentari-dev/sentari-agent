@@ -60,6 +60,16 @@ type ServerConfig struct {
 	KeyFile      string // Client key path
 	CACertFile   string // Server CA certificate path
 	PollInterval int    // Config poll interval in seconds (default: 900)
+
+	// SystemdUnit / LaunchdLabel let an operator pin the service
+	// identity the self-update restart path bounces, for installs that
+	// don't use the shipped defaults.  These exist because the restart
+	// step previously honoured only the SENTARI_AGENT_SYSTEMD_UNIT /
+	// SENTARI_AGENT_LAUNCHD_LABEL env vars — which the service-spawned
+	// agent process does not inherit.  Empty means "use the built-in
+	// default".  INI keys: ``[server] systemd_unit`` / ``launchd_label``.
+	SystemdUnit  string // e.g. sentari-agent.service (Linux)
+	LaunchdLabel string // e.g. system/dev.sentari.agent (macOS)
 }
 
 // ScannerConfig holds scanner settings.
@@ -249,6 +259,10 @@ func (c *AgentConfig) set(section, key, value string) error {
 			c.Server.KeyFile = value
 		case "ca_cert_file":
 			c.Server.CACertFile = value
+		case "systemd_unit":
+			c.Server.SystemdUnit = value
+		case "launchd_label":
+			c.Server.LaunchdLabel = value
 		case "poll_interval":
 			v, err := strconv.Atoi(value)
 			if err != nil {

@@ -51,19 +51,37 @@ func init() {
 		}
 	}
 
-	// Dev/CI override.  Logged-visible to operators if set.
-	if env := os.Getenv("SENTARI_TRUSTED_MAP_PUBKEYS"); env != "" {
-		for _, entry := range strings.Split(env, ",") {
-			entry = strings.TrimSpace(entry)
-			id, b64, ok := strings.Cut(entry, ":")
-			if !ok {
-				continue
-			}
-			raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
-			if err != nil {
-				continue
-			}
-			RegisterTrustedMapKey(strings.TrimSpace(id), ed25519.PublicKey(raw))
+	loadDevTrustKeysFromEnv()
+}
+
+// loadDevTrustKeysFromEnv honours the SENTARI_TRUSTED_MAP_PUBKEYS dev
+// override (comma-separated "key_id:base64pubkey" entries).
+//
+// It is gated on SENTARI_DEBUG: in a production build the env var is
+// ignored entirely.  Without the gate, anyone able to set the agent's
+// environment could inject a trusted license-map signing key and
+// bypass the /register-time trust bootstrap (audit finding 4).  The
+// SENTARI_DEBUG convention matches the server's debug-bypass switch.
+//
+// Extracted from init() so it can be unit-tested directly.
+func loadDevTrustKeysFromEnv() {
+	if os.Getenv("SENTARI_DEBUG") == "" {
+		return
+	}
+	env := os.Getenv("SENTARI_TRUSTED_MAP_PUBKEYS")
+	if env == "" {
+		return
+	}
+	for _, entry := range strings.Split(env, ",") {
+		entry = strings.TrimSpace(entry)
+		id, b64, ok := strings.Cut(entry, ":")
+		if !ok {
+			continue
 		}
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
+		if err != nil {
+			continue
+		}
+		RegisterTrustedMapKey(strings.TrimSpace(id), ed25519.PublicKey(raw))
 	}
 }

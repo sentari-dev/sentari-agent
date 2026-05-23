@@ -1,7 +1,9 @@
 package installgate
 
 import (
+	"bytes"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -314,6 +316,67 @@ func TestRemove_Missing(t *testing.T) {
 func TestRemove_EmptyPath(t *testing.T) {
 	if _, err := Remove(""); err == nil {
 		t.Error("expected error on empty path")
+	}
+}
+
+// Finding 4: when Remove deletes a Sentari-managed config that has a
+// ``.sentari-backup-*`` sibling, it must surface the restore candidate
+// to operators (info-level log) so they know a backup exists to mv
+// back.  It must NOT auto-restore.  We capture the package log output.
+func TestRemove_SurfacesBackupCandidate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pip.conf")
+	if err := os.WriteFile(path, []byte("# Managed by Sentari\nx\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	backup := path + ".sentari-backup-2026-04-25T10-00-00Z"
+	if err := os.WriteFile(backup, []byte("operator\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	oldOut := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOut)
+
+	removed, err := Remove(path)
+	if err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if !removed {
+		t.Fatal("expected removed=true")
+	}
+	// The Sentari file is gone; the backup must NOT be auto-restored.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("file should be removed, not restored")
+	}
+	if _, err := os.Stat(backup); err != nil {
+		t.Errorf("backup must remain intact (no auto-restore/delete): %v", err)
+	}
+	// The log must mention the backup path so operators can find it.
+	if !strings.Contains(buf.String(), backup) {
+		t.Errorf("Remove did not surface the backup candidate in its log output; got:\n%s", buf.String())
+	}
+}
+
+// Remove on a file with no backup sibling must not emit a spurious
+// restore-candidate line (nothing to restore).
+func TestRemove_NoBackupNoCandidateLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pip.conf")
+	if err := os.WriteFile(path, []byte("# Managed by Sentari\nx\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	oldOut := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOut)
+
+	if _, err := Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "restore candidate") {
+		t.Errorf("Remove logged a restore candidate when no backup exists:\n%s", buf.String())
 	}
 }
 

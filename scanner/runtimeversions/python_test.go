@@ -23,6 +23,35 @@ func TestDetectPythonInVenv(t *testing.T) {
 	}
 }
 
+// TestDetectPythonInDir_versionInfoBeforeVersion guards against the
+// prefix-match bug: Python 3.11+ writes a `version_info = X.Y.Z.final.N`
+// line into pyvenv.cfg. A naive strings.HasPrefix(line, "version") also
+// matches that key. When version_info appears BEFORE the clean `version`
+// line, the detector must still return the clean X.Y.Z (so server EOL
+// correlation works), not "3.11.5.final.0".
+func TestDetectPythonInDir_versionInfoBeforeVersion(t *testing.T) {
+	dir := t.TempDir()
+	cfg := "home = /usr/bin\n" +
+		"version_info = 3.11.5.final.0\n" +
+		"version = 3.11.5\n"
+	if err := os.WriteFile(filepath.Join(dir, "pyvenv.cfg"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DetectPythonInDir(dir)
+	if err != nil {
+		t.Fatalf("detect failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected an InstalledRuntime, got nil")
+	}
+	if got.Version != "3.11.5" {
+		t.Errorf("Version = %q, want clean 3.11.5 (not version_info value)", got.Version)
+	}
+	if got.Cycle != "3.11" {
+		t.Errorf("Cycle = %q, want 3.11", got.Cycle)
+	}
+}
+
 func TestDetectPythonInDir_noPyvenvCfg(t *testing.T) {
 	dir := t.TempDir()
 	got, err := DetectPythonInDir(dir)

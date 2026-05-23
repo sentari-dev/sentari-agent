@@ -2,10 +2,10 @@ package deptree
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 	"gopkg.in/yaml.v3"
 )
 
@@ -15,7 +15,7 @@ import (
 // package.json, but pnpm-lock DOES carry an `importers` map keyed by
 // workspace path with declared deps. We use that to identify directs.
 func ParsePnpmLock(lockPath string) ([]DepEdge, error) {
-	raw, err := os.ReadFile(lockPath)
+	raw, err := safeio.ReadFile(lockPath, maxLockfileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", lockPath, err)
 	}
@@ -44,8 +44,18 @@ func ParsePnpmLock(lockPath string) ([]DepEdge, error) {
 		version string
 		deps    map[string]string
 	}
+	// Choose the source of per-package dependency lists.  pnpm >= 9
+	// keeps them under `snapshots:`; the `packages:` block then holds
+	// only resolution/engines metadata (empty deps).  Older v5/v6
+	// lockfiles inline deps under `packages:` and have no `snapshots:`.
+	// Prefer `snapshots:` whenever present so v9 transitive edges are
+	// produced; fall back to `packages:` for the legacy layout.
+	depSource := lock.Packages
+	if len(lock.Snapshots) > 0 {
+		depSource = lock.Snapshots
+	}
 	pkgsByKey := map[string]pkgInfo{}
-	for key, entry := range lock.Packages {
+	for key, entry := range depSource {
 		name, version := pnpmKeyParts(key)
 		if name == "" {
 			continue
@@ -215,9 +225,13 @@ func pnpmEntryVersion(v interface{}) string {
 }
 
 type pnpmLock struct {
-	LockfileVersion interface{}                 `yaml:"lockfileVersion"`
-	Importers       map[string]pnpmImporter     `yaml:"importers"`
+	LockfileVersion interface{}             `yaml:"lockfileVersion"`
+	Importers       map[string]pnpmImporter `yaml:"importers"`
 	Packages        map[string]pnpmPackageEntry `yaml:"packages"`
+	// pnpm >= 9 moved per-package dependency lists out of `packages:`
+	// (which now carries only resolution/engines metadata) into a new
+	// top-level `snapshots:` block keyed by name@version(peerctx).
+	Snapshots map[string]pnpmPackageEntry `yaml:"snapshots"`
 	// older v5 fields (when importers absent):
 	Dependencies    map[string]interface{} `yaml:"dependencies"`
 	DevDependencies map[string]interface{} `yaml:"devDependencies"`

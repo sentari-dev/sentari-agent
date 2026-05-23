@@ -192,6 +192,66 @@ func TestWritePip_NoProxyOperatorCuratedSurvives(t *testing.T) {
 	}
 }
 
+// Finding 3 (operator-config auditability): when WritePip overwrites
+// an operator-curated pip.conf (no Sentari marker), it must (a) write
+// a backup of the original AND (b) surface a result signal so the
+// replacement is auditable.  pip.conf is a complete Sentari override
+// (no merge), so the operator's settings live only in the backup —
+// operators need to KNOW that happened.
+func TestWritePip_ReplacingOperatorConfigIsFlaggedAndBackedUp(t *testing.T) {
+	dir := t.TempDir()
+	path := userHomeOverride(t, dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	operatorBody := "[global]\nindex-url = https://artifactory.corp.local/simple/\n"
+	if err := os.WriteFile(path, []byte(operatorBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mark := MarkerFields{Version: 1730901234, KeyID: "primary", Applied: fixedTime}
+	res, err := WritePip(makeMap("https://proxy.example.test/pypi/simple/"), PipScopeUser, mark)
+	if err != nil {
+		t.Fatalf("WritePip: %v", err)
+	}
+	if !res.Changed {
+		t.Error("expected Changed=true")
+	}
+	if !res.ReplacedOperator {
+		t.Error("expected ReplacedOperator=true when overwriting operator-curated pip.conf")
+	}
+
+	backup := path + ".sentari-backup-2026-04-25T10-00-00Z"
+	got, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatalf("operator backup not written: %v", err)
+	}
+	if string(got) != operatorBody {
+		t.Errorf("backup mismatch:\ngot  %q\nwant %q", got, operatorBody)
+	}
+}
+
+// Re-applying over an already-Sentari-managed file must NOT set
+// ReplacedOperator (we own that file; nothing operator-curated is lost).
+func TestWritePip_RewritingSentariConfigNotFlagged(t *testing.T) {
+	dir := t.TempDir()
+	userHomeOverride(t, dir)
+	mark := MarkerFields{Version: 1730901234, KeyID: "primary", Applied: fixedTime}
+	if _, err := WritePip(makeMap("https://proxy.example.test/pypi/simple/"), PipScopeUser, mark); err != nil {
+		t.Fatal(err)
+	}
+	// Bump the version so content differs → rewrite path, but the
+	// existing file is Sentari-managed, not operator-curated.
+	mark2 := MarkerFields{Version: 9999, KeyID: "primary", Applied: fixedTime}
+	res, err := WritePip(makeMap("https://proxy.example.test/pypi/simple/"), PipScopeUser, mark2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ReplacedOperator {
+		t.Error("ReplacedOperator must be false when rewriting our own Sentari-managed config")
+	}
+}
+
 func TestWritePip_IdempotentSecondCall(t *testing.T) {
 	dir := t.TempDir()
 	userHomeOverride(t, dir)

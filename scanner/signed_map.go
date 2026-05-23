@@ -23,6 +23,9 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"sync"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // MaxMapPayloadBytes is the hard cap on the canonical-JSON size of a
@@ -33,7 +36,15 @@ const MaxMapPayloadBytes = 5 * 1024 * 1024 // 5 MiB
 // accept as license-map signers, keyed by key_id.  Populated via
 // RegisterTrustedMapKey at init time (from the pinned-keys file or a
 // dev env override) — never mutated at runtime.
-var trustedMapKeys = map[string]ed25519.PublicKey{}
+//
+// trustedMapKeysMu guards the map: registration happens at init and on
+// trust bootstrap (writers), while the verify hot path and diagnostic
+// listing read it.  Without the lock, a register racing a verify is a
+// concurrent map read/write (fatal in Go) — see audit finding 1.
+var (
+	trustedMapKeysMu sync.RWMutex
+	trustedMapKeys   = map[string]ed25519.PublicKey{}
+)
 
 // RegisterTrustedMapKey pins a public key under a given key_id.  Intended
 // to be called from package init blocks (trustkeys.go) and from dev-only
@@ -43,12 +54,24 @@ func RegisterTrustedMapKey(keyID string, pub ed25519.PublicKey) {
 	if len(pub) != ed25519.PublicKeySize {
 		return
 	}
+	trustedMapKeysMu.Lock()
+	defer trustedMapKeysMu.Unlock()
 	trustedMapKeys[keyID] = pub
+}
+
+// lookupTrustedMapKey returns the pinned key for keyID under a read lock.
+func lookupTrustedMapKey(keyID string) (ed25519.PublicKey, bool) {
+	trustedMapKeysMu.RLock()
+	defer trustedMapKeysMu.RUnlock()
+	pub, ok := trustedMapKeys[keyID]
+	return pub, ok
 }
 
 // TrustedMapKeyIDs returns the list of pinned key IDs.  Exported for
 // diagnostics and dev tooling; not used on the hot path.
 func TrustedMapKeyIDs() []string {
+	trustedMapKeysMu.RLock()
+	defer trustedMapKeysMu.RUnlock()
 	ids := make([]string, 0, len(trustedMapKeys))
 	for k := range trustedMapKeys {
 		ids = append(ids, k)
@@ -89,7 +112,7 @@ func VerifyMapEnvelope(data []byte) (*LicenseMap, error) {
 		return nil, errors.New("envelope: missing required field")
 	}
 
-	pub, ok := trustedMapKeys[env.KeyID]
+	pub, ok := lookupTrustedMapKey(env.KeyID)
 	if !ok {
 		return nil, fmt.Errorf("envelope: unknown signing key_id %q", env.KeyID)
 	}
@@ -126,7 +149,10 @@ func VerifyMapEnvelope(data []byte) (*LicenseMap, error) {
 	if m.SPDXMap == nil || m.TierMap == nil {
 		return nil, errors.New("envelope: missing spdx_map or tier_map")
 	}
-	if len(m.SPDXMap) == 0 && len(m.TierMap) == 0 {
+	// Reject if EITHER map is empty: a payload with a populated TierMap
+	// but an empty SPDXMap (or vice-versa) is a partial-downgrade attack
+	// that the old && check let through (audit finding 3).
+	if len(m.SPDXMap) == 0 || len(m.TierMap) == 0 {
 		return nil, errors.New("envelope: empty maps (possible downgrade)")
 	}
 
@@ -159,7 +185,13 @@ func canonicalJSON(v interface{}) ([]byte, error) {
 // Verification failures are the expected case after a signing-key
 // rotation or disk tampering — callers should log at warning level.
 func LoadVerifiedOverlayFromFile(path string) bool {
-	data, err := os.ReadFile(path)
+	// Bounded, symlink-/special-file-refusing read.  A plain os.ReadFile
+	// would slurp a multi-GiB corrupt cache into memory (OOM) or block
+	// forever on a FIFO before VerifyMapEnvelope's size cap could fire
+	// (audit finding 2).  safeio.ReadFile stat-checks the size and the
+	// file type up front.  Cap at MaxMapPayloadBytes — VerifyMapEnvelope
+	// re-applies the same cap defensively.
+	data, err := safeio.ReadFile(path, MaxMapPayloadBytes)
 	if err != nil {
 		return false
 	}

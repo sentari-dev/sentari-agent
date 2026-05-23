@@ -36,10 +36,13 @@ func TestV3RoundTrip_SupplyChainSignals(t *testing.T) {
 				PackageName:    "left-pad",
 				PackageVersion: "1.3.0",
 				Ecosystem:      "npm",
-				SignalType:     "deprecated",
-				Severity:       "medium",
-				Source:         "npm_registry",
-				Raw:            map[string]interface{}{"reason": "use String.prototype.padStart"},
+				// Agent-emitted signal_type per the v3 contract (the
+				// server-only "deprecated" value must NOT come from the
+				// agent — audit finding 7).
+				SignalType: "postinstall_script",
+				Severity:   "medium",
+				Source:     "agent-npm-scripts",
+				Raw:        map[string]interface{}{"reason": "runs a postinstall hook"},
 			},
 			{
 				PackageName:    "requests",
@@ -47,7 +50,7 @@ func TestV3RoundTrip_SupplyChainSignals(t *testing.T) {
 				Ecosystem:      "pypi",
 				SignalType:     "yanked",
 				Severity:       "high",
-				Source:         "pypi_json",
+				Source:         "pypi-yanked-cache",
 				// Raw is omitempty — leaving it unset must produce a JSON
 				// payload without a `raw` key, matching the schema.
 			},
@@ -77,8 +80,8 @@ func TestV3RoundTrip_SupplyChainSignals(t *testing.T) {
 		t.Fatalf("expected 2 signals, got %d", len(decoded.SupplyChainSignals))
 	}
 	if decoded.SupplyChainSignals[0].PackageName != "left-pad" ||
-		decoded.SupplyChainSignals[0].SignalType != "deprecated" ||
-		decoded.SupplyChainSignals[0].Raw["reason"] != "use String.prototype.padStart" {
+		decoded.SupplyChainSignals[0].SignalType != "postinstall_script" ||
+		decoded.SupplyChainSignals[0].Raw["reason"] != "runs a postinstall hook" {
 		t.Fatalf("row 0 corrupted: %+v", decoded.SupplyChainSignals[0])
 	}
 	if decoded.SupplyChainSignals[1].PackageName != "requests" ||
@@ -98,18 +101,22 @@ func TestV3RoundTrip_LicenseEvidence(t *testing.T) {
 				PackageVersion: "1.3.0",
 				Ecosystem:      "npm",
 				SpdxID:         "WTFPL",
-				Source:         "package_json",
-				Confidence:     0.95,
-				RawText:        "DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE",
+				// Agent-emitted license source per the v3 contract
+				// (npm package.json -> "spdx_pkg"); the old "package_json"
+				// value is not in the contract enum — audit finding 7.
+				Source:     "spdx_pkg",
+				Confidence: 0.95,
+				RawText:    "DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE",
 			},
 			{
 				PackageName:    "no-license-pkg",
 				PackageVersion: "0.0.1",
-				Ecosystem:      "npm",
+				Ecosystem:      "pypi",
 				// SpdxID + RawText are omitempty — agent emits a row with
 				// only Source + Confidence when it couldn't classify the
-				// license but did find a license-shaped artefact.
-				Source:     "license_file",
+				// license but did find a license-shaped artefact.  "trove"
+				// is a contract-valid agent source (PyPI Trove classifiers).
+				Source:     "trove",
 				Confidence: 0.20,
 			},
 		},
@@ -146,7 +153,7 @@ func TestV3RoundTrip_LicenseEvidence(t *testing.T) {
 	}
 	if decoded.LicenseEvidence[1].SpdxID != "" ||
 		decoded.LicenseEvidence[1].RawText != "" ||
-		decoded.LicenseEvidence[1].Source != "license_file" {
+		decoded.LicenseEvidence[1].Source != "trove" {
 		t.Fatalf("row 1 corrupted: %+v", decoded.LicenseEvidence[1])
 	}
 }
@@ -221,10 +228,10 @@ func TestV3RoundTrip_AllThreeFieldsTogether(t *testing.T) {
 		DeviceID: "00000000-0000-0000-0000-000000000004",
 		Hostname: "full-host",
 		SupplyChainSignals: []deptree.SupplyChainSignal{
-			{PackageName: "p", PackageVersion: "1", Ecosystem: "npm", SignalType: "deprecated", Severity: "low", Source: "npm_registry"},
+			{PackageName: "p", PackageVersion: "1", Ecosystem: "npm", SignalType: "unsigned", Severity: "low", Source: "agent-npm-scripts"},
 		},
 		LicenseEvidence: []deptree.LicenseEvidence{
-			{PackageName: "p", PackageVersion: "1", Ecosystem: "npm", SpdxID: "MIT", Source: "package_json", Confidence: 1.0},
+			{PackageName: "p", PackageVersion: "1", Ecosystem: "npm", SpdxID: "MIT", Source: "spdx_pkg", Confidence: 1.0},
 		},
 		InstalledRuntimes: []runtimeversions.InstalledRuntime{
 			{Name: "python", Version: "3.12.0", Cycle: "3.12", InstallPath: "/usr/bin/python3"},

@@ -8,10 +8,17 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/pathfilter"
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
+
+// _defaultNodeWalkDepth caps how deep DetectNodeInDir descends below the
+// search dir, mirroring _defaultJDKWalkDepth / _defaultPythonWalkDepth. An
+// unbounded WalkDir under deep container/volume mounts used to dominate
+// scan latency; a cap of 4 still finds every real-world node layout.
+const _defaultNodeWalkDepth = 4
 
 // maxNodeBinaryBytes is intentionally bounded to the first 16 MiB of the
 // binary. The `node-vX.Y.Z` marker is embedded in .rodata and is reliably
@@ -99,16 +106,30 @@ func DetectAllNodes(paths []string) []InstalledRuntime {
 // DetectNodeInDir is a convenience for callers that have a parent
 // directory and want to probe well-known binary names.
 func DetectNodeInDir(dir string) []InstalledRuntime {
+	return detectNodeInDirWithDepth(dir, _defaultNodeWalkDepth)
+}
+
+func detectNodeInDirWithDepth(dir string, maxDepth int) []InstalledRuntime {
 	candidates := []string{"node", "node.exe"}
+	rootClean := filepath.Clean(dir)
 	var out []InstalledRuntime
 	for _, name := range candidates {
-		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		_ = filepath.WalkDir(rootClean, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
 			if d.IsDir() {
 				if pathfilter.ShouldSkipDir(path) {
 					return filepath.SkipDir
+				}
+				// Depth cap — measured in path separators below rootClean.
+				if path != rootClean {
+					rel, rerr := filepath.Rel(rootClean, path)
+					if rerr == nil {
+						if strings.Count(rel, string(filepath.Separator))+1 > maxDepth {
+							return filepath.SkipDir
+						}
+					}
 				}
 				return nil
 			}

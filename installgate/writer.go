@@ -32,12 +32,17 @@
 package installgate
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // MaxConfigFileBytes is the upper bound this package will ever
@@ -116,12 +121,26 @@ func WriteAtomic(opts WriteOptions) (bool, error) {
 		opts.FileMode = 0o644
 	}
 
-	// Cleanup any stranded ``.sentari-tmp`` from a prior run that
-	// crashed between fsync and rename.  Best-effort — a permission
-	// error here doesn't block the normal write path because the
-	// final ``os.Rename`` will fail anyway with a clearer message.
-	tmpPath := opts.Path + ".sentari-tmp"
-	_ = os.Remove(tmpPath)
+	// Cleanup any stranded legacy ``.sentari-tmp`` from a prior run
+	// of an older agent build that used the predictable fixed suffix.
+	// Best-effort — a permission error here doesn't block the normal
+	// write path.  Current builds never write to this fixed name (it
+	// is attacker-predictable); we only sweep it so upgraded hosts
+	// don't accumulate half-written state.
+	_ = os.Remove(opts.Path + ".sentari-tmp")
+
+	// Build a fresh, unpredictable temp path in the SAME directory as
+	// the final config (rename is atomic only within one filesystem).
+	// A random nonce in the name means a local attacker who can write
+	// to the (world-writable) config dir cannot pre-plant our temp
+	// inode — and writeAndSync's O_CREATE|O_EXCL refuses to open any
+	// inode that somehow already exists at the name.  Together this
+	// closes the symlink-follow LPE the predictable fixed name allowed.
+	nonce, err := randomNonceHex()
+	if err != nil {
+		return false, fmt.Errorf("generate tmp nonce: %w", err)
+	}
+	tmpPath := opts.Path + ".sentari-tmp-" + nonce
 
 	// Idempotency check.  If the path exists and its bytes already
 	// match what we are about to write, skip the rename + fsync —
@@ -247,7 +266,12 @@ var sentariManagedSentinelSlash = []byte("// Managed by Sentari")
 const markerSearchBytes = 1024
 
 func isSentariManaged(path string) (bool, error) {
-	f, err := os.Open(path)
+	// safeio.Open refuses a symlink leaf (ErrSymlink) and non-regular
+	// files (ErrNotRegular).  A symlinked config path is an attack
+	// (point the marker check at /etc/shadow); we refuse to decide
+	// under that uncertainty and surface the error so the caller skips
+	// the file rather than reading the symlink target.
+	f, err := safeio.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
@@ -321,7 +345,36 @@ func Remove(path string) (bool, error) {
 		}
 		return false, fmt.Errorf("remove %s: %w", path, err)
 	}
+	// Surface (do NOT auto-restore) any backup sibling so operators
+	// reverting install-gate know a pre-Sentari restore candidate
+	// exists.  Auto-restoring would be wrong: the operator may have
+	// intentionally disabled the gate AND want the host left config-
+	// free.  Info-level only; absence of a backup is silent.
+	if backup := findBackupCandidate(path); backup != "" {
+		log.Printf("[installgate] removed Sentari-managed config %s; restore candidate available at %s (mv it back to revert)", path, backup)
+	}
 	return true, nil
+}
+
+// findBackupCandidate returns the path of a ``.sentari-backup-*``
+// sibling for ``path`` if one exists, else "".  When several backups
+// exist (multiple operator→Sentari transitions over time) the
+// lexically-greatest name is returned — the suffix is an RFC3339-ish
+// timestamp, so lexical max is the most recent backup, the one an
+// operator most likely wants to inspect first.  Best-effort: any glob
+// error yields "" (we never block a removal on backup discovery).
+func findBackupCandidate(path string) string {
+	matches, err := filepath.Glob(path + ".sentari-backup-*")
+	if err != nil || len(matches) == 0 {
+		return ""
+	}
+	best := matches[0]
+	for _, m := range matches[1:] {
+		if m > best {
+			best = m
+		}
+	}
+	return best
 }
 
 // readBoundedIfExists returns the file contents capped at
@@ -329,15 +382,21 @@ func Remove(path string) (bool, error) {
 // error means the file does not exist (caller's idempotency branch
 // short-circuits to "first write").
 func readBoundedIfExists(path string) ([]byte, error) {
-	f, err := os.Open(path)
+	// safeio.ReadFile refuses a symlink leaf (ErrSymlink) and non-
+	// regular files, and caps the read — so a symlinked config path
+	// can never be read through to a sensitive target during the
+	// idempotency check.  A missing file is still the "first write"
+	// signal (nil, nil).  +1 on the cap matches the old LimitReader
+	// behaviour: an over-cap existing file surfaces as an error and
+	// WriteAtomic refuses rather than silently truncating its view.
+	data, err := safeio.ReadFile(path, MaxConfigFileBytes+1)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, MaxConfigFileBytes+1))
+	return data, nil
 }
 
 // bytesEqual returns true iff two byte slices carry the same bytes.
@@ -355,11 +414,35 @@ func bytesEqual(a, b []byte) bool {
 	return true
 }
 
+// randomNonceHex returns 16 hex chars (8 random bytes) for the temp-
+// file suffix.  crypto/rand so the name is unpredictable to a local
+// attacker racing the writer — a predictable suffix would let them
+// pre-plant a symlink at the exact temp path and re-open the LPE that
+// O_EXCL closes.  8 bytes (64 bits) is far more than enough collision
+// resistance for a same-directory single-writer temp name.
+func randomNonceHex() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
 // writeAndSync writes data to path and fsyncs before returning.
 // Without the fsync, a kernel crash between rename and journal
 // flush could leave us with a renamed-but-empty file.
+//
+// The open is O_CREATE|O_EXCL|O_WRONLY (+O_NOFOLLOW on unix) — never
+// O_TRUNC through a pre-existing inode.  The temp file lives in the
+// final config's directory, which pip / npm / Maven keep world-
+// writable (0755), so a local attacker can pre-plant ``path`` as a
+// symlink to a root-owned file; O_EXCL refuses to open any existing
+// inode (incl. a symlink) so the root-running agent can never be
+// tricked into truncating the symlink's target (LPE).  Callers
+// generate ``path`` with a random nonce so the name itself cannot be
+// pre-planted either.  ``backupOriginal`` uses the same O_EXCL guard.
 func writeAndSync(path string, data []byte, mode os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	f, err := openExclNoFollow(path, mode)
 	if err != nil {
 		return fmt.Errorf("open tmp %s: %w", path, err)
 	}
@@ -417,7 +500,12 @@ func backupOriginal(path string, now time.Time, customSuffix string) error {
 		return nil
 	}
 
-	src, err := os.Open(path)
+	// safeio.Open refuses to follow a symlink leaf — without this the
+	// backup step would copy the contents of whatever a symlinked
+	// config path points at (e.g. /etc/shadow) into a world-
+	// discoverable ``.sentari-backup-*`` file.  Refuse and let the
+	// caller surface the warning instead of acting.
+	src, err := safeio.Open(path)
 	if err != nil {
 		return fmt.Errorf("open original %s: %w", path, err)
 	}

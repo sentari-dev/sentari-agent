@@ -11,12 +11,27 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // defaultDockerRoot is the well-known Docker data-root on Linux.
 // Overridable via Config.DockerRoot for tests or for hosts where
 // the daemon was configured with ``--data-root=/mnt/docker``.
 const defaultDockerRoot = "/var/lib/docker"
+
+// Per-metadata-file size caps.  Every Docker metadata read is routed
+// through safeio with an explicit ceiling so a symlinked or oversized
+// file (a hostile package planting ``cache-id -> /etc/shadow``, or a
+// multi-GB ``repositories.json``) is refused rather than followed or
+// slurped whole.
+const (
+	// cacheID / mount-id hold a single 64-hex-char layer/mount UUID;
+	// 4 KiB is orders of magnitude above the real ~65-byte content.
+	dockerLayerIDMaxBytes = 4 << 10 // 4 KiB
+	// repositories.json is the tag index; a few MiB covers even a
+	// host with thousands of tagged images.
+	repositoriesJSONMaxBytes = 4 << 20 // 4 MiB
+)
 
 // dockerImageConfig mirrors the subset of the Docker image config
 // JSON we consume.  Docker writes the full OCI image config (plus a
@@ -217,7 +232,9 @@ func resolveDockerLayerPaths(root, imageDir string, diffIDs []string) ([]string,
 			chainID = hex.EncodeToString(h[:])
 		}
 		cacheIDPath := filepath.Join(layerdb, chainID, "cache-id")
-		cacheID, err := os.ReadFile(cacheIDPath)
+		// safeio: refuse a symlinked cache-id (``cache-id ->
+		// /etc/shadow``) and cap the tiny UUID payload.
+		cacheID, err := safeio.ReadFile(cacheIDPath, dockerLayerIDMaxBytes)
 		if err != nil {
 			errs = append(errs, scanner.ScanError{
 				Path:    cacheIDPath,
@@ -336,7 +353,8 @@ func dockerContainerUpperDir(root, cid string) (string, error) {
 	// drivers if needed.
 	for _, driver := range []string{"overlay2", "overlay", "aufs"} {
 		mountIDPath := filepath.Join(root, "image", driver, "layerdb", "mounts", cid, "mount-id")
-		b, err := os.ReadFile(mountIDPath)
+		// safeio: refuse a symlinked mount-id and cap the tiny UUID.
+		b, err := safeio.ReadFile(mountIDPath, dockerLayerIDMaxBytes)
 		if err != nil {
 			continue
 		}
@@ -355,7 +373,10 @@ func dockerContainerUpperDir(root, cid string) (string, error) {
 // readRepositories parses Docker's ``repositories.json`` and
 // returns imageID → []tags, or nil if the file is absent.
 func readRepositories(path string) (map[string][]string, error) {
-	data, err := os.ReadFile(path)
+	// safeio-backed: refuses a symlinked or oversized index, caps the
+	// read.  A genuinely-absent index still maps to (nil, nil) via
+	// os.IsNotExist, preserving the "no tags known" path.
+	data, err := readCappedFile(path, repositoriesJSONMaxBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -404,17 +425,15 @@ func readDockerContainerConfig(path string) (dockerContainerConfig, error) {
 	return cfg, nil
 }
 
-// readCappedFile reads up to ``max`` bytes; returns an error if the
-// file exceeds the cap rather than silently truncating.
+// readCappedFile reads up to ``max`` bytes via safeio: it refuses a
+// symlinked leaf (O_NOFOLLOW) and non-regular files, caps the size,
+// and stats through the open fd — closing the os.Stat+os.ReadFile
+// TOCTOU window where a path could be swapped to a symlink between
+// the size check and the read.  A missing file surfaces an error that
+// os.IsNotExist still recognises, so readRepositories' "no index =
+// no tags" branch keeps working.
 func readCappedFile(path string, max int64) ([]byte, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > max {
-		return nil, fmt.Errorf("%s exceeds cap (%d > %d bytes)", path, info.Size(), max)
-	}
-	return os.ReadFile(path)
+	return safeio.ReadFile(path, max)
 }
 
 // stripSHA256 returns the hex portion of a ``sha256:<hex>`` digest

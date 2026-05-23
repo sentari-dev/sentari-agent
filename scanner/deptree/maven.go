@@ -14,17 +14,22 @@ package deptree
 import (
 	"encoding/xml"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
+
+// maxPomBytes caps a child POM read from ~/.m2 — POMs are tiny
+// declarative XML, so 1 MiB is well above any realistic size.
+const maxPomBytes = 1 << 20 // 1 MiB
 
 // ParseMavenPom reads a pom.xml + recurses through ~/.m2 to emit dep
 // edges. m2Dir is the absolute path to a Maven local repository root
 // (typically ~/.m2/repository).
 func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
-	raw, err := os.ReadFile(pomPath)
+	raw, err := safeio.ReadFile(pomPath, maxLockfileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", pomPath, err)
 	}
@@ -141,7 +146,7 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 
 		// Recurse: read the dep's POM from ~/.m2 and queue its deps.
 		childPomPath := mavenPomLocation(m2Dir, ga.groupId, ga.artifactId, version)
-		childRaw, err := os.ReadFile(childPomPath)
+		childRaw, err := safeio.ReadFile(childPomPath, maxPomBytes)
 		if err != nil {
 			// Pom missing in local repo — agent has no network, no further
 			// recursion possible. Leaf node in our graph.

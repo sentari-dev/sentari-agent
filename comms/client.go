@@ -374,11 +374,54 @@ func (c *Client) RegisterWithToken(ctx context.Context, hostname, enrollmentToke
 		return nil, nil, fmt.Errorf("decode registration response: %w", err)
 	}
 
+	// Validate that the issued device cert actually chains to the CA the
+	// server returned in the same bundle.  Trust for this bundle rides on
+	// the TLS fingerprint pinned at bootstrap, but a buggy/compromised
+	// server could still hand back an internally-inconsistent bundle; we
+	// must not persist a device cert that won't verify against the CA we're
+	// about to pin, or the agent bricks its own mTLS on the next cycle.
+	if err := verifyDeviceCertChain([]byte(regResp.DeviceCert), []byte(regResp.CACert)); err != nil {
+		return nil, nil, fmt.Errorf("registration bundle rejected: %w", err)
+	}
+
 	return &regResp, keyPEM, nil
 }
 
+// verifyDeviceCertChain confirms the PEM device cert verifies against the PEM
+// CA cert.  Returns an error describing the failure if the device cert does
+// not chain to the CA (or either input is unparseable).
+func verifyDeviceCertChain(deviceCertPEM, caCertPEM []byte) error {
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caCertPEM) {
+		return fmt.Errorf("verify chain: CA cert is not valid PEM")
+	}
+
+	block, _ := pem.Decode(deviceCertPEM)
+	if block == nil {
+		return fmt.Errorf("verify chain: device cert is not valid PEM")
+	}
+	deviceCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("verify chain: parse device cert: %w", err)
+	}
+
+	// We only care that the leaf chains to the returned CA — not hostname
+	// (this is a client cert) and not key-usage policy beyond what the CA
+	// asserts.  Skip time validity is NOT requested; an expired leaf is a
+	// real problem worth surfacing at registration.
+	if _, err := deviceCert.Verify(x509.VerifyOptions{
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	}); err != nil {
+		return fmt.Errorf("verify chain: device cert does not chain to returned CA: %w", err)
+	}
+	return nil
+}
+
 // SaveCertificates writes the CA cert, device cert, and device key to certDir.
-// File permissions: ca.crt and device.crt are 0644; device.key is 0600.
+// File permissions: ca.crt is 0640 (CA is not secret but no need to be world-
+// readable); device.crt is 0600 (it is the agent's mTLS identity — pair it
+// with the key's secrecy); device.key is 0600.
 func SaveCertificates(certDir string, caCert, deviceCert, deviceKey []byte) error {
 	if err := os.MkdirAll(certDir, 0700); err != nil {
 		return fmt.Errorf("create cert dir: %w", err)
@@ -390,8 +433,8 @@ func SaveCertificates(certDir string, caCert, deviceCert, deviceKey []byte) erro
 		mode os.FileMode
 	}
 	for _, f := range []certFile{
-		{"ca.crt", caCert, 0644},
-		{"device.crt", deviceCert, 0644},
+		{"ca.crt", caCert, 0640},
+		{"device.crt", deviceCert, 0600},
 		{"device.key", deviceKey, 0600},
 	} {
 		path := filepath.Join(certDir, f.name)

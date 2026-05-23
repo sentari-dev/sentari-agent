@@ -4,9 +4,10 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // ParseYarnLock reads yarn.lock v1 and a sibling package.json to emit
@@ -20,9 +21,16 @@ import (
 // edge is tagged "transitive" since direct/transitive can't be
 // established.
 func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
-	raw, err := os.ReadFile(yarnLockPath)
+	raw, err := safeio.ReadFile(yarnLockPath, maxLockfileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", yarnLockPath, err)
+	}
+	// Yarn v2+ ("berry") lockfiles open with a `__metadata:` block and
+	// use a different schema the v1 parser below would misparse into
+	// garbage edges.  Detect it (scan the first ~256 bytes) and bail
+	// cleanly — berry dep-tree support is a separate piece of work.
+	if isYarnBerry(raw) {
+		return nil, nil
 	}
 	entries, err := parseYarnV1(string(raw))
 	if err != nil {
@@ -49,7 +57,7 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 	devDeps := map[string]string{}
 	peerDeps := map[string]string{}
 	optionalDeps := map[string]string{}
-	if pjRaw, err := os.ReadFile(packageJsonPath); err == nil {
+	if pjRaw, err := safeio.ReadFile(packageJsonPath, maxLockfileBytes); err == nil {
 		var pj struct {
 			Name                 string            `json:"name"`
 			Version              string            `json:"version"`
@@ -197,6 +205,22 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 		return edges[i].ChildName < edges[j].ChildName
 	})
 	return edges, nil
+}
+
+// isYarnBerry reports whether raw is a yarn v2+ ("berry") lockfile,
+// identified by a top-level `__metadata:` block within the first ~256
+// bytes.  Classic v1 lockfiles never contain it.
+func isYarnBerry(raw []byte) bool {
+	head := raw
+	if len(head) > 256 {
+		head = head[:256]
+	}
+	for _, line := range strings.Split(string(head), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "__metadata:") {
+			return true
+		}
+	}
+	return false
 }
 
 // yarnSpecName extracts the package name from a yarn key like

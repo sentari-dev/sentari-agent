@@ -18,7 +18,11 @@ import (
 // resolved-beneath variant would require openat2(RESOLVE_NO_SYMLINKS)
 // on Linux 5.6+.  See package doc for the threat-model discussion.
 func openNoFollow(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	// O_NONBLOCK so a blocking open() of a writer-less FIFO returns
+	// immediately instead of hanging the scanner forever; the caller
+	// then rejects any non-regular file via its fstat check.  On a
+	// regular file O_NONBLOCK has no effect on read semantics.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err == nil {
 		return f, nil
 	}

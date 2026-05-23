@@ -112,6 +112,15 @@ type WritePipResult struct {
 	// Sentari-managed config (fail-open path: the policy-map no
 	// longer points pip anywhere, so the agent should revert).
 	Removed bool
+
+	// ReplacedOperator is true iff the writer overwrote an existing
+	// operator-curated pip.conf (a file present WITHOUT the Sentari
+	// marker).  pip.conf is a complete Sentari override — we do not
+	// merge — so the operator's prior settings survive only in the
+	// ``.sentari-backup-*`` the writer always creates on this path.
+	// The orchestrator surfaces this flag to the audit log so the
+	// replacement is never a silent clobber.
+	ReplacedOperator bool
 }
 
 // WritePip applies the pip section of a verified policy-map to the
@@ -176,6 +185,25 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 		return res, nil
 	}
 
+	// Auditability: detect whether we are about to overwrite an
+	// operator-curated config (present but lacking the Sentari marker)
+	// BEFORE WriteAtomic backs it up and replaces it.  isSentariManaged
+	// returns (false, nil) for absent files and for marker-less files;
+	// we distinguish the two with an explicit existence check so a
+	// fresh write doesn't false-flag.  Routed through safeio inside
+	// isSentariManaged, so a symlinked path errors out here too.
+	managed, err := isSentariManaged(res.Path)
+	if err != nil {
+		return res, fmt.Errorf("installgate.WritePip: inspect existing config: %w", err)
+	}
+	replacingOperator := false
+	if !managed {
+		if _, statErr := os.Lstat(res.Path); statErr == nil {
+			// File exists but carries no Sentari marker → operator-curated.
+			replacingOperator = true
+		}
+	}
+
 	body, err := renderPipConf(endpoint, marker)
 	if err != nil {
 		return res, err
@@ -191,6 +219,12 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 		return res, err
 	}
 	res.Changed = changed
+	// Only flag when we actually replaced content (Changed) — a no-op
+	// idempotent re-write of an identical file shouldn't claim a
+	// replacement.  WriteAtomic guarantees the backup on the
+	// content-differs path, so Changed && replacingOperator ⇒ backup
+	// written.
+	res.ReplacedOperator = changed && replacingOperator
 	return res, nil
 }
 
