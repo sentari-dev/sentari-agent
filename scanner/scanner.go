@@ -148,28 +148,23 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 	// packages. Warn operators so they know to grant FDA.
 	if runtime.GOOS == "darwin" && os.Getuid() == 0 && filepath.Clean(r.cfg.ScanRoot) == "/" {
 		for _, home := range userHomeDirs() {
-			docsDir := filepath.Join(home, "Documents")
-			if info, err := os.Stat(docsDir); err == nil && info.IsDir() {
-				entries, _ := os.ReadDir(docsDir)
-				if len(entries) == 0 {
-					// A user home with an empty Documents/ is almost certainly
-					// TCC blocking access, not a genuinely empty directory.
-					msg := fmt.Sprintf(
-						"macOS TCC: %s appears empty (likely blocked by Transparency, Consent, and Control). "+
-							"Grant Full Disk Access to /usr/local/bin/sentari-agent in "+
-							"System Settings → Privacy & Security → Full Disk Access "+
-							"to scan Python environments in user project folders.",
-						docsDir,
-					)
-					fmt.Fprintln(os.Stderr, "WARNING: "+msg)
-					result.Errors = append(result.Errors, ScanError{
-						Path:      docsDir,
-						EnvType:   "tcc",
-						Error:     msg,
-						Timestamp: time.Now().UTC(),
-					})
-				}
+			if !homeLikelyTCCBlocked(home) {
+				continue
 			}
+			msg := fmt.Sprintf(
+				"macOS TCC: user folders under %s appear empty (likely blocked by Transparency, Consent, and Control). "+
+					"Grant Full Disk Access to /usr/local/bin/sentari-agent in "+
+					"System Settings → Privacy & Security → Full Disk Access "+
+					"to scan Python environments in user project folders.",
+				home,
+			)
+			fmt.Fprintln(os.Stderr, "WARNING: "+msg)
+			result.Errors = append(result.Errors, ScanError{
+				Path:      home,
+				EnvType:   "tcc",
+				Error:     msg,
+				Timestamp: time.Now().UTC(),
+			})
 		}
 	}
 
@@ -246,6 +241,34 @@ func extraScanRoots(homeDir string) []string {
 
 // userHomeDirs returns home directories to check for version manager
 // installations. On most systems this is just the current user's home.
+// tccProtectedFolders are the user folders macOS gates behind Full Disk
+// Access via TCC (Transparency, Consent, and Control).  Without FDA, a
+// root scanner reads them as empty with NO permission error, silently
+// missing packages in user project trees.
+var tccProtectedFolders = []string{"Documents", "Desktop", "Downloads"}
+
+// homeLikelyTCCBlocked reports whether home shows the signature of TCC
+// blocking: at least two of the protected folders exist and EVERY existing
+// one is empty.  TCC gates these folders together (per-app, not per-folder),
+// so a uniform "all empty" across multiple folders is a strong signal.  A
+// single empty folder is deliberately NOT treated as blocked — it may be
+// genuinely empty, and warning on it produced false-positive scan errors.
+func homeLikelyTCCBlocked(home string) bool {
+	existing, empty := 0, 0
+	for _, name := range tccProtectedFolders {
+		dir := filepath.Join(home, name)
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		existing++
+		if entries, _ := os.ReadDir(dir); len(entries) == 0 {
+			empty++
+		}
+	}
+	return existing >= 2 && empty == existing
+}
+
 // We also scan /home/* on Linux to cover multi-user servers where the
 // agent runs as root.
 func userHomeDirs() []string {
