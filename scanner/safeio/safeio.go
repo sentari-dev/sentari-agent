@@ -81,7 +81,10 @@ func ReadFile(path string, maxSize int64) ([]byte, error) {
 		return nil, err
 	}
 	if info.IsDir() {
-		return nil, fmt.Errorf("safeio: %q is a directory, not a regular file", path)
+		// Wrap ErrNotRegular (a directory is a non-regular file) so
+		// errors.Is(err, ErrNotRegular) is reliable and consistent with
+		// Open(); keep the specific "directory" detail in the message.
+		return nil, fmt.Errorf("%w: %q is a directory", ErrNotRegular, path)
 	}
 	if !info.Mode().IsRegular() {
 		// FIFO, device node, or socket.  Reject before reading: a

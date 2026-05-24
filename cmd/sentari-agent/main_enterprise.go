@@ -848,8 +848,24 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 	// derived from this so an in-flight retry/backoff sleep inside
 	// runUpload → doRequest (which honours ctx.Done()) aborts promptly on
 	// shutdown rather than running the full backoff schedule to completion.
-	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	//
+	// We use a manual signal channel rather than signal.NotifyContext so the
+	// shutdown audit entry can record WHICH signal was received (SIGTERM from
+	// systemd/launchd stop vs SIGINT from an operator console) — meaningful
+	// forensic context in the append-only audit log.
+	rootCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	// Buffered so the handler records the signal before cancelling; the
+	// shutdown branch reads it after rootCtx.Done() (happens-after cancel).
+	shutdownSig := make(chan os.Signal, 1)
+	go func() {
+		s := <-sigCh
+		shutdownSig <- s
+		cancel()
+	}()
 
 	// One debouncer for the whole daemon lifetime so the consecutive-
 	// disable count persists across cycles (see InstallGateDisableDebouncer).
@@ -920,8 +936,14 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 		select {
 		case <-rootCtx.Done():
 			sleepTimer.Stop()
-			log.Info("shutting down gracefully", slog.String("signal", "SIGINT/SIGTERM"))
-			logAudit(auditLog, "agent.shutdown", "signal=SIGINT/SIGTERM")
+			sigName := "unknown"
+			select {
+			case s := <-shutdownSig:
+				sigName = s.String()
+			default:
+			}
+			log.Info("shutting down gracefully", slog.String("signal", sigName))
+			logAudit(auditLog, "agent.shutdown", "signal="+sigName)
 			return
 		case <-sleepTimer.C:
 			// Next cycle.
