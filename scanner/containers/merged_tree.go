@@ -183,13 +183,41 @@ func (m *MergedTree) Walk(fn func(MergedEntry) error) error {
 	return nil
 }
 
+// Layer-walk bounds.  A container rootfs is legitimately deep
+// (system Python at ``usr/lib/python3.12/site-packages/<pkg>/...``
+// already sits ~6 levels in, and nested vendored deps go deeper),
+// so the depth cap is generous-but-finite rather than the 4-level
+// cap the host-side scanners use.  A hostile image that nests
+// directories thousands deep — or fans out millions of entries in
+// one layer — would otherwise drive ``filepath.WalkDir`` into
+// CPU/memory exhaustion (walkLayer runs twice per layer per image).
+const (
+	// walkLayerMaxDepth caps how far below the layer root we descend,
+	// measured as path components below root (root's direct children
+	// are depth 1).  64 clears any realistic rootfs nesting while
+	// neutralising an adversarial deep chain.
+	walkLayerMaxDepth = 64
+	// walkLayerMaxEntries bounds the total number of entries a single
+	// walkLayer pass will visit before it stops short.  A layer with
+	// millions of tiny files is pathological; 5_000_000 is far above
+	// any real image yet still finite.
+	walkLayerMaxEntries = 5_000_000
+)
+
 // walkLayer iterates a single layer's filesystem tree and invokes fn
 // for each entry with its path relative to the layer root.  Uses
 // os.Lstat semantics so symlinks are reported as symlinks, not
 // followed.  Errors on individual entries are surfaced (the caller
 // can translate into ScanError if needed); a completely unreadable
 // root is a hard failure.
+//
+// The walk is bounded on two axes (walkLayerMaxDepth /
+// walkLayerMaxEntries): directories at or below the depth cap have
+// their children skipped (fs.SkipDir), and the pass stops descending
+// once the per-layer entry budget is exhausted.  Both bounds protect
+// against a hostile image; neither trims a realistic rootfs.
 func walkLayer(root string, fn func(relPath string, d fs.DirEntry) error) error {
+	entries := 0
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// A permission-denied on a subdirectory must not kill the
@@ -218,6 +246,30 @@ func walkLayer(root string, fn func(relPath string, d fs.DirEntry) error) error 
 		// off ``/``-paths (``META-INF/MANIFEST.MF`` etc.) so any
 		// platform divergence would silently miss entries.
 		rel = filepath.ToSlash(rel)
+
+		// Total-entry bound.  Once the budget is spent, stop the walk
+		// outright: every further entry is suppressed by skipping the
+		// subtree (directories) or returning nil (files), and the
+		// terminating fs.SkipAll halts WalkDir cleanly.
+		if entries >= walkLayerMaxEntries {
+			return fs.SkipAll
+		}
+
+		// Depth bound.  ``depth`` is the number of path components
+		// below root (a direct child is depth 1).  When a directory
+		// is at the cap, skip its contents — emit the directory entry
+		// itself (so the merged view still records the dir) but don't
+		// descend into it.
+		depth := strings.Count(rel, "/") + 1
+		if depth >= walkLayerMaxDepth && d.IsDir() {
+			entries++
+			if ferr := fn(rel, d); ferr != nil {
+				return ferr
+			}
+			return fs.SkipDir
+		}
+
+		entries++
 		return fn(rel, d)
 	})
 }

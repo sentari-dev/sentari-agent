@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -147,28 +148,23 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 	// packages. Warn operators so they know to grant FDA.
 	if runtime.GOOS == "darwin" && os.Getuid() == 0 && filepath.Clean(r.cfg.ScanRoot) == "/" {
 		for _, home := range userHomeDirs() {
-			docsDir := filepath.Join(home, "Documents")
-			if info, err := os.Stat(docsDir); err == nil && info.IsDir() {
-				entries, _ := os.ReadDir(docsDir)
-				if len(entries) == 0 {
-					// A user home with an empty Documents/ is almost certainly
-					// TCC blocking access, not a genuinely empty directory.
-					msg := fmt.Sprintf(
-						"macOS TCC: %s appears empty (likely blocked by Transparency, Consent, and Control). "+
-							"Grant Full Disk Access to /usr/local/bin/sentari-agent in "+
-							"System Settings → Privacy & Security → Full Disk Access "+
-							"to scan Python environments in user project folders.",
-						docsDir,
-					)
-					fmt.Fprintln(os.Stderr, "WARNING: "+msg)
-					result.Errors = append(result.Errors, ScanError{
-						Path:      docsDir,
-						EnvType:   "tcc",
-						Error:     msg,
-						Timestamp: time.Now().UTC(),
-					})
-				}
+			if !homeLikelyTCCBlocked(home) {
+				continue
 			}
+			msg := fmt.Sprintf(
+				"macOS TCC: user folders under %s appear empty (likely blocked by Transparency, Consent, and Control). "+
+					"Grant Full Disk Access to /usr/local/bin/sentari-agent in "+
+					"System Settings → Privacy & Security → Full Disk Access "+
+					"to scan Python environments in user project folders.",
+				home,
+			)
+			fmt.Fprintln(os.Stderr, "WARNING: "+msg)
+			result.Errors = append(result.Errors, ScanError{
+				Path:      home,
+				EnvType:   "tcc",
+				Error:     msg,
+				Timestamp: time.Now().UTC(),
+			})
 		}
 	}
 
@@ -245,6 +241,34 @@ func extraScanRoots(homeDir string) []string {
 
 // userHomeDirs returns home directories to check for version manager
 // installations. On most systems this is just the current user's home.
+// tccProtectedFolders are the user folders macOS gates behind Full Disk
+// Access via TCC (Transparency, Consent, and Control).  Without FDA, a
+// root scanner reads them as empty with NO permission error, silently
+// missing packages in user project trees.
+var tccProtectedFolders = []string{"Documents", "Desktop", "Downloads"}
+
+// homeLikelyTCCBlocked reports whether home shows the signature of TCC
+// blocking: at least two of the protected folders exist and EVERY existing
+// one is empty.  TCC gates these folders together (per-app, not per-folder),
+// so a uniform "all empty" across multiple folders is a strong signal.  A
+// single empty folder is deliberately NOT treated as blocked — it may be
+// genuinely empty, and warning on it produced false-positive scan errors.
+func homeLikelyTCCBlocked(home string) bool {
+	existing, empty := 0, 0
+	for _, name := range tccProtectedFolders {
+		dir := filepath.Join(home, name)
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		existing++
+		if entries, _ := os.ReadDir(dir); len(entries) == 0 {
+			empty++
+		}
+	}
+	return existing >= 2 && empty == existing
+}
+
 // We also scan /home/* on Linux to cover multi-user servers where the
 // agent runs as root.
 func userHomeDirs() []string {
@@ -555,10 +579,49 @@ func isVenvDangling(venvPath, pyvenvCfgPath string) string {
 	return ""
 }
 
+// deviceIDDataDir is the directory under which the persisted-UUID
+// last-resort device identity file is written.  Defaults to the
+// standard agent data dir; the cmd entrypoint can override it via
+// SetDeviceIDDataDir so the UUID lands alongside the cache/audit DBs.
+// Guarded because GetDeviceID may run from the scan worker pool while
+// startup is still wiring config.
+var (
+	deviceIDDataDirMu sync.RWMutex
+	deviceIDDataDir   = defaultDeviceIDDataDir
+)
+
+// defaultDeviceIDDataDir is the fixed last-resort location for the
+// persisted device-id file when the cmd entrypoint has not configured
+// one.  Mirrors cmd/sentari-agent's defaultDataDir; kept as a constant
+// here (rather than imported) to avoid a scanner -> cmd dependency.
+const defaultDeviceIDDataDir = "/var/lib/sentari"
+
+// SetDeviceIDDataDir configures where the persisted-UUID device-id file
+// is stored.  Additive: callers that never invoke it keep the previous
+// hostname/standard-location behaviour.  Intended to be called once at
+// startup from the cmd entrypoint with the resolved --data-dir value so
+// the UUID is colocated with the agent's other state.
+func SetDeviceIDDataDir(dir string) {
+	if dir == "" {
+		return
+	}
+	deviceIDDataDirMu.Lock()
+	deviceIDDataDir = dir
+	deviceIDDataDirMu.Unlock()
+}
+
+func getDeviceIDDataDir() string {
+	deviceIDDataDirMu.RLock()
+	defer deviceIDDataDirMu.RUnlock()
+	return deviceIDDataDir
+}
+
 // GetDeviceID returns a stable unique device identifier.
 // Linux: reads /etc/machine-id.
 // Windows: reads HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid via registry.
-// Falls back to hostname on any other OS or error.
+// Other (notably darwin) / any error: a persisted random UUID stored in
+// the agent data dir — stable across hostname renames and DHCP churn,
+// which the old os.Hostname() fallback was not (audit finding 8).
 func GetDeviceID() string {
 	switch runtime.GOOS {
 	case "linux":
@@ -574,8 +637,62 @@ func GetDeviceID() string {
 			return id
 		}
 	}
+
+	// No stable OS-level identifier (darwin, or a Linux box with no
+	// /etc/machine-id).  Use a persisted random UUID rather than the
+	// hostname so fleet identity does not churn on rename/DHCP.
+	idPath := filepath.Join(getDeviceIDDataDir(), "device-id")
+	if id := readOrCreatePersistedDeviceID(idPath); id != "" {
+		return id
+	}
+
+	// Last-ditch fallback only if the data dir is unwritable (read-only
+	// rootfs, permission denied).  Hostname is unstable but better than
+	// an empty device id that would break server-side dedup.
 	hostname, _ := os.Hostname()
 	return hostname
+}
+
+// readOrCreatePersistedDeviceID returns the UUID stored at path,
+// generating and persisting a fresh crypto/rand UUIDv4 on first use.
+// Returns "" only if neither reading an existing id nor creating one
+// succeeds (e.g. an unwritable data dir).
+func readOrCreatePersistedDeviceID(path string) string {
+	// Bounded, symlink-refusing read — the data dir is agent-owned but
+	// defence-in-depth costs nothing here.  A UUID is 36 bytes; cap
+	// generously at 128.
+	if data, err := safeio.ReadFile(path, 128); err == nil {
+		if id := strings.TrimSpace(string(data)); id != "" {
+			return id
+		}
+	}
+
+	id := newUUIDv4()
+	if id == "" {
+		return ""
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return ""
+	}
+	// 0600 — the device id is not a secret, but the data dir is 0700 and
+	// we keep file modes consistent with the rest of the agent state.
+	if err := os.WriteFile(path, []byte(id+"\n"), 0o600); err != nil {
+		return ""
+	}
+	return id
+}
+
+// newUUIDv4 returns a random RFC-4122 v4 UUID string, or "" if the
+// system CSPRNG is unavailable.  Pure stdlib — no external uuid dep.
+func newUUIDv4() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // getHostname returns the system hostname.

@@ -44,6 +44,42 @@ func TestDetectNodeBinary_noVersionMarker(t *testing.T) {
 	}
 }
 
+// TestDetectNodeInDir_respectsDepthCap mirrors the JDK/Python depth-cap
+// tests: an unbounded WalkDir under deep container/volume mounts used to
+// dominate scan latency. The cap (4) skips any node binary that lives
+// more than 4 levels below the search dir.
+func TestDetectNodeInDir_respectsDepthCap(t *testing.T) {
+	root := t.TempDir()
+	// Deep node at depth 6 — beyond the default cap of 4.
+	deep := filepath.Join(root, "a", "b", "c", "d", "e", "f")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "node"), []byte("ELF\x00junk\x00node-v16.20.2\x00more"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Shallow node at depth 1 — within the cap.
+	shallow := filepath.Join(root, "shallow")
+	if err := os.MkdirAll(shallow, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shallow, "node"), []byte("ELF\x00junk\x00node-v20.10.0\x00more"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DetectNodeInDir(root)
+	versions := make(map[string]bool)
+	for _, r := range got {
+		versions[r.Version] = true
+	}
+	if !versions["20.10.0"] {
+		t.Errorf("expected to find shallow 20.10.0 node, got %+v", got)
+	}
+	if versions["16.20.2"] {
+		t.Errorf("should NOT have found deep 16.20.2 node (beyond depth cap), got %+v", got)
+	}
+}
+
 // TestDetectNodeBinary_followsSymlinkOnce covers the Homebrew /
 // update-alternatives case where /usr/local/bin/node is a symlink to
 // the actual binary. safeio refuses to follow leaf symlinks (correct

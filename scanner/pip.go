@@ -50,7 +50,15 @@ func (venvScanner) EnvType() string { return EnvVenv }
 
 func (venvScanner) Match(dirPath, base string) MatchResult {
 	pyvenvCfg := filepath.Join(dirPath, "pyvenv.cfg")
-	if _, err := os.Stat(pyvenvCfg); err != nil {
+	// Lstat (not Stat) so we don't follow a symlinked marker: a hostile
+	// directory could plant ``pyvenv.cfg -> /some/real/file`` to make an
+	// arbitrary directory look like a venv (audit finding 6).  A genuine
+	// venv always has a regular-file pyvenv.cfg.
+	info, err := os.Lstat(pyvenvCfg)
+	if err != nil {
+		return MatchResult{}
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
 		return MatchResult{}
 	}
 	if reason := isVenvDangling(dirPath, pyvenvCfg); reason != "" {

@@ -50,3 +50,22 @@ func TestParseNuGetPackagesLock(t *testing.T) {
 		t.Errorf("transitive edge wrong: %+v", transitive)
 	}
 }
+
+// TestParseNuGetPackagesLock_depthPathConsistency guards against the
+// packages.lock.json transitive branch emitting a Depth that disagrees
+// with len(IntroducedByPath).  By convention a node at depth N has a
+// path of N+1 entries (root..node).  packages.lock.json carries no
+// parent info, so transitives are modelled as depth-1 children of the
+// synthetic "(unknown)" root → a 2-element path.
+func TestParseNuGetPackagesLock_depthPathConsistency(t *testing.T) {
+	edges, err := ParseNuGetPackagesLock(filepath.Join("testdata", "nuget", "lock-only", "packages.lock.json"))
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	for _, e := range edges {
+		if e.Depth != len(e.IntroducedByPath)-1 {
+			t.Errorf("edge %s->%s: Depth=%d but len(IntroducedByPath)=%d (want Depth == len(path)-1): %+v",
+				e.ParentName, e.ChildName, e.Depth, len(e.IntroducedByPath), e)
+		}
+	}
+}

@@ -10,10 +10,59 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
+
+// purlFor returns the Package-URL (purl) for a scanned package record,
+// derived from its ecosystem (EnvType). Returns "" when no meaningful,
+// standard purl can be produced — for ecosystems without a purl type
+// (ai_agent, container, tcc, unknown) or when the version is empty (which
+// would yield a dangling "pkg:npm/foo@"). Callers omit the purl when "".
+//
+// Ecosystem → purl type mapping:
+//
+//	pip / venv / conda / poetry / pipenv → pkg:pypi/
+//	npm                                  → pkg:npm/
+//	jvm                                  → pkg:maven/   (group:artifact split)
+//	nuget                                → pkg:nuget/
+//	system_deb                           → pkg:deb/
+//	system_rpm                           → pkg:rpm/
+//	everything else                      → "" (no purl)
+func purlFor(pkg scanner.PackageRecord) string {
+	if pkg.Version == "" {
+		return ""
+	}
+	ver := url.PathEscape(pkg.Version)
+	switch pkg.EnvType {
+	case scanner.EnvPip, scanner.EnvVenv, scanner.EnvConda, scanner.EnvPoetry, scanner.EnvPipenv:
+		return fmt.Sprintf("pkg:pypi/%s@%s", url.PathEscape(pkg.Name), ver)
+	case "npm":
+		return fmt.Sprintf("pkg:npm/%s@%s", url.PathEscape(pkg.Name), ver)
+	case "jvm":
+		// JVM records carry the name as "groupID:artifactID"; the maven
+		// purl spec is pkg:maven/<group>/<artifact>@<version>. If no colon
+		// is present we fall back to the bare name under maven — the best
+		// correct option without a separate group field.
+		if group, artifact, ok := strings.Cut(pkg.Name, ":"); ok {
+			return fmt.Sprintf("pkg:maven/%s/%s@%s",
+				url.PathEscape(group), url.PathEscape(artifact), ver)
+		}
+		return fmt.Sprintf("pkg:maven/%s@%s", url.PathEscape(pkg.Name), ver)
+	case "nuget":
+		return fmt.Sprintf("pkg:nuget/%s@%s", url.PathEscape(pkg.Name), ver)
+	case scanner.EnvSystemDeb:
+		return fmt.Sprintf("pkg:deb/%s@%s", url.PathEscape(pkg.Name), ver)
+	case scanner.EnvSystemRpm:
+		return fmt.Sprintf("pkg:rpm/%s@%s", url.PathEscape(pkg.Name), ver)
+	default:
+		// ai_agent, container, tcc, runtime records, unknown — no
+		// standard purl. Emit none rather than a wrong one.
+		return ""
+	}
+}
 
 // CycloneDXBOM represents a minimal CycloneDX 1.6 BOM in JSON format.
 type CycloneDXBOM struct {
@@ -48,6 +97,7 @@ type CycloneDXProperty struct {
 // CycloneDXComponent represents a single component in the BOM.
 type CycloneDXComponent struct {
 	Type       string              `json:"type"`
+	BOMRef     string              `json:"bom-ref,omitempty"`
 	Name       string              `json:"name"`
 	Version    string              `json:"version,omitempty"`
 	Purl       string              `json:"purl,omitempty"`
@@ -76,12 +126,21 @@ func GenerateCycloneDX(result *scanner.ScanResult) ([]byte, error) {
 
 	components := make([]CycloneDXComponent, 0, len(result.Packages))
 
-	for _, pkg := range result.Packages {
+	for i, pkg := range result.Packages {
+		purl := purlFor(pkg)
+		// Stable bom-ref: prefer the purl (globally unique), else a
+		// deterministic comp-<i> id so dependency/vuln graphs can still
+		// reference components lacking a standard purl.
+		bomRef := purl
+		if bomRef == "" {
+			bomRef = fmt.Sprintf("comp-%d", i)
+		}
 		comp := CycloneDXComponent{
 			Type:    "library",
+			BOMRef:  bomRef,
 			Name:    pkg.Name,
 			Version: pkg.Version,
-			Purl:    fmt.Sprintf("pkg:pypi/%s@%s", url.PathEscape(pkg.Name), url.PathEscape(pkg.Version)),
+			Purl:    purl,
 		}
 		if pkg.InstallPath != "" {
 			comp.Properties = []CycloneDXProperty{
@@ -106,8 +165,9 @@ func GenerateCycloneDX(result *scanner.ScanResult) ([]byte, error) {
 				},
 			},
 			Component: &CycloneDXComponent{
-				Type: "device",
-				Name: result.Hostname,
+				Type:   "device",
+				BOMRef: "device-" + result.Hostname,
+				Name:   result.Hostname,
 			},
 		},
 		Components: components,

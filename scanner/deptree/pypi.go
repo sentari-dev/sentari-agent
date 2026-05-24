@@ -4,13 +4,22 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
+
+// maxLockfileBytes caps a single lockfile read across the deptree
+// parsers.  Mirrors scanner/lockfiles: large monorepo lockfiles can be
+// tens of megabytes, so 50 MiB is loose enough to never reject a
+// legitimate lockfile and tight enough to refuse pathological inputs.
+// All deptree reads route through safeio so a symlinked or oversize
+// lockfile is refused before any byte reaches a parser.
+const maxLockfileBytes = 50 << 20 // 50 MiB
 
 // pypiPkgInfo is the per-package summary used internally by the PyPI
 // graph builders. Names in the map keys are lowercased.
@@ -27,7 +36,7 @@ type pypiPkgInfo struct {
 // dependencies is a root candidate. uv.lock typically has exactly one
 // root (the project itself).
 func ParseUvLock(path string) ([]DepEdge, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := safeio.ReadFile(path, maxLockfileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -64,17 +73,36 @@ func ParseUvLock(path string) ([]DepEdge, error) {
 	if len(roots) == 0 {
 		return nil, nil
 	}
-	rootName := roots[0]
+	rootName := pickPypiRoot(roots, path)
 	rootVersion := pkgs[rootName].version
 
 	return buildPypiEdges(pkgs, rootName, rootVersion), nil
+}
+
+// pickPypiRoot chooses the project root among several no-incoming-edge
+// candidates.  Candidates are pre-sorted, so roots[0] is the
+// deterministic alphabetical default.  When the lockfile's containing
+// directory name matches one of the candidates (case-insensitive),
+// that candidate is the real project root and wins the tie-break —
+// e.g. /srv/myapp/uv.lock with candidates {aaa-lib, myapp} resolves to
+// "myapp" rather than the alphabetically-first "aaa-lib".
+func pickPypiRoot(roots []string, lockPath string) string {
+	dirName := strings.ToLower(filepath.Base(filepath.Dir(lockPath)))
+	if dirName != "" && dirName != "." && dirName != string(filepath.Separator) {
+		for _, r := range roots {
+			if strings.ToLower(r) == dirName {
+				return r
+			}
+		}
+	}
+	return roots[0]
 }
 
 // ParsePoetryLock reads poetry.lock (TOML, similar to uv.lock).
 // [[package]] entries have name, version, and dependencies (a table
 // mapping dep-name → version-spec OR an inline table with version + extras).
 func ParsePoetryLock(path string) ([]DepEdge, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := safeio.ReadFile(path, maxLockfileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -109,7 +137,7 @@ func ParsePoetryLock(path string) ([]DepEdge, error) {
 		// Fall back to all-direct emission with an unknown synthetic root.
 		return buildPypiAllDirect(pkgs, "(unknown)", ""), nil
 	}
-	rootName := roots[0]
+	rootName := pickPypiRoot(roots, path)
 	rootVersion := pkgs[rootName].version
 	return buildPypiEdges(pkgs, rootName, rootVersion), nil
 }
@@ -119,7 +147,7 @@ func ParsePoetryLock(path string) ([]DepEdge, error) {
 // carry per-dep parent info. "default" packages become Type="direct",
 // "develop" packages become Type="dev".
 func ParsePipfileLock(path string) ([]DepEdge, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := safeio.ReadFile(path, maxLockfileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -170,19 +198,35 @@ func ParsePipfileLock(path string) ([]DepEdge, error) {
 // ParseRequirementsTxt reads a requirements.txt and emits direct edges
 // only. Hash pins (--hash=...) and includes (-r other.txt) are ignored.
 func ParseRequirementsTxt(path string) ([]DepEdge, error) {
-	f, err := os.Open(path)
+	f, err := safeio.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
+
+	// safeio.Open refuses symlinks/non-regular files but does NOT cap
+	// size — enforce the same maxLockfileBytes ceiling the buffered
+	// parsers get, so an oversize requirements.txt is refused up front
+	// (and is reported as safeio.ErrTooLarge for consistent handling).
+	if st, sErr := f.Stat(); sErr == nil && st.Size() > maxLockfileBytes {
+		return nil, fmt.Errorf("read %s: %w", path, safeio.ErrTooLarge)
+	}
 
 	rootName := "(unknown)"
 	rootVersion := ""
 	specRe := regexp.MustCompile(`^([A-Za-z0-9_.\-]+)\s*==\s*([A-Za-z0-9_.\-+]+)`)
 	var edges []DepEdge
 	scanner := bufio.NewScanner(f)
+	first := true
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		line := scanner.Text()
+		// Strip a leading UTF-8 BOM on the first line; otherwise the BOM
+		// bytes prefix the first package name and the line is dropped.
+		if first {
+			line = strings.TrimPrefix(line, "\xef\xbb\xbf")
+			first = false
+		}
+		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-") {
 			continue
 		}

@@ -112,6 +112,22 @@ func runUpdate(mode updateMode, agentCfg config.AgentConfig, serverURLOverride, 
 		CurrentVer:  scanner.Version,
 		GOOS:        runtime.GOOS,
 		GOARCH:      runtime.GOARCH,
+		// Persist the replay/freshness high-water mark under the agent
+		// data dir so a captured manifest cannot be replayed across runs.
+		StateDir: dataDir,
+	}
+
+	// Bridge operator-supplied service identity from agent.conf into the
+	// env vars the restart path reads.  The restart step honours
+	// SENTARI_AGENT_SYSTEMD_UNIT / SENTARI_AGENT_LAUNCHD_LABEL, but a
+	// service-spawned agent does not inherit those from a login shell —
+	// so let the config file set them.  Config does not override an env
+	// var that is already explicitly set.
+	if agentCfg.Server.SystemdUnit != "" && os.Getenv("SENTARI_AGENT_SYSTEMD_UNIT") == "" {
+		_ = os.Setenv("SENTARI_AGENT_SYSTEMD_UNIT", agentCfg.Server.SystemdUnit)
+	}
+	if agentCfg.Server.LaunchdLabel != "" && os.Getenv("SENTARI_AGENT_LAUNCHD_LABEL") == "" {
+		_ = os.Setenv("SENTARI_AGENT_LAUNCHD_LABEL", agentCfg.Server.LaunchdLabel)
 	}
 
 	plan, err := client.Check()
@@ -126,6 +142,14 @@ func runUpdate(mode updateMode, agentCfg config.AgentConfig, serverURLOverride, 
 		return 0
 	case updateModeApply:
 		printPlan(plan)
+		// Windows cannot swap a running binary in place and has no
+		// supported service-restart path here.  Refuse before any
+		// download/swap so the operator isn't left with a half-applied
+		// upgrade; direct them to the installer instead.
+		if runtime.GOOS == "windows" {
+			fmt.Fprintln(os.Stderr, "Self-update is not supported on Windows; use the installer (install.ps1) to upgrade.")
+			return 1
+		}
 		if !plan.UpgradeAvailable {
 			fmt.Println("No upgrade available — nothing to do.")
 			return 0

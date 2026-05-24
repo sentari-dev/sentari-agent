@@ -50,7 +50,12 @@ func ExtractMaven(m2Dir string) ([]deptree.LicenseEvidence, error) {
 		if err := xml.Unmarshal(raw, &pom); err != nil {
 			return nil
 		}
-		if pom.ArtifactID == "" {
+		// Skip POMs missing either coordinate half.  A POM that inherits
+		// its groupId from a <parent> has no local <groupId> element, so
+		// emitting "<empty>:artifactId" would produce a malformed
+		// coordinate the server can't correlate.  We don't resolve parent
+		// POMs here (Phase 4+ work), so the safe outcome is to skip.
+		if pom.GroupID == "" || pom.ArtifactID == "" {
 			return nil
 		}
 		name := pom.GroupID + ":" + pom.ArtifactID

@@ -99,11 +99,15 @@ func parsePyvenvVersion(raw []byte) string {
 	sc := bufio.NewScanner(strings.NewReader(string(raw)))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
-		if strings.HasPrefix(line, "version") {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1])
-			}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		// Match the key EXACTLY. Python 3.11+ also writes a
+		// `version_info = X.Y.Z.final.N` line; a prefix match on
+		// "version" would wrongly capture that value.
+		if strings.TrimSpace(parts[0]) == "version" {
+			return strings.TrimSpace(parts[1])
 		}
 	}
 	return ""

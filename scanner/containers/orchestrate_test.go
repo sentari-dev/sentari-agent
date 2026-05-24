@@ -26,7 +26,7 @@ func TestMaterialize_HardlinkFastPath(t *testing.T) {
 	tree := &MergedTree{Layers: []string{layer}}
 
 	dest := t.TempDir()
-	if err := Materialize(tree, dest); err != nil {
+	if _, err := Materialize(tree, dest); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	destPath := filepath.Join(dest, "usr", "lib", "file.txt")
@@ -71,7 +71,7 @@ func TestMaterialize_TopLayerOverrides(t *testing.T) {
 	}
 	tree := &MergedTree{Layers: []string{l0, l1}}
 	dest := t.TempDir()
-	if err := Materialize(tree, dest); err != nil {
+	if _, err := Materialize(tree, dest); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	body, err := os.ReadFile(filepath.Join(dest, "usr", "share", "msg.txt"))

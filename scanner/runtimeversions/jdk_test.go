@@ -93,6 +93,25 @@ func TestDetectAllJDKs_respectsDepthCap(t *testing.T) {
 	}
 }
 
+// TestParseJDKReleaseFile_graalVMImplementor guards against a sibling-key
+// false-capture: a GraalVM `release` file contains both IMPLEMENTOR= and
+// IMPLEMENTOR_JVMCI_VERSION=. A prefix match on "IMPLEMENTOR=" must NOT
+// match "IMPLEMENTOR_JVMCI_VERSION=" — the implementor must stay the
+// vendor string, so distro detection (e.g. GraalVM) is correct.
+func TestParseJDKReleaseFile_graalVMImplementor(t *testing.T) {
+	raw := []byte(`IMPLEMENTOR_JVMCI_VERSION="23.0-b15"
+JAVA_VERSION="21.0.1"
+IMPLEMENTOR="GraalVM Community"
+`)
+	javaVersion, implementor := parseJDKReleaseFile(raw)
+	if javaVersion != "21.0.1" {
+		t.Errorf("javaVersion = %q, want 21.0.1", javaVersion)
+	}
+	if implementor != "GraalVM Community" {
+		t.Errorf("implementor = %q, want \"GraalVM Community\" (not the JVMCI sibling key)", implementor)
+	}
+}
+
 func TestParseJDKDistroFromImplementor(t *testing.T) {
 	cases := map[string]string{
 		"Eclipse Adoptium":           "Temurin",

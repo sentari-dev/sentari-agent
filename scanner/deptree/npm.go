@@ -3,9 +3,10 @@ package deptree
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path"
 	"strings"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // ParseNpmPackageLock reads a package-lock.json (lockfileVersion 2 or 3)
@@ -22,7 +23,7 @@ import (
 // IntroducedByPath is the full root→leaf chain inclusive of both
 // endpoints (e.g. ["myapp", "express", "lodash"]).
 func ParseNpmPackageLock(lockPath string) ([]DepEdge, error) {
-	raw, err := os.ReadFile(lockPath)
+	raw, err := safeio.ReadFile(lockPath, maxLockfileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", lockPath, err)
 	}

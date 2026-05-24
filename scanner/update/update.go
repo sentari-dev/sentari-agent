@@ -89,11 +89,16 @@ type PlatformManifest struct {
 // manifest plus a recommendation.  Returned even when no upgrade is
 // needed so a caller can print a stable status block in --check.
 type Plan struct {
-	CurrentVersion  string
-	LatestVersion   string
-	UpgradeAvailable bool
-	Platform         PlatformManifest
-	PlatformKey      string
+	CurrentVersion      string
+	LatestVersion       string
+	MinSupportedVersion string
+	UpgradeAvailable    bool
+	Platform            PlatformManifest
+	PlatformKey         string
+	// ServedAt is the manifest's served_at timestamp (RFC 3339).
+	// Carried into Apply so the freshness/replay high-water mark can be
+	// enforced and persisted.
+	ServedAt string
 }
 
 // Client carries the HTTP client (mTLS already configured by the
@@ -106,6 +111,11 @@ type Client struct {
 	CurrentVer   string
 	GOOS         string
 	GOARCH       string
+	// StateDir is where the last-applied high-water mark (version +
+	// served_at) is persisted for replay/freshness enforcement.
+	// Normally the agent data dir.  When empty, the freshness check is
+	// skipped — acceptable for ad-hoc CLI use but the apply path warns.
+	StateDir string
 }
 
 // Check fetches and verifies the manifest, returning a Plan that the
@@ -158,12 +168,26 @@ func (c *Client) Check() (*Plan, error) {
 			PlatformKey:    platformKey,
 		}, nil
 	}
+	// An upgrade is only available when the (signed, parse-validated)
+	// latest_version is STRICTLY greater than the current version.  A
+	// plain string-inequality test would accept a validly-signed OLDER
+	// release, enabling a downgrade to a known-CVE build.
+	upgrade := false
+	if c.CurrentVer != "" {
+		cmp, err := compareVersions(manifest.LatestVersion, c.CurrentVer)
+		if err != nil {
+			return nil, fmt.Errorf("compare current version: %w", err)
+		}
+		upgrade = cmp > 0
+	}
 	return &Plan{
-		CurrentVersion:   c.CurrentVer,
-		LatestVersion:    manifest.LatestVersion,
-		UpgradeAvailable: manifest.LatestVersion != c.CurrentVer && c.CurrentVer != "",
-		Platform:         platform,
-		PlatformKey:      platformKey,
+		CurrentVersion:      c.CurrentVer,
+		LatestVersion:       manifest.LatestVersion,
+		MinSupportedVersion: manifest.MinSupportedVersion,
+		UpgradeAvailable:    upgrade,
+		Platform:            platform,
+		PlatformKey:         platformKey,
+		ServedAt:            manifest.ServedAt,
 	}, nil
 }
 
@@ -190,15 +214,14 @@ func verifyEnvelope(raw []byte, trusted map[string]ed25519.PublicKey) (*Manifest
 		return nil, fmt.Errorf("envelope: signature wrong length (%d)", len(sig))
 	}
 
-	// Re-canonicalize: round-trip through map[string]interface{} so
-	// Go's json.Marshal emits sorted keys.  Matches the server-side
-	// signing.canonical_json byte-for-byte for JSON containing only
-	// strings, numbers, and nested maps/lists of those.
-	var asMap map[string]interface{}
-	if err := json.Unmarshal(env.Payload, &asMap); err != nil {
-		return nil, fmt.Errorf("envelope: payload not a JSON object: %w", err)
-	}
-	canonical, err := canonicalJSON(asMap)
+	// Re-canonicalize so Go's json.Marshal emits sorted keys, matching
+	// the server-side signing.canonical_json byte-for-byte.  Crucially
+	// this decodes numbers with json.Number (UseNumber) so integer
+	// fields like size_bytes round-trip as their exact textual form —
+	// a plain map[string]interface{} would coerce every number to
+	// float64 and mangle integers >= 2^53, breaking ed25519.Verify on
+	// an otherwise valid manifest.
+	canonical, err := canonicalizePayload(env.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("envelope: canonicalize: %w", err)
 	}
@@ -213,13 +236,61 @@ func verifyEnvelope(raw []byte, trusted map[string]ed25519.PublicKey) (*Manifest
 	if m.LatestVersion == "" {
 		return nil, errors.New("envelope: payload missing latest_version")
 	}
+	// Reject a manifest whose version fields cannot be parsed as a
+	// semver triple — a malformed or malicious manifest must never be
+	// accepted on faith.  latest_version is mandatory;
+	// min_supported_version is validated only when present.
+	if _, err := parseSemver(m.LatestVersion); err != nil {
+		return nil, fmt.Errorf("envelope: unparseable latest_version: %w", err)
+	}
+	if m.MinSupportedVersion != "" {
+		if _, err := parseSemver(m.MinSupportedVersion); err != nil {
+			return nil, fmt.Errorf("envelope: unparseable min_supported_version: %w", err)
+		}
+		// A manifest claiming a latest_version older than its own
+		// min_supported_version is internally inconsistent — refuse it
+		// rather than reason about a nonsensical floor.
+		cmp, err := compareVersions(m.LatestVersion, m.MinSupportedVersion)
+		if err != nil {
+			return nil, fmt.Errorf("envelope: compare versions: %w", err)
+		}
+		if cmp < 0 {
+			return nil, fmt.Errorf("envelope: latest_version %s is below min_supported_version %s", m.LatestVersion, m.MinSupportedVersion)
+		}
+	}
 	return &m, nil
+}
+
+// canonicalizePayload re-serializes a raw signed payload into its
+// canonical form (sorted keys, no insignificant whitespace, no HTML
+// escaping, no trailing newline) WITHOUT losing integer precision.
+//
+// It decodes with json.Decoder + UseNumber so every JSON number is
+// held as a json.Number (its exact source text) rather than a float64.
+// json.Marshal then emits json.Number values verbatim, so an integer
+// such as size_bytes=9007199254740993 (> 2^53) round-trips byte-for-
+// byte instead of being coerced to a float and re-rendered with lost
+// precision or an exponent.  This keeps the agent's canonical bytes
+// identical to the Python server's signing.canonical_json output.
+func canonicalizePayload(raw []byte) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		return nil, fmt.Errorf("payload not valid JSON: %w", err)
+	}
+	if _, ok := v.(map[string]interface{}); !ok {
+		return nil, errors.New("payload not a JSON object")
+	}
+	return canonicalJSON(v)
 }
 
 // canonicalJSON mirrors scanner.canonicalJSON: sorted keys via
 // map[string]interface{} + json.Marshal, no whitespace, no HTML
 // escaping, no trailing newline.  Duplicated here so the update
-// package stays small and self-contained.
+// package stays small and self-contained.  Callers that pass decoded
+// values must use json.Number (not float64) for any large integers —
+// see canonicalizePayload.
 func canonicalJSON(v interface{}) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -250,6 +321,47 @@ func (c *Client) Apply(plan *Plan, installPath, stagedDir string) error {
 		return errors.New("apply called with empty platform manifest")
 	}
 
+	// Windows cannot replace a running executable in place, and the
+	// service-restart path is unimplemented there.  Refuse cleanly
+	// BEFORE any download/swap so the operator gets an actionable
+	// message instead of a half-applied upgrade plus a bogus restart
+	// failure.  GOOS comes from the Client so this is testable on any
+	// host and stays consistent with the runtime check in main.
+	if c.GOOS == "windows" {
+		return errors.New("self-update is not supported on Windows; use the installer (install.ps1) to upgrade")
+	}
+
+	// Independent downgrade guard: Check already filters, but Apply
+	// must not trust a plan that was constructed or mutated elsewhere.
+	// Refuse to install a version that is not strictly newer than the
+	// running one, and never go below the manifest's own floor.
+	if c.CurrentVer != "" {
+		cmp, err := compareVersions(plan.LatestVersion, c.CurrentVer)
+		if err != nil {
+			return fmt.Errorf("apply: compare versions: %w", err)
+		}
+		if cmp <= 0 {
+			return fmt.Errorf("apply: refusing downgrade/no-op: target %s is not newer than current %s", plan.LatestVersion, c.CurrentVer)
+		}
+	}
+	if plan.MinSupportedVersion != "" {
+		cmp, err := compareVersions(plan.LatestVersion, plan.MinSupportedVersion)
+		if err != nil {
+			return fmt.Errorf("apply: compare min_supported: %w", err)
+		}
+		if cmp < 0 {
+			return fmt.Errorf("apply: refusing downgrade below min_supported_version %s", plan.MinSupportedVersion)
+		}
+	}
+
+	// Replay/freshness gate: a validly-signed but stale manifest (an
+	// equal-or-older version, or an equal version with a non-advancing
+	// served_at) must be refused before any filesystem mutation so a
+	// captured manifest cannot be replayed to pin/downgrade the agent.
+	if err := checkFreshness(c.StateDir, plan.LatestVersion, plan.ServedAt); err != nil {
+		return err
+	}
+
 	if err := os.MkdirAll(stagedDir, 0o755); err != nil {
 		return fmt.Errorf("create staged dir: %w", err)
 	}
@@ -264,6 +376,18 @@ func (c *Client) Apply(plan *Plan, installPath, stagedDir string) error {
 	if err := atomicReplace(stagedPath, installPath); err != nil {
 		return err
 	}
+
+	// Binary is confirmed in place — advance the high-water mark before
+	// restarting so a crash during restart cannot let an older manifest
+	// be replayed afterwards.  A write failure here is non-fatal to the
+	// (already successful) swap but is surfaced so the operator knows
+	// replay protection did not advance.
+	if c.StateDir != "" {
+		if err := writeHighWater(c.StateDir, highWater{Version: plan.LatestVersion, ServedAt: plan.ServedAt}); err != nil {
+			return fmt.Errorf("binary replaced but failed to record update high-water mark: %w", err)
+		}
+	}
+
 	if err := restartService(installPath); err != nil {
 		// Surface as a warning — the binary is already swapped; the
 		// service manager may pick up the new binary on its own
@@ -329,27 +453,107 @@ func (c *Client) downloadAndVerify(plan *Plan, dest string) error {
 }
 
 // atomicReplace moves ``src`` onto ``dst`` while keeping the previous
-// ``dst`` as ``dst.prev`` for rollback.  The sequence is:
+// ``dst`` as ``dst.prev`` for rollback.
 //
-//   1. If dst exists, rename dst → dst.prev (atomic on POSIX).
-//   2. Rename src → dst (atomic on POSIX).
+// ``src`` is typically staged under the agent data dir (e.g.
+// /var/lib/...), which is frequently a *different* filesystem from the
+// install path (e.g. /usr/local/bin).  A naive ``os.Rename(src, dst)``
+// then fails with EXDEV — and, fatally, it fails AFTER dst has already
+// been moved to dst.prev, leaving the install path empty.  To avoid
+// this the new bytes are first landed into a temp file in the SAME
+// directory as ``dst`` so the activation rename is always intra-
+// filesystem.  The sequence is:
 //
-// If step 2 fails after step 1 succeeded, the install path is empty
-// and the binary lives at dst.prev — rollback restores it.
+//   1. Materialize src into ``<dir(dst)>/.<base(dst)>.new`` (rename if
+//      same FS, else copy+fsync) — this is where EXDEV is absorbed,
+//      BEFORE any destructive move.
+//   2. If dst exists, rename dst → dst.prev (intra-FS, atomic).
+//   3. Rename landing → dst (intra-FS, atomic).
+//
+// Because the only cross-FS step (1) happens before dst is touched, a
+// failure there leaves the install path intact.
 func atomicReplace(src, dst string) error {
 	prev := dst + ".prev"
-	if _, err := os.Stat(dst); err == nil {
+	landing := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".new")
+
+	// Stat dst once so we can mirror its mode onto the landing file and
+	// know whether a .prev needs preserving.
+	var mode os.FileMode = 0o755
+	dstExists := false
+	if fi, err := os.Stat(dst); err == nil {
+		dstExists = true
+		mode = fi.Mode().Perm()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat install path: %w", err)
+	}
+
+	// Step 1: land the new bytes next to the install path.  Try an
+	// intra-FS rename first; fall back to copy+fsync on EXDEV (or any
+	// rename failure — copy is always safe, just slower).
+	_ = os.Remove(landing)
+	if err := os.Rename(src, landing); err != nil {
+		if err := copyFileSync(src, landing, mode); err != nil {
+			return fmt.Errorf("stage new binary into install dir: %w", err)
+		}
+		// Original staged file no longer needed once copied.
+		_ = os.Remove(src)
+	}
+	if err := os.Chmod(landing, mode); err != nil {
+		_ = os.Remove(landing)
+		return fmt.Errorf("chmod landing binary: %w", err)
+	}
+
+	// Step 2: preserve the current binary as .prev (intra-FS).
+	if dstExists {
 		// Remove any stale .prev so the rename below cannot fail with
 		// EEXIST on platforms where rename-onto-existing is not allowed.
 		_ = os.Remove(prev)
 		if err := os.Rename(dst, prev); err != nil {
+			_ = os.Remove(landing)
 			return fmt.Errorf("preserve previous binary: %w", err)
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat install path: %w", err)
 	}
-	if err := os.Rename(src, dst); err != nil {
+
+	// Step 3: activate (intra-FS rename — cannot EXDEV).
+	if err := os.Rename(landing, dst); err != nil {
+		// Best-effort restore so the install path is never left empty.
+		if dstExists {
+			_ = os.Rename(prev, dst)
+		}
+		_ = os.Remove(landing)
 		return fmt.Errorf("install new binary: %w", err)
+	}
+	return nil
+}
+
+// copyFileSync copies ``src`` to ``dst`` and fsyncs the destination
+// before returning, so the bytes are durable on disk prior to the
+// activation rename.  Used as the EXDEV fallback when src and dst live
+// on different filesystems and os.Rename refuses to cross the boundary.
+func copyFileSync(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open source: %w", err)
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("create dest: %w", err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("copy bytes: %w", err)
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("fsync dest: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return fmt.Errorf("close dest: %w", err)
 	}
 	return nil
 }

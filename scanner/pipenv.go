@@ -112,6 +112,9 @@ func scanPipenvEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 				InstallDate: lockModTime,
 				EnvType:     EnvPipenv,
 				Environment: envPath,
+				// Default to "unknown" (matching every other scanner) when
+				// no .venv METADATA is present to classify the license.
+				LicenseTier: "unknown",
 			}
 
 			// Try to extract license from installed METADATA in site-packages.

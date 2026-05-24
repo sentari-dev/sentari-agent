@@ -3,16 +3,17 @@ package deptree
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // ParseNuGetProjectAssets reads a project.assets.json (always present
 // after `dotnet restore`) and emits dep-graph edges per TFM. The TFM
 // is recorded in the edge's Scope field (e.g. Scope="net6.0").
 func ParseNuGetProjectAssets(path string) ([]DepEdge, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := safeio.ReadFile(path, maxLockfileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -188,7 +189,7 @@ func ParseNuGetProjectAssets(path string) ([]DepEdge, error) {
 // packages.lock.json but no project.assets.json. The shape is simpler:
 // per-framework "dependencies" map with explicit type=Direct|Transitive.
 func ParseNuGetPackagesLock(path string) ([]DepEdge, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := safeio.ReadFile(path, maxLockfileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -216,9 +217,12 @@ func ParseNuGetPackagesLock(path string) ([]DepEdge, error) {
 			if strings.EqualFold(entry.Type, "Direct") {
 				edgeType = "direct"
 			} else {
-				// packages.lock.json doesn't carry per-dep parent info; we emit
-				// transitives with parent="(unknown)" and depth=2.
-				depth = 2
+				// packages.lock.json doesn't carry per-dep parent info, so
+				// the real depth is unknown.  We model transitives as
+				// children of the synthetic "(unknown)" root with a
+				// 2-element introduced_by_path; that path length implies
+				// depth 1, so keep depth==len(path)-1==1 (self-consistent
+				// rather than the previous depth=2 with a length-2 path).
 				parent = "(unknown)"
 			}
 			edges = append(edges, DepEdge{

@@ -45,6 +45,14 @@ var ErrSymlink = errors.New("safeio: path is a symbolic link; refusing to read")
 // too big to read at all.
 var ErrTooLarge = errors.New("safeio: file exceeds size cap")
 
+// ErrNotRegular is returned when a path resolves to something other
+// than a regular file — a FIFO, device node, socket, or directory.
+// O_NOFOLLOW refuses a symlink leaf but says nothing about these: a
+// blocking open() of a writer-less FIFO hangs forever and a device
+// node can stream unbounded bytes, so a malicious package shipping a
+// metadata file as a special file would otherwise wedge the scanner.
+var ErrNotRegular = errors.New("safeio: path is not a regular file; refusing to read")
+
 // ReadFile reads up to maxSize bytes from path, refusing to follow a
 // symbolic link at the leaf.  maxSize must be positive; passing 0 or
 // a negative value returns ErrTooLarge regardless of file content.
@@ -73,7 +81,16 @@ func ReadFile(path string, maxSize int64) ([]byte, error) {
 		return nil, err
 	}
 	if info.IsDir() {
-		return nil, fmt.Errorf("safeio: %q is a directory, not a regular file", path)
+		// Wrap ErrNotRegular (a directory is a non-regular file) so
+		// errors.Is(err, ErrNotRegular) is reliable and consistent with
+		// Open(); keep the specific "directory" detail in the message.
+		return nil, fmt.Errorf("%w: %q is a directory", ErrNotRegular, path)
+	}
+	if !info.Mode().IsRegular() {
+		// FIFO, device node, or socket.  Reject before reading: a
+		// device could stream unbounded bytes and a FIFO has no
+		// meaningful size.
+		return nil, fmt.Errorf("%w: %s", ErrNotRegular, path)
 	}
 	if info.Size() > maxSize {
 		return nil, fmt.Errorf("%w: %d > %d at %s", ErrTooLarge, info.Size(), maxSize, path)
@@ -101,5 +118,21 @@ func ReadFile(path string, maxSize int64) ([]byte, error) {
 // line-by-line streaming readers (dpkg status, pyvenv.cfg) where the
 // caller enforces its own per-line bounds.
 func Open(path string) (*os.File, error) {
-	return openNoFollow(path)
+	f, err := openNoFollow(path)
+	if err != nil {
+		return nil, err
+	}
+	// Reject non-regular files (FIFO/device/socket/dir) so a streaming
+	// caller cannot be made to block forever or read an unbounded
+	// device.  Stat via the fd to avoid a path-based TOCTOU.
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("%w: %s", ErrNotRegular, path)
+	}
+	return f, nil
 }

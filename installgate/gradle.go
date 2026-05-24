@@ -86,6 +86,15 @@ type WriteGradleResult struct {
 	Path    string
 	Changed bool
 	Removed bool
+
+	// ReplacedOperator is true iff the writer overwrote a file that
+	// already sat at the owned ``sentari-proxy.gradle`` path WITHOUT
+	// the Sentari marker (an operator hand-placed a file at that exact
+	// name).  The generated init script is a complete override; the
+	// prior content survives only in the ``.sentari-backup-*`` the
+	// writer always creates on this path.  Surfaced to the audit log
+	// so the replacement is never silent.
+	ReplacedOperator bool
 }
 
 // WriteGradle applies the Maven section of the policy-map to a
@@ -123,6 +132,19 @@ func WriteGradle(m *scanner.InstallGateMap, scope GradleScope, marker MarkerFiel
 		return res, nil
 	}
 
+	// Auditability: flag an overwrite of a non-Sentari file sitting at
+	// our owned path before WriteAtomic backs it up and replaces it.
+	managed, err := isSentariManaged(res.Path)
+	if err != nil {
+		return res, fmt.Errorf("installgate.WriteGradle: inspect existing init script: %w", err)
+	}
+	replacingOperator := false
+	if !managed {
+		if _, statErr := os.Lstat(res.Path); statErr == nil {
+			replacingOperator = true
+		}
+	}
+
 	body, err := renderGradleInit(endpoint, marker)
 	if err != nil {
 		return res, err
@@ -137,6 +159,7 @@ func WriteGradle(m *scanner.InstallGateMap, scope GradleScope, marker MarkerFiel
 		return res, err
 	}
 	res.Changed = changed
+	res.ReplacedOperator = changed && replacingOperator
 	return res, nil
 }
 
@@ -233,8 +256,9 @@ func renderGradleInit(endpoint string, marker MarkerFields) ([]byte, error) {
 //   - the marker prefix not being present at offset zero;
 //   - the closing ``}`` not appearing at the end;
 //   - the symbolic name ``sentariProxyUrl`` appearing anything other
-//     than the exact expected count of references (1 def + 6 uses
-//     across pluginManagement / buildscript / afterEvaluate);
+//     than the exact expected count of references (1 def + 3 uses
+//     across pluginManagement / buildscript / afterEvaluate = 4
+//     total, matching sentariProxyUrlOccurrences below);
 //   - the URL appearing other than once (only inside the ``def``
 //     line as a string literal — every other reference goes through
 //     the variable);

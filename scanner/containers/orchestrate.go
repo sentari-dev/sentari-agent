@@ -131,7 +131,15 @@ func scanOneTarget(
 	}
 	defer os.RemoveAll(tmp)
 
-	if err := Materialize(&t.MergedRootFS, tmp); err != nil {
+	matErrs, err := Materialize(&t.MergedRootFS, tmp)
+	// Non-fatal per-file materialise errors (oversize skips, copy
+	// failures) flow up annotated with the container ID so operators
+	// can correlate a missing path back to the layer it lived in.
+	for _, e := range matErrs {
+		e.Path = containerPathID(t) + ":" + trimRootPrefix(e.Path, tmp)
+		result.Errors = append(result.Errors, e)
+	}
+	if err != nil {
 		result.Errors = append(result.Errors, scanner.ScanError{
 			Path:      containerPathID(t),
 			EnvType:   "container",

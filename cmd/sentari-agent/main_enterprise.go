@@ -232,6 +232,11 @@ func main() {
 	auditDBPath := dataDir + "/audit.db"
 	cacheDBPath := dataDir + "/cache.db"
 
+	// Colocate the persisted macOS device-id file with the agent data dir so
+	// it lives alongside the cache/audit DBs rather than a separate default
+	// location.  No-op on platforms that derive the device id elsewhere.
+	scanner.SetDeviceIDDataDir(dataDir)
+
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not create %s: %v\n", dataDir, err)
 	}
@@ -405,7 +410,10 @@ func main() {
 
 	if *uploadFlag {
 		ctx := logging.WithRequestID(context.Background(), logging.NewRequestID())
-		if err := runUpload(ctx, client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir); err != nil {
+		// One-shot: no cross-cycle state, so pass a nil debouncer — a
+		// single server-disable signal tears down, matching run-once
+		// semantics.
+		if err := runUpload(ctx, client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir, nil); err != nil {
 			logging.LoggerFromContext(ctx).Error("upload cycle failed", slog.String("err", err.Error()))
 			os.Exit(1)
 		}
@@ -423,7 +431,7 @@ func main() {
 // line inside this cycle is stamped with it so the server-side trace
 // ("scan received", "CVE correlation fired", "alert delivered") joins
 // back to this single agent cycle.
-func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.Cache, agentCfg config.AgentConfig, hostname, sbomOutPath, certDir, dataDir string) error {
+func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.Cache, agentCfg config.AgentConfig, hostname, sbomOutPath, certDir, dataDir string, igDisableDebounce *comms.InstallGateDisableDebouncer) error {
 	cycleStart := time.Now()
 	log := logging.LoggerFromContext(ctx)
 
@@ -486,9 +494,26 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 		case errors.Is(err, comms.ErrInstallGateServerDisabled):
 			// Server has explicitly disabled install-gate for this
 			// tenant (404 + X-Sentari-Install-Gate-Disabled: true).
-			// Tear down host configs immediately + persist a marker
-			// so an agent restart between this and the next 200
-			// doesn't re-write configs from the local cache.
+			//
+			// Debounce: require N consecutive disable responses before
+			// tearing down host configs, so a single transient/buggy
+			// server response can't wipe every managed host config
+			// fleet-wide.  The one-shot --upload path passes a nil
+			// debouncer (no cross-cycle state) and tears down on the
+			// single signal, matching its run-once semantics.
+			shouldTeardown := true
+			if igDisableDebounce != nil {
+				shouldTeardown = igDisableDebounce.RecordDisabled()
+			}
+			if !shouldTeardown {
+				log.Info("install-gate server-disabled signal observed; debouncing before teardown",
+					slog.Int("threshold", debounceThreshold(igDisableDebounce)))
+				logAudit(auditLog, "install_gate.disable_debounced", "")
+				break
+			}
+			// Tear down host configs + persist a marker so an agent
+			// restart between this and the next 200 doesn't re-write
+			// configs from the local cache.
 			res, errs := installgate.RemoveAll(installGateApplyOptions(agentCfg, installgate.MarkerFields{}))
 			for _, e := range errs {
 				log.Warn("install-gate teardown (server disabled)", slog.String("err", e.Error()))
@@ -501,8 +526,18 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 			logAudit(auditLog, "install_gate.disabled_by_server",
 				fmt.Sprintf("any_changed=%t", res.AnyChanged()))
 		case err != nil:
+			// Any non-disable error breaks a disable streak: a transient
+			// network failure is not evidence the server wants teardown.
+			if igDisableDebounce != nil {
+				igDisableDebounce.Reset()
+			}
 			log.Warn("install-gate refresh failed (using cached)", slog.String("err", err.Error()))
 		case igMap != nil:
+			// Healthy 200 — break any pending disable streak so a later
+			// single disable blip starts counting from zero again.
+			if igDisableDebounce != nil {
+				igDisableDebounce.Reset()
+			}
 			// 200 with a fresher envelope.  If a previous cycle had
 			// stamped the server-disabled marker, the server has
 			// re-enabled — clear the marker + log + proceed with the
@@ -626,6 +661,14 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 						res.Gradle.Path, res.Gradle.Changed, res.Gradle.Removed,
 						res.Sbt.Path, res.Sbt.Changed, res.Sbt.Removed,
 						res.YarnBerry.Path, res.YarnBerry.Changed, res.YarnBerry.Removed))
+			}
+		default:
+			// (nil, nil, nil): server returned no newer version (or a
+			// non-error no-op).  This is a healthy outcome — reset any
+			// pending disable streak so an isolated future disable blip
+			// doesn't combine with stale counts toward teardown.
+			if igDisableDebounce != nil {
+				igDisableDebounce.Reset()
 			}
 		}
 	} else {
@@ -801,16 +844,47 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 		scanInterval = 3600 * time.Second
 	}
 
+	// Root context cancelled on SIGINT/SIGTERM.  Every cycle's context is
+	// derived from this so an in-flight retry/backoff sleep inside
+	// runUpload → doRequest (which honours ctx.Done()) aborts promptly on
+	// shutdown rather than running the full backoff schedule to completion.
+	//
+	// We use a manual signal channel rather than signal.NotifyContext so the
+	// shutdown audit entry can record WHICH signal was received (SIGTERM from
+	// systemd/launchd stop vs SIGINT from an operator console) — meaningful
+	// forensic context in the append-only audit log.
+	rootCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	// Buffered so the handler records the signal before cancelling; the
+	// shutdown branch reads it after rootCtx.Done() (happens-after cancel).
+	shutdownSig := make(chan os.Signal, 1)
+	go func() {
+		s := <-sigCh
+		shutdownSig <- s
+		cancel()
+	}()
+
+	// One debouncer for the whole daemon lifetime so the consecutive-
+	// disable count persists across cycles (see InstallGateDisableDebouncer).
+	igDisableDebounce := comms.NewInstallGateDisableDebouncer()
 
 	for {
-		// Fresh request_id per cycle.  One scan, one CVE-correlation
-		// wave, one alert-delivery fan-out — all join on this ID.
-		ctx := logging.WithRequestID(context.Background(), logging.NewRequestID())
+		// Bail before starting a cycle if shutdown was already signalled.
+		if rootCtx.Err() != nil {
+			break
+		}
+
+		// Fresh request_id per cycle, derived from the cancellable root so
+		// SIGTERM mid-cycle interrupts outbound retries.  One scan, one
+		// CVE-correlation wave, one alert-delivery fan-out — all join on
+		// this ID.
+		ctx := logging.WithRequestID(rootCtx, logging.NewRequestID())
 		log := logging.LoggerFromContext(ctx)
 
-		if err := runUpload(ctx, client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir); err != nil {
+		if err := runUpload(ctx, client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir, igDisableDebounce); err != nil {
 			log.Error("cycle error", slog.String("err", err.Error()))
 		}
 
@@ -860,10 +934,16 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 		sleepTimer := time.NewTimer(sleepDuration)
 
 		select {
-		case sig := <-sigCh:
+		case <-rootCtx.Done():
 			sleepTimer.Stop()
-			log.Info("shutting down gracefully", slog.String("signal", sig.String()))
-			logAudit(auditLog, "agent.shutdown", fmt.Sprintf("signal=%s", sig))
+			sigName := "unknown"
+			select {
+			case s := <-shutdownSig:
+				sigName = s.String()
+			default:
+			}
+			log.Info("shutting down gracefully", slog.String("signal", sigName))
+			logAudit(auditLog, "agent.shutdown", "signal="+sigName)
 			return
 		case <-sleepTimer.C:
 			// Next cycle.
@@ -1014,6 +1094,16 @@ func installGateApplyOptions(cfg config.AgentConfig, marker installgate.MarkerFi
 		SbtScope:       sbtScopeFromConfig(cfg.InstallGate.SbtScope),
 		YarnBerryScope: yarnBerryScopeFromConfig(cfg.InstallGate.YarnBerryScope),
 	}
+}
+
+// debounceThreshold reports the configured consecutive-disable threshold,
+// or 1 when no debouncer is present (the one-shot --upload path tears down
+// on a single signal).
+func debounceThreshold(d *comms.InstallGateDisableDebouncer) int {
+	if d == nil {
+		return 1
+	}
+	return d.Threshold()
 }
 
 // logAudit writes an audit entry and logs to stderr on failure.

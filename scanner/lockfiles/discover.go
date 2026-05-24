@@ -189,6 +189,13 @@ func buildMeta(path string, matcher filenameMatcher) (deptree.LockfileMeta, erro
 			format = v
 		}
 	}
+	// yarn.lock: distinguish berry (v2+) from classic (v1).  Berry
+	// lockfiles open with a `__metadata:` block; the v1 dep-tree parser
+	// emits garbage on the berry format, so classify it distinctly and
+	// let the parser bail (ParseYarnLock returns nil for berry).
+	if matcher.basename == "yarn.lock" && detectYarnBerry(path) {
+		format = "yarn_berry"
+	}
 
 	st, err := os.Stat(path)
 	if err != nil {
@@ -248,6 +255,30 @@ func detectPackageLockVersion(path string) (string, error) {
 		// v1 or unknown — drop intentionally.  See docstring.
 		return "", nil
 	}
+}
+
+// detectYarnBerry reports whether a yarn.lock uses the yarn v2+
+// ("berry") format, identified by a top-level `__metadata:` block that
+// classic v1 lockfiles never contain.  Only the first ~256 bytes are
+// inspected: the comment header plus the `__metadata:` line always sit
+// at the very top of a berry lockfile.  Read failures (symlink,
+// oversize, missing) fall back to "not berry" — buildMeta's safeio.Open
+// will surface a real read error separately.
+func detectYarnBerry(path string) bool {
+	raw, err := safeio.ReadFile(path, maxLockfileBytes)
+	if err != nil {
+		return false
+	}
+	head := raw
+	if len(head) > 256 {
+		head = head[:256]
+	}
+	for _, line := range strings.Split(string(head), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "__metadata:") {
+			return true
+		}
+	}
+	return false
 }
 
 // declaredCount is a quick heuristic per lockfile format.

@@ -34,6 +34,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"sync"
 )
 
 // MaxInstallGatePayloadBytes caps the canonical-JSON size of a
@@ -46,7 +47,13 @@ const MaxInstallGatePayloadBytes = 5 * 1024 * 1024 // 5 MiB
 // agent will accept as policy-map signers, keyed by ``key_id``.
 // Populated by ``RegisterTrustedInstallGateKey`` (called from
 // /register response handling) and never mutated on the hot path.
-var trustedInstallGateKeys = map[string]ed25519.PublicKey{}
+//
+// trustedInstallGateKeysMu guards the map against a register racing a
+// verify (concurrent map read/write is fatal in Go) — audit finding 1.
+var (
+	trustedInstallGateKeysMu sync.RWMutex
+	trustedInstallGateKeys   = map[string]ed25519.PublicKey{}
+)
 
 // RegisterTrustedInstallGateKey pins a public key under a given
 // key_id.  Silently no-ops on invalid key length so a corrupted
@@ -57,12 +64,25 @@ func RegisterTrustedInstallGateKey(keyID string, pub ed25519.PublicKey) {
 	if len(pub) != ed25519.PublicKeySize {
 		return
 	}
+	trustedInstallGateKeysMu.Lock()
+	defer trustedInstallGateKeysMu.Unlock()
 	trustedInstallGateKeys[keyID] = pub
+}
+
+// lookupTrustedInstallGateKey returns the pinned key for keyID under a
+// read lock.
+func lookupTrustedInstallGateKey(keyID string) (ed25519.PublicKey, bool) {
+	trustedInstallGateKeysMu.RLock()
+	defer trustedInstallGateKeysMu.RUnlock()
+	pub, ok := trustedInstallGateKeys[keyID]
+	return pub, ok
 }
 
 // TrustedInstallGateKeyIDs returns the list of pinned key IDs.
 // Exported for diagnostics and dev tooling; not used on the hot path.
 func TrustedInstallGateKeyIDs() []string {
+	trustedInstallGateKeysMu.RLock()
+	defer trustedInstallGateKeysMu.RUnlock()
 	ids := make([]string, 0, len(trustedInstallGateKeys))
 	for k := range trustedInstallGateKeys {
 		ids = append(ids, k)
@@ -141,7 +161,7 @@ func VerifyInstallGateEnvelope(data []byte) (*InstallGateMap, error) {
 		return nil, errors.New("install-gate envelope: missing required field")
 	}
 
-	pub, ok := trustedInstallGateKeys[env.KeyID]
+	pub, ok := lookupTrustedInstallGateKey(env.KeyID)
 	if !ok {
 		return nil, fmt.Errorf("install-gate envelope: unknown signing key_id %q", env.KeyID)
 	}

@@ -132,7 +132,20 @@ func WriteNpm(m *scanner.InstallGateMap, scope NpmScope, marker MarkerFields) (W
 		return res, nil
 	}
 
-	body, err := renderNpmrc(endpoint, marker)
+	// Read any existing .npmrc so we MERGE rather than clobber.  Unlike
+	// pip.conf (a complete Sentari override), .npmrc commonly carries
+	// the operator's ``_authToken`` lines, scoped-registry mappings and
+	// cache settings; replacing the whole file would silently strip
+	// those from the ACTIVE config (a backup alone doesn't help — npm
+	// reads the live file).  We splice our registry into a delimited
+	// Sentari block and preserve every other line verbatim.  safeio
+	// refuses a symlinked path (handled by readBoundedIfExists).
+	existing, err := readBoundedIfExists(res.Path)
+	if err != nil {
+		return res, fmt.Errorf("installgate.WriteNpm: inspect existing config: %w", err)
+	}
+
+	body, err := renderNpmrcMerged(existing, endpoint, marker)
 	if err != nil {
 		return res, err
 	}
@@ -150,20 +163,40 @@ func WriteNpm(m *scanner.InstallGateMap, scope NpmScope, marker MarkerFields) (W
 	return res, nil
 }
 
-// renderNpmrc produces the bytes for the rendered ``.npmrc``.
-// Format per design doc §4.2 — marker block then a single
-// ``registry=<url>`` line.  No ``[global]`` (npm config has no
-// sections).  Token-bearing settings (``//registry/:_authToken``)
-// are deliberately NOT touched; the operator's pre-existing tokens
-// for internal registries are preserved in the
-// ``.sentari-backup-*`` file the writer creates on first overwrite.
-func renderNpmrc(endpoint string, marker MarkerFields) ([]byte, error) {
+// npmBlockStart / npmBlockEnd delimit the Sentari-managed region
+// inside an .npmrc.  Everything between (and including) these two
+// lines is owned by the writer and replaced on every apply; every
+// other line in the file is operator-curated and preserved verbatim.
+// The start line carries the ``# Managed by Sentari`` substring so
+// isSentariManaged still recognises a merged file as managed.
+const (
+	npmBlockStart = "# >>> Sentari-managed block — do not edit inside this block. Managed by Sentari >>>"
+	npmBlockEnd   = "# <<< Sentari-managed block <<<"
+)
+
+// renderNpmrcMerged produces the bytes for an .npmrc that splices the
+// Sentari registry into a delimited managed block while PRESERVING
+// every operator-curated line (auth tokens, scoped registries, cache
+// settings) outside that block.
+//
+// Why merge instead of replace: npm reads the live .npmrc, and that
+// file commonly holds ``//host/:_authToken=`` lines an operator needs
+// for private-registry auth.  A full overwrite (pip-style) would drop
+// those from the ACTIVE file; a side backup doesn't restore live auth.
+//
+// Strategy: strip any prior Sentari block from ``existing`` (idempotent
+// re-apply replaces the block in place), keep all other lines verbatim,
+// then append a freshly-rendered block at the end.  npm's last-wins
+// duplicate-key semantics mean our trailing ``registry=`` overrides any
+// operator ``registry=`` earlier in the file — enforcement holds while
+// the operator's other settings survive.
+func renderNpmrcMerged(existing []byte, endpoint string, marker MarkerFields) ([]byte, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if err := validateEndpoint(endpoint); err != nil {
-		return nil, fmt.Errorf("renderNpmrc: %w", err)
+		return nil, fmt.Errorf("renderNpmrcMerged: %w", err)
 	}
 	if err := validateMarkerKeyID(marker.KeyID); err != nil {
-		return nil, fmt.Errorf("renderNpmrc: %w", err)
+		return nil, fmt.Errorf("renderNpmrcMerged: %w", err)
 	}
 	// npm's registry URL must end with ``/`` — npm appends paths
 	// directly to it without inserting a separator, so a missing
@@ -173,8 +206,61 @@ func renderNpmrc(endpoint string, marker MarkerFields) ([]byte, error) {
 		endpoint += "/"
 	}
 
+	preserved := stripSentariBlock(existing)
+
 	var b strings.Builder
+	// Preserved operator lines first (verbatim), then our block last so
+	// last-wins resolves the registry in our favour.
+	if len(preserved) > 0 {
+		b.Write(preserved)
+		if preserved[len(preserved)-1] != '\n' {
+			b.WriteByte('\n')
+		}
+	}
+	b.WriteString(npmBlockStart)
+	b.WriteString("\n")
 	b.WriteString(renderHashMarker(marker))
 	fmt.Fprintf(&b, "registry=%s\n", endpoint)
+	b.WriteString(npmBlockEnd)
+	b.WriteString("\n")
 	return []byte(b.String()), nil
+}
+
+// stripSentariBlock returns ``content`` with any single Sentari-managed
+// block (the lines from npmBlockStart through npmBlockEnd, inclusive)
+// removed.  Used so an idempotent re-apply replaces the block in place
+// rather than stacking a second one.  If no block is present the input
+// is returned unchanged.  A start without a matching end is treated as
+// "block runs to EOF" — conservative: we never leave a half-block that
+// could confuse the next parse.
+func stripSentariBlock(content []byte) []byte {
+	if len(content) == 0 {
+		return nil
+	}
+	lines := strings.Split(string(content), "\n")
+	var out []string
+	inBlock := false
+	for _, line := range lines {
+		trimmed := strings.TrimRight(line, "\r")
+		if !inBlock && trimmed == npmBlockStart {
+			inBlock = true
+			continue
+		}
+		if inBlock {
+			if trimmed == npmBlockEnd {
+				inBlock = false
+			}
+			continue
+		}
+		out = append(out, line)
+	}
+	joined := strings.Join(out, "\n")
+	// Drop a trailing empty element produced by Split when the input
+	// ended in a newline, so we don't accumulate blank lines on repeat
+	// merges.
+	joined = strings.TrimRight(joined, "\n")
+	if joined == "" {
+		return nil
+	}
+	return []byte(joined)
 }

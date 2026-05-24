@@ -89,6 +89,11 @@ func scanPoetryEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 				InterpreterVersion: interpreterVersion,
 				InstallDate:        lockModTime,
 				Environment:        envPath,
+				// Default to "unknown" (matching every other scanner) when
+				// no .venv METADATA is present to classify the license — an
+				// empty string would be silently ingested as "no license
+				// info" rather than "unclassified" server-side.
+				LicenseTier: "unknown",
 			}
 
 			// Try to extract license from installed METADATA in site-packages.

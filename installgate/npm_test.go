@@ -197,6 +197,94 @@ func TestWriteNpm_NoProxyExistingSentariConfigRemoved(t *testing.T) {
 	}
 }
 
+// Regression for the operator-config-clobber finding: writing the
+// Sentari registry over an existing operator-curated .npmrc that
+// carries an ``_authToken`` line (and other settings) MUST preserve
+// those lines in the ACTIVE file — not just in a side backup.  npm
+// reads the active .npmrc; dropping the auth token there breaks the
+// operator's private-registry auth even though a backup exists.  The
+// writer merges within the Sentari marker block and leaves every
+// non-Sentari line intact.
+func TestWriteNpm_MergePreservesAuthToken(t *testing.T) {
+	dir := t.TempDir()
+	path := npmHomeOverride(t, dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const authLine = "//npm.internal.corp/:_authToken=secret-keep-me"
+	const scopedLine = "@corp:registry=https://npm.internal.corp/"
+	operatorBody := authLine + "\n" + scopedLine + "\nregistry=https://npm.internal.corp/\n"
+	if err := os.WriteFile(path, []byte(operatorBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mark := MarkerFields{Version: 1730901234, KeyID: "primary", Applied: fixedTime}
+	res, err := WriteNpm(makeNpmMap("https://proxy.example.test/npm/"), NpmScopeUser, mark)
+	if err != nil {
+		t.Fatalf("WriteNpm: %v", err)
+	}
+	if !res.Changed {
+		t.Error("expected Changed=true on operator->merged transition")
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotStr := string(got)
+
+	// Operator's auth token + scoped registry MUST survive in the
+	// active file.
+	if !strings.Contains(gotStr, authLine) {
+		t.Errorf("ACTIVE .npmrc dropped operator auth token:\n%s", gotStr)
+	}
+	if !strings.Contains(gotStr, scopedLine) {
+		t.Errorf("ACTIVE .npmrc dropped operator scoped registry:\n%s", gotStr)
+	}
+	// Sentari's registry must be present and (last-wins) enforce the proxy.
+	if !strings.Contains(gotStr, "registry=https://proxy.example.test/npm/") {
+		t.Errorf("ACTIVE .npmrc missing Sentari registry:\n%s", gotStr)
+	}
+	// And the marker must be present so the file is recognised managed.
+	if !strings.Contains(gotStr, "# Managed by Sentari") {
+		t.Errorf("merged .npmrc missing Sentari marker:\n%s", gotStr)
+	}
+
+	// A backup of the original must also exist (defence-in-depth).
+	backup := path + ".sentari-backup-2026-04-25T10-00-00Z"
+	if b, err := os.ReadFile(backup); err != nil {
+		t.Errorf("no backup of original operator .npmrc: %v", err)
+	} else if string(b) != operatorBody {
+		t.Errorf("backup content mismatch:\ngot  %q\nwant %q", b, operatorBody)
+	}
+}
+
+// A second identical merge call must be a no-op (idempotent): the
+// merge output for the same inputs is byte-stable, so WriteAtomic's
+// idempotency check short-circuits and reports Changed=false.
+func TestWriteNpm_MergeIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := npmHomeOverride(t, dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("//npm.internal.corp/:_authToken=secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mark := MarkerFields{Version: 1730901234, KeyID: "primary", Applied: fixedTime}
+	if _, err := WriteNpm(makeNpmMap("https://proxy.example.test/npm/"), NpmScopeUser, mark); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := WriteNpm(makeNpmMap("https://proxy.example.test/npm/"), NpmScopeUser, mark)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r2.Changed {
+		t.Error("second identical merge call should report Changed=false")
+	}
+}
+
 func TestWriteNpm_IdempotentSecondCall(t *testing.T) {
 	dir := t.TempDir()
 	npmHomeOverride(t, dir)
