@@ -29,7 +29,7 @@
 //     directory.  Lockfile discovery only points us at the project
 //     root (where Pipfile.lock / poetry.lock / requirements.txt
 //     lives), so we probe common venv layouts under each root:
-//     ``.venv/lib/python*/site-packages``, ``venv/lib/python*/site-packages``.
+//     “.venv/lib/python*/site-packages“, “venv/lib/python*/site-packages“.
 //     If none exists this just skips silently — the v2 pip/poetry/pipenv
 //     scanners already covered the real venv via the marker walker.
 //
@@ -73,11 +73,11 @@ func safeCall(label string, fn func()) {
 // project directory or a test tempdir), it is returned verbatim
 // — the scanner respects the caller's scope.
 //
-// When scanRoot is the filesystem root (``/`` on POSIX or a drive
+// When scanRoot is the filesystem root (“/“ on POSIX or a drive
 // root on Windows), we substitute user home directories.  Walking
-// ``/`` for lockfiles would be prohibitively expensive on hosts
+// “/“ for lockfiles would be prohibitively expensive on hosts
 // with deep system trees, and the resulting matches under
-// ``/proc``, ``/var``, etc. are almost always noise; user homes
+// “/proc“, “/var“, etc. are almost always noise; user homes
 // are where developer projects actually live.
 func v3DiscoveryRoots(scanRoot string) []string {
 	clean := filepath.Clean(scanRoot)
@@ -380,8 +380,8 @@ func enrichWithV3(result *ScanResult, roots []string) {
 // candidateSitePackages returns plausible site-packages dirs under
 // projectDir for the common venv layouts.  Only existing dirs are
 // returned.  Cross-platform: handles both POSIX
-// (``lib/pythonX.Y/site-packages``) and Windows
-// (``Lib/site-packages``) layouts.
+// (“lib/pythonX.Y/site-packages“) and Windows
+// (“Lib/site-packages“) layouts.
 func candidateSitePackages(projectDir string) []string {
 	var out []string
 	for _, venvName := range []string{".venv", "venv", "env"} {
@@ -459,7 +459,8 @@ func pythonCandidateRoots() []string {
 // any per-version installs under ~/.nvm.
 func nodeCandidateBinaries() []string {
 	candidates := []string{
-		"/usr/local/bin/node",
+		"/usr/local/bin/node",    // Intel Homebrew / system
+		"/opt/homebrew/bin/node", // Apple-Silicon Homebrew
 		"/usr/bin/node",
 		"/opt/node/bin/node",
 	}

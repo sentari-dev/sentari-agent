@@ -1,10 +1,42 @@
 package runtimeversions
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// Regression: modern Node binaries push the `node-vX.Y.Z` marker past the old
+// fixed 16 MiB read window (~26 MiB in Node 20+), so the detector silently
+// missed it. The streaming scan must find a marker that lives beyond the first
+// chunk and one that straddles a chunk boundary. Tiny chunk/overlap sizes
+// exercise the same logic without multi-MiB inputs.
+func TestScanForNodeVersion_beyondFirstChunk(t *testing.T) {
+	data := append(bytes.Repeat([]byte{0x00}, 200), []byte("node-v22.1.0\x00")...)
+	got, ok := scanForNodeVersionChunked(bytes.NewReader(data), 16, 32)
+	if !ok || got != "22.1.0" {
+		t.Fatalf("beyond-chunk: want 22.1.0/true, got %q/%v", got, ok)
+	}
+}
+
+func TestScanForNodeVersion_straddlesChunkBoundary(t *testing.T) {
+	const chunk = 16
+	// Marker begins 4 bytes before the first chunk boundary, so it spans into
+	// the next chunk — only the overlap retention catches it.
+	data := append(bytes.Repeat([]byte{0x41}, chunk-4), []byte("node-v18.20.4\x00")...)
+	got, ok := scanForNodeVersionChunked(bytes.NewReader(data), chunk, 32)
+	if !ok || got != "18.20.4" {
+		t.Fatalf("straddle: want 18.20.4/true, got %q/%v", got, ok)
+	}
+}
+
+func TestScanForNodeVersion_noMarker(t *testing.T) {
+	data := bytes.Repeat([]byte("not a node binary "), 50)
+	if got, ok := scanForNodeVersionChunked(bytes.NewReader(data), 16, 32); ok || got != "" {
+		t.Fatalf("no-marker: want empty/false, got %q/%v", got, ok)
+	}
+}
 
 func TestDetectNodeBinary_embeddedVersion(t *testing.T) {
 	got, err := DetectNodeBinary(filepath.Join("testdata", "node", "node"))
