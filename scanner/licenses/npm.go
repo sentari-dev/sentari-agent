@@ -17,6 +17,23 @@ import (
 // node_modules.  Mirrors scanner/npm/parser.go's local constant.
 const maxPackageJSONBytes = 4 << 20 // 4 MiB
 
+// maxLicenseFileBytes caps a single LICENSE-file read in the
+// package.json-less fallback path.  License files are tiny (the GPL is
+// ~35 KiB); 256 KiB is a generous ceiling that still bounds a hostile file.
+const maxLicenseFileBytes = 256 << 10 // 256 KiB
+
+// licenseFileNames are the conventional license-file names we probe, in
+// priority order, when a package.json carries no “license“/“licenses“
+// field. Matched case-insensitively against directory entries.
+var licenseFileNames = []string{
+	"license",
+	"license.md",
+	"license.txt",
+	"licence",
+	"licence.md",
+	"copying",
+}
+
 // ExtractNpm walks node_modules and reads each package's package.json
 // for the `license` (string SPDX) or `licenses` (array of {type,url}).
 // Confidence 0.95 for explicit SPDX, 0.7 for object-shape that's
@@ -65,6 +82,7 @@ func ExtractNpm(nodeModulesDir string) ([]deptree.LicenseEvidence, error) {
 				RawText:        raw,
 			})
 		}
+		before := len(out)
 		if pj.LicenseString != "" {
 			emit(pj.LicenseString, pj.LicenseString, 0.95)
 		}
@@ -73,12 +91,82 @@ func ExtractNpm(nodeModulesDir string) ([]deptree.LicenseEvidence, error) {
 				emit(lic.Type, lic.Type, 0.7)
 			}
 		}
+		// Fallback: package.json declared no license. Many (often older)
+		// packages ship the license only as a LICENSE file. Emit its title
+		// line (e.g. "MIT License") as low-confidence evidence — the server
+		// normalizes common license names to an SPDX id. spdx left empty so
+		// the server is the single source of truth for the mapping.
+		if len(out) == before {
+			if title := licenseFileTitle(path); title != "" {
+				out = append(out, deptree.LicenseEvidence{
+					PackageName:    pj.Name,
+					PackageVersion: pj.Version,
+					Ecosystem:      "npm",
+					SpdxID:         "",
+					Source:         "copyright_file",
+					Confidence:     0.5,
+					RawText:        title,
+				})
+			}
+		}
 		return nil
 	})
 	if walkErr != nil {
 		return out, fmt.Errorf("walk %s: %w", nodeModulesDir, walkErr)
 	}
 	return out, nil
+}
+
+// licenseFileTitle returns the first non-empty, non-copyright line of the
+// first conventional license file found in dir — the "title" line that names
+// the license (e.g. "MIT License", "Apache License, Version 2.0"). Returns ""
+// when no license file exists or it opens with a bare copyright/permission
+// line that doesn't name a license (the server can't map those, so emitting
+// them would just add noise). Truncated so a malformed file can't bloat the
+// payload.
+func licenseFileTitle(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	// Map lower-cased entry name -> actual name, so we can match
+	// case-insensitively (LICENSE vs License vs license) without a stat storm.
+	actual := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			actual[strings.ToLower(e.Name())] = e.Name()
+		}
+	}
+	for _, want := range licenseFileNames {
+		name, ok := actual[want]
+		if !ok {
+			continue
+		}
+		raw, err := safeio.ReadFile(filepath.Join(dir, name), maxLicenseFileBytes)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			t := strings.TrimSpace(line)
+			if t == "" {
+				continue
+			}
+			// Skip a leading copyright/permission line — it names no license,
+			// so the server normalizer can't resolve it. The license name (if
+			// the file has a title) comes first; otherwise there's nothing
+			// useful to emit.
+			low := strings.ToLower(t)
+			if strings.HasPrefix(low, "copyright") || strings.HasPrefix(low, "permission is hereby") {
+				return ""
+			}
+			if len(t) > 120 {
+				t = t[:120]
+			}
+			return t
+		}
+		return ""
+	}
+	return ""
 }
 
 type npmPackageJSON struct {
