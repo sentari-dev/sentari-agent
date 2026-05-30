@@ -97,7 +97,7 @@ func ExtractNpm(nodeModulesDir string) ([]deptree.LicenseEvidence, error) {
 		// normalizes common license names to an SPDX id. spdx left empty so
 		// the server is the single source of truth for the mapping.
 		if len(out) == before {
-			if title := licenseFileTitle(path); title != "" {
+			if name := detectLicenseFile(path); name != "" {
 				out = append(out, deptree.LicenseEvidence{
 					PackageName:    pj.Name,
 					PackageVersion: pj.Version,
@@ -105,7 +105,7 @@ func ExtractNpm(nodeModulesDir string) ([]deptree.LicenseEvidence, error) {
 					SpdxID:         "",
 					Source:         "copyright_file",
 					Confidence:     0.5,
-					RawText:        title,
+					RawText:        name,
 				})
 			}
 		}
@@ -117,20 +117,63 @@ func ExtractNpm(nodeModulesDir string) ([]deptree.LicenseEvidence, error) {
 	return out, nil
 }
 
-// licenseFileTitle returns the first non-empty, non-copyright line of the
-// first conventional license file found in dir — the "title" line that names
-// the license (e.g. "MIT License", "Apache License, Version 2.0"). Returns ""
-// when no license file exists or it opens with a bare copyright/permission
-// line that doesn't name a license (the server can't map those, so emitting
-// them would just add noise). Truncated so a malformed file can't bloat the
-// payload.
-func licenseFileTitle(dir string) string {
+// licenseSignature recognises a license from its body text. “must“ is a
+// list of (lowercased) substrings that all have to appear in the file; the
+// first signature in declaration order whose “must“ set matches wins, so
+// more-specific licenses (LGPL, AGPL, BSD-3-Clause) must be listed before
+// their less-specific cousins (GPL, BSD-2-Clause). “emit“ is the raw_text
+// the agent sends to the server — chosen to be something the server
+// normalizer already maps to an SPDX id.
+type licenseSignature struct {
+	emit string
+	must []string
+}
+
+var licenseSignatures = []licenseSignature{
+	// MIT — the dominant npm license, identified by its hereby-granted clause.
+	{emit: "MIT License", must: []string{"permission is hereby granted, free of charge"}},
+	// ISC — distinctive "without fee" wording.
+	{emit: "ISC", must: []string{"permission to use, copy, modify", "with or without fee"}},
+	// Apache 2.0.
+	{emit: "Apache-2.0", must: []string{"apache license", "version 2.0"}},
+	// AGPL/LGPL must precede plain GPL (their bodies contain the GPL phrase).
+	{emit: "AGPL-3.0-only", must: []string{"affero general public license", "version 3"}},
+	{emit: "LGPL-3.0-only", must: []string{"lesser general public license", "version 3"}},
+	{emit: "LGPL-2.1-only", must: []string{"lesser general public license", "version 2.1"}},
+	{emit: "GPL-3.0-only", must: []string{"gnu general public license", "version 3"}},
+	{emit: "GPL-2.0-only", must: []string{"gnu general public license", "version 2"}},
+	// BSD — 3-clause requires the no-endorse clause, so list it first.
+	{emit: "BSD-3-Clause", must: []string{
+		"redistribution and use in source and binary forms",
+		"endorse or promote",
+	}},
+	{emit: "BSD-2-Clause", must: []string{"redistribution and use in source and binary forms"}},
+	{emit: "MPL-2.0", must: []string{"mozilla public license", "version 2.0"}},
+	{emit: "Unlicense", must: []string{
+		"this is free and unencumbered software released into the public domain",
+	}},
+}
+
+// detectLicenseFile returns the license name (as raw text the server normalizer
+// can map) for the first conventional license file found in dir. Strategy:
+//
+//  1. **Body-signature scan** — recognise the licence from a distinctive phrase
+//     anywhere in the file. This is what catches the dominant case where the
+//     MIT/BSD/Apache body has *no* title line (the file opens with the
+//     copyright notice).
+//  2. **Title-line fallback** — if no signature matched, take the first
+//     non-empty, non-copyright line as the license name (covers files that do
+//     carry a title like “MIT License“ and rare licenses we don't classify).
+//
+// Returns "" when no license file exists or neither strategy produces a
+// resolvable signal.
+func detectLicenseFile(dir string) string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
 	}
-	// Map lower-cased entry name -> actual name, so we can match
-	// case-insensitively (LICENSE vs License vs license) without a stat storm.
+	// Case-insensitive lookup table for the entries — LICENSE vs License vs
+	// license — without a stat storm.
 	actual := make(map[string]string, len(entries))
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -146,17 +189,29 @@ func licenseFileTitle(dir string) string {
 		if err != nil {
 			continue
 		}
+		low := strings.ToLower(string(raw))
+		for _, sig := range licenseSignatures {
+			matched := true
+			for _, m := range sig.must {
+				if !strings.Contains(low, m) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return sig.emit
+			}
+		}
+		// No body signature matched — fall back to the title line if it isn't
+		// a bare copyright/permission opener.
 		for _, line := range strings.Split(string(raw), "\n") {
 			t := strings.TrimSpace(line)
 			if t == "" {
 				continue
 			}
-			// Skip a leading copyright/permission line — it names no license,
-			// so the server normalizer can't resolve it. The license name (if
-			// the file has a title) comes first; otherwise there's nothing
-			// useful to emit.
-			low := strings.ToLower(t)
-			if strings.HasPrefix(low, "copyright") || strings.HasPrefix(low, "permission is hereby") {
+			lowLine := strings.ToLower(t)
+			if strings.HasPrefix(lowLine, "copyright") ||
+				strings.HasPrefix(lowLine, "permission is hereby") {
 				return ""
 			}
 			if len(t) > 120 {

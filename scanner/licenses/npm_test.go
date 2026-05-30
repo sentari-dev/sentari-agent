@@ -67,19 +67,89 @@ func TestExtractNpm_licenseFileFallback(t *testing.T) {
 	}
 }
 
-func TestExtractNpm_licenseFileFallbackSkipsBareCopyright(t *testing.T) {
+func TestExtractNpm_licenseFileFallbackDetectsTitlelessMIT(t *testing.T) {
+	// The dominant MIT LICENSE template opens with the copyright line — no
+	// title — followed by the hereby-granted clause. The body-signature scan
+	// has to recognise it from the body, not give up on the first line.
 	root := t.TempDir()
-	pkg := filepath.Join(root, "bare")
+	pkg := filepath.Join(root, "bare-mit")
 	mustMkdir(t, pkg)
-	mustWrite(t, filepath.Join(pkg, "package.json"), `{"name":"bare","version":"1.0.0"}`)
-	// Title-less license file — opens with a copyright line the server can't map.
-	mustWrite(t, filepath.Join(pkg, "LICENSE"), "Copyright (c) 2020 Someone\n\nPermission is hereby granted...\n")
+	mustWrite(t, filepath.Join(pkg, "package.json"), `{"name":"bare-mit","version":"1.0.0"}`)
+	mustWrite(t, filepath.Join(pkg, "LICENSE"),
+		"Copyright (c) 2020 Someone\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software...\n")
 	out, err := ExtractNpm(root)
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}
+	if len(out) != 1 || out[0].RawText != "MIT License" || out[0].Source != "copyright_file" {
+		t.Errorf("expected title-less MIT to be detected as 'MIT License', got: %+v", out)
+	}
+}
+
+func TestExtractNpm_licenseFileFallbackBodySignatures(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"apache-2.0", "Apache License\nVersion 2.0, January 2004\nhttp://...", "Apache-2.0"},
+		{"isc", "Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee...", "ISC"},
+		{"bsd-3-clause", "Redistribution and use in source and binary forms, with or without modification...\nNeither the name of the project may be used to endorse or promote products...", "BSD-3-Clause"},
+		{"bsd-2-clause", "Redistribution and use in source and binary forms, with or without modification, are permitted...\nTHIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AS IS...", "BSD-2-Clause"},
+		{"gpl-3", "GNU GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007\n...", "GPL-3.0-only"},
+		{"lgpl-3", "GNU LESSER GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007\n...", "LGPL-3.0-only"},
+		{"agpl-3", "GNU AFFERO GENERAL PUBLIC LICENSE\nVersion 3, 19 November 2007\n...", "AGPL-3.0-only"},
+		{"mpl-2.0", "Mozilla Public License\nVersion 2.0\n...", "MPL-2.0"},
+		{"unlicense", "This is free and unencumbered software released into the public domain.\n...", "Unlicense"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			pkg := filepath.Join(root, c.name)
+			mustMkdir(t, pkg)
+			mustWrite(t, filepath.Join(pkg, "package.json"), `{"name":"`+c.name+`","version":"1.0.0"}`)
+			mustWrite(t, filepath.Join(pkg, "LICENSE"), c.body)
+			out, err := ExtractNpm(root)
+			if err != nil {
+				t.Fatalf("extract: %v", err)
+			}
+			if len(out) != 1 || out[0].RawText != c.want {
+				t.Errorf("body signature for %s: expected %q, got %+v", c.name, c.want, out)
+			}
+		})
+	}
+}
+
+func TestExtractNpm_licenseFileFallbackTitleLineWhenNoSignature(t *testing.T) {
+	// File doesn't match any body signature, but opens with a title line ->
+	// we still emit the title (server may or may not normalize it).
+	root := t.TempDir()
+	pkg := filepath.Join(root, "titled")
+	mustMkdir(t, pkg)
+	mustWrite(t, filepath.Join(pkg, "package.json"), `{"name":"titled","version":"1.0.0"}`)
+	mustWrite(t, filepath.Join(pkg, "LICENSE"), "Some Custom License\n\nBlah blah, terms.\n")
+	out, err := ExtractNpm(root)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if len(out) != 1 || out[0].RawText != "Some Custom License" {
+		t.Errorf("expected title-line fallback, got: %+v", out)
+	}
+}
+
+func TestExtractNpm_licenseFileFallbackEmptyWhenNoSignal(t *testing.T) {
+	// No body signature AND first line is a copyright -> no evidence.
+	root := t.TempDir()
+	pkg := filepath.Join(root, "nope")
+	mustMkdir(t, pkg)
+	mustWrite(t, filepath.Join(pkg, "package.json"), `{"name":"nope","version":"1.0.0"}`)
+	mustWrite(t, filepath.Join(pkg, "LICENSE"), "Copyright (c) 2020 Someone\n\nAll rights reserved.\n")
+	out, err := ExtractNpm(root)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
 	if len(out) != 0 {
-		t.Errorf("expected no evidence for bare-copyright license file, got: %+v", out)
+		t.Errorf("expected no evidence for truly unmappable license, got: %+v", out)
 	}
 }
 
