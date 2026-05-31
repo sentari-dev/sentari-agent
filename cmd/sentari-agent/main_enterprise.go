@@ -385,12 +385,24 @@ func main() {
 	}
 
 	// Build mTLS client using the saved certificates.
+	//
+	// Timeout has to cover the worst call this client makes, which is the
+	// scan-upload round-trip: on a real fleet device the v3 payload carries
+	// ~15-20k packages plus license/dep-graph/supply-chain evidence, and
+	// the server's ingest path (UPSERT into 8+ tables + license enrichment
+	// + CVE correlation) routinely takes 60-120 seconds end-to-end before
+	// returning 200. A 30 s ceiling silently re-queues every cycle on those
+	// devices even though the server completes the ingest. 5 minutes gives
+	// the server room to finish without giving up on genuinely dead sockets.
+	// Smaller endpoints on this client (config fetch, log telemetry, cert
+	// renewal) all respond in well under a second, so the larger ceiling
+	// doesn't slow their failure mode in any meaningful way.
 	client, err := comms.NewClient(comms.ClientConfig{
 		ServerURL:  serverURL,
 		CertFile:   certFile,
 		KeyFile:    keyFile,
 		CACertFile: caFile,
-		Timeout:    30 * time.Second,
+		Timeout:    5 * time.Minute,
 		Proxy:      proxyConfig,
 	})
 	if err != nil {
