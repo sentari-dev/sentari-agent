@@ -104,7 +104,12 @@ func WriteNuGet(m *scanner.InstallGateMap, scope NuGetScope, marker MarkerFields
 		return res, fmt.Errorf("installgate.WriteNuGet: nil policy map")
 	}
 
-	endpoint := strings.TrimSpace(m.ProxyEndpoints["nuget"])
+	// Prefer the customer-configured trusted registry (PR #118 on
+	// server, this PR on agent).  NuGet.Config supports multiple
+	// <add key=… value=… /> entries; future work can chain trusted
+	// registries here, but the MVP uses just the primary URL — that's
+	// what the dashboard surfaces for now.
+	endpoint, _ := m.PickRegistryEndpoint("nuget")
 	if endpoint == "" {
 		managed, err := isSentariManaged(res.Path)
 		if err != nil {

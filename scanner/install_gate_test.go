@@ -336,3 +336,120 @@ func TestTrustedInstallGateKeyIDs_SortedAndDeduplicated(t *testing.T) {
 		t.Errorf("ids not sorted: alpha at %d, zeta at %d", alphaIdx, zetaIdx)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// PickRegistryEndpoint / AllRegistryEndpoints — trusted-registries
+// override precedence (added with the agent-side half of server PR #118).
+// ---------------------------------------------------------------------------
+
+func TestPickRegistryEndpoint_FallsBackToProxyWhenNoTrustedRegistry(t *testing.T) {
+	m := &InstallGateMap{
+		ProxyEndpoints: map[string]string{"pypi": "https://sentari-proxy.example.com/pypi/"},
+	}
+	url, trusted := m.PickRegistryEndpoint("pypi")
+	if url != "https://sentari-proxy.example.com/pypi/" {
+		t.Errorf("url = %q, want Sentari-Proxy", url)
+	}
+	if trusted {
+		t.Error("trusted = true, want false (no override configured)")
+	}
+}
+
+func TestPickRegistryEndpoint_TrustedRegistryWinsOverProxy(t *testing.T) {
+	m := &InstallGateMap{
+		ProxyEndpoints:    map[string]string{"pypi": "https://sentari-proxy.example.com/pypi/"},
+		TrustedRegistries: map[string][]TrustedRegistry{"pypi": {{URL: "https://nexus.acme.com/repository/pypi/", Label: "ACME"}}},
+	}
+	url, trusted := m.PickRegistryEndpoint("pypi")
+	if url != "https://nexus.acme.com/repository/pypi/" {
+		t.Errorf("url = %q, want customer Nexus", url)
+	}
+	if !trusted {
+		t.Error("trusted = false, want true (operator override picked)")
+	}
+}
+
+func TestPickRegistryEndpoint_SkipsEmptyTrustedEntriesAndPicksFirstNonEmpty(t *testing.T) {
+	// An empty URL in the trusted list (defensive — server validation
+	// strips them, but the writer must not crash if one slips through)
+	// must not be returned.  The lookup walks to the next entry.
+	m := &InstallGateMap{
+		ProxyEndpoints: map[string]string{"npm": "https://sentari-proxy.example.com/npm/"},
+		TrustedRegistries: map[string][]TrustedRegistry{
+			"npm": {
+				{URL: "   "},
+				{URL: "https://artifactory.acme.com/npm/", Label: "Artifactory"},
+			},
+		},
+	}
+	url, trusted := m.PickRegistryEndpoint("npm")
+	if url != "https://artifactory.acme.com/npm/" {
+		t.Errorf("url = %q, want Artifactory", url)
+	}
+	if !trusted {
+		t.Error("trusted = false, want true")
+	}
+}
+
+func TestPickRegistryEndpoint_EmptyMapReturnsEmptyString(t *testing.T) {
+	m := &InstallGateMap{}
+	url, trusted := m.PickRegistryEndpoint("nuget")
+	if url != "" {
+		t.Errorf("url = %q, want empty", url)
+	}
+	if trusted {
+		t.Error("trusted = true, want false")
+	}
+}
+
+func TestPickRegistryEndpoint_NilReceiverReturnsEmptyString(t *testing.T) {
+	// Defensive — verifyInstallGateEnvelope refuses a nil map, but
+	// the helper itself shouldn't crash if a caller passes nil after
+	// a failed verification.
+	var m *InstallGateMap
+	url, trusted := m.PickRegistryEndpoint("pypi")
+	if url != "" || trusted {
+		t.Errorf("expected ('', false) from nil receiver, got (%q, %v)", url, trusted)
+	}
+}
+
+func TestAllRegistryEndpoints_TrustedFirstThenProxy(t *testing.T) {
+	// pip's writer (and any future multi-registry writer) needs the
+	// full ordered list — trusted registries in declaration order
+	// followed by the Sentari-Proxy URL when set.
+	m := &InstallGateMap{
+		ProxyEndpoints: map[string]string{"pypi": "https://sentari-proxy.example.com/pypi/"},
+		TrustedRegistries: map[string][]TrustedRegistry{
+			"pypi": {
+				{URL: "https://nexus.acme.com/repository/pypi/", Label: "Primary"},
+				{URL: "https://nexus-eu.acme.com/repository/pypi/", Label: "EU"},
+			},
+		},
+	}
+	all := m.AllRegistryEndpoints("pypi")
+	want := []string{
+		"https://nexus.acme.com/repository/pypi/",
+		"https://nexus-eu.acme.com/repository/pypi/",
+		"https://sentari-proxy.example.com/pypi/",
+	}
+	if len(all) != len(want) {
+		t.Fatalf("len(all) = %d, want %d (%v)", len(all), len(want), all)
+	}
+	for i, v := range want {
+		if all[i] != v {
+			t.Errorf("[%d] = %q, want %q", i, all[i], v)
+		}
+	}
+}
+
+func TestAllRegistryEndpoints_OmitsEmptyProxyWhenUnset(t *testing.T) {
+	m := &InstallGateMap{
+		TrustedRegistries: map[string][]TrustedRegistry{
+			"pypi": {{URL: "https://nexus.acme.com/repository/pypi/"}},
+		},
+	}
+	all := m.AllRegistryEndpoints("pypi")
+	if len(all) != 1 || all[0] != "https://nexus.acme.com/repository/pypi/" {
+		t.Errorf("got %v, want single Nexus entry", all)
+	}
+}

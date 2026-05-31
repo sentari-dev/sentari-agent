@@ -163,7 +163,16 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 		return res, fmt.Errorf("installgate.WritePip: nil policy map")
 	}
 
-	endpoint := strings.TrimSpace(m.ProxyEndpoints["pypi"])
+	// Prefer a customer-configured trusted registry (post-PR-#118 on
+	// the server, post-this-PR on the agent) over Sentari-Proxy.  pip
+	// has native support for index-url + extra-index-url, so the
+	// primary URL becomes index-url and any additional trusted
+	// registries are appended as extra-index-url entries.
+	endpoints := m.AllRegistryEndpoints("pypi")
+	var endpoint string
+	if len(endpoints) > 0 {
+		endpoint = endpoints[0]
+	}
 	if endpoint == "" {
 		// Fail-open: no proxy configured for pypi.  Remove only if
 		// the existing file is Sentari-managed; never touch an
@@ -204,7 +213,10 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 		}
 	}
 
-	body, err := renderPipConf(endpoint, marker)
+	// extras = everything after the primary URL; rendered as
+	// extra-index-url lines per the pip docs.
+	extras := endpoints[1:]
+	body, err := renderPipConf(endpoint, extras, marker)
 	if err != nil {
 		return res, err
 	}
@@ -238,7 +250,7 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 // config; an operator who wants to keep their settings can disable
 // install-gate at the agent level, which removes our file and
 // surfaces the backup as a candidate restore.
-func renderPipConf(endpoint string, marker MarkerFields) ([]byte, error) {
+func renderPipConf(endpoint string, extras []string, marker MarkerFields) ([]byte, error) {
 	// Defensive trim: a stray trailing newline in the proxy URL
 	// from a hand-edited config would land mid-INI on the
 	// ``index-url =`` line and break pip's parser.
@@ -255,12 +267,55 @@ func renderPipConf(endpoint string, marker MarkerFields) ([]byte, error) {
 		return nil, fmt.Errorf("renderPipConf: derive host from endpoint: %w", err)
 	}
 
+	// Validate each extra registry the same way as the primary so a
+	// stray bad URL surfaces before we write the file rather than at
+	// pip's first install attempt.  Pre-compute the trusted-host list
+	// so we can emit a single line covering every distinct host.
+	extraHosts := []string{host}
+	cleaned := make([]string, 0, len(extras))
+	seen := map[string]struct{}{endpoint: {}}
+	for _, e := range extras {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if _, dup := seen[e]; dup {
+			continue
+		}
+		if err := validateEndpoint(e); err != nil {
+			return nil, fmt.Errorf("renderPipConf: extra endpoint %q: %w", e, err)
+		}
+		eh, err := hostOf(e)
+		if err != nil {
+			return nil, fmt.Errorf("renderPipConf: derive host from extra %q: %w", e, err)
+		}
+		seen[e] = struct{}{}
+		cleaned = append(cleaned, e)
+		extraHosts = appendUniqueHost(extraHosts, eh)
+	}
+
 	var b strings.Builder
 	b.WriteString(renderHashMarker(marker))
 	b.WriteString("[global]\n")
 	fmt.Fprintf(&b, "index-url = %s\n", endpoint)
-	fmt.Fprintf(&b, "trusted-host = %s\n", host)
+	if len(cleaned) > 0 {
+		// pip accepts extra-index-url as a space- or newline-separated
+		// list.  Use one line per entry — easier to grep + diff.
+		for _, e := range cleaned {
+			fmt.Fprintf(&b, "extra-index-url = %s\n", e)
+		}
+	}
+	fmt.Fprintf(&b, "trusted-host = %s\n", strings.Join(extraHosts, " "))
 	return []byte(b.String()), nil
+}
+
+func appendUniqueHost(hosts []string, h string) []string {
+	for _, existing := range hosts {
+		if existing == h {
+			return hosts
+		}
+	}
+	return append(hosts, h)
 }
 
 // hostOf returns the bare host (no scheme, no port) of an endpoint

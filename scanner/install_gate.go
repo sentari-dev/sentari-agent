@@ -34,6 +34,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -128,10 +129,85 @@ type InstallGateEcosystemBlock struct {
 // the writers will use to gate installs.  Empty for ecosystems the
 // operator has not configured a proxy for; the writer treats empty
 // as "no proxy override" and emits a no-op config.
+//
+// ``TrustedRegistries`` (server PR #118) carries the per-tenant
+// Nexus / Artifactory / ProGet mirror URLs the operator has
+// configured.  When set for an ecosystem, writers prefer the first
+// trusted-registry URL over the Sentari-Proxy endpoint — that's the
+// whole point of the override: customers with their own pull-through
+// proxy don't want the agent to point at Sentari-Proxy.  Multi-
+// registry support varies per writer (pip has extra-index-url, npm
+// has per-scope registries, Maven has <mirrors>, NuGet has multiple
+// <add key>); each writer uses the additional URLs where the native
+// config supports it.
 type InstallGateMap struct {
-	Version        int                                  `json:"version"`
-	Ecosystems     map[string]InstallGateEcosystemBlock `json:"ecosystems"`
-	ProxyEndpoints map[string]string                    `json:"proxy_endpoints"`
+	Version           int                                  `json:"version"`
+	Ecosystems        map[string]InstallGateEcosystemBlock `json:"ecosystems"`
+	ProxyEndpoints    map[string]string                    `json:"proxy_endpoints"`
+	TrustedRegistries map[string][]TrustedRegistry         `json:"trusted_registries,omitempty"`
+}
+
+// TrustedRegistry is one entry in the per-tenant override list.
+//
+// ``URL`` is the canonical mirror endpoint that pip / npm / Maven /
+// NuGet writers will inject into the native config (index-url,
+// registry=, <mirror><url>, <add key="…" value="…">).  Server-side
+// validation guarantees it's http:// or https:// with no embedded
+// credentials.
+//
+// ``Label`` is an optional human-friendly tag the operator set in
+// the dashboard.  Surfaced in audit log entries and rendered as a
+// comment line in the generated config so the operator can spot which
+// registry a writer picked without re-reading the policy envelope.
+type TrustedRegistry struct {
+	URL   string `json:"url"`
+	Label string `json:"label,omitempty"`
+}
+
+// PickRegistryEndpoint returns the URL the writers should use for an
+// ecosystem and a 'trusted' flag indicating whether it came from the
+// operator-configured override.  Trusted registries take precedence
+// over Sentari-Proxy; an empty trusted-registries entry falls through
+// to the ProxyEndpoints entry; an empty proxy entry returns "".
+//
+// Centralising the lookup here keeps every writer's selection logic
+// identical — the alternative (each writer re-implementing the
+// precedence) would risk drift the first time we add a new override
+// dimension (per-region mirror, per-environment override, …).
+func (m *InstallGateMap) PickRegistryEndpoint(ecosystem string) (url string, trusted bool) {
+	if m == nil {
+		return "", false
+	}
+	if list, ok := m.TrustedRegistries[ecosystem]; ok {
+		for _, r := range list {
+			if u := strings.TrimSpace(r.URL); u != "" {
+				return u, true
+			}
+		}
+	}
+	return strings.TrimSpace(m.ProxyEndpoints[ecosystem]), false
+}
+
+// AllRegistryEndpoints returns every URL configured for an ecosystem:
+// the trusted-registry list first (in declaration order), then the
+// Sentari-Proxy endpoint when present.  Writers that support a
+// primary-plus-mirrors model (pip extra-index-url, NuGet <add key>,
+// Maven mirrorOf) call this; writers that take exactly one URL
+// (uv, pdm) call ``PickRegistryEndpoint`` instead.
+func (m *InstallGateMap) AllRegistryEndpoints(ecosystem string) []string {
+	if m == nil {
+		return nil
+	}
+	var out []string
+	for _, r := range m.TrustedRegistries[ecosystem] {
+		if u := strings.TrimSpace(r.URL); u != "" {
+			out = append(out, u)
+		}
+	}
+	if u := strings.TrimSpace(m.ProxyEndpoints[ecosystem]); u != "" {
+		out = append(out, u)
+	}
+	return out
 }
 
 // VerifyInstallGateEnvelope parses + verifies a signed policy-map
