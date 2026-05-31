@@ -29,7 +29,7 @@
 //     directory.  Lockfile discovery only points us at the project
 //     root (where Pipfile.lock / poetry.lock / requirements.txt
 //     lives), so we probe common venv layouts under each root:
-//     ``.venv/lib/python*/site-packages``, ``venv/lib/python*/site-packages``.
+//     “.venv/lib/python*/site-packages“, “venv/lib/python*/site-packages“.
 //     If none exists this just skips silently — the v2 pip/poetry/pipenv
 //     scanners already covered the real venv via the marker walker.
 //
@@ -73,11 +73,11 @@ func safeCall(label string, fn func()) {
 // project directory or a test tempdir), it is returned verbatim
 // — the scanner respects the caller's scope.
 //
-// When scanRoot is the filesystem root (``/`` on POSIX or a drive
+// When scanRoot is the filesystem root (“/“ on POSIX or a drive
 // root on Windows), we substitute user home directories.  Walking
-// ``/`` for lockfiles would be prohibitively expensive on hosts
+// “/“ for lockfiles would be prohibitively expensive on hosts
 // with deep system trees, and the resulting matches under
-// ``/proc``, ``/var``, etc. are almost always noise; user homes
+// “/proc“, “/var“, etc. are almost always noise; user homes
 // are where developer projects actually live.
 func v3DiscoveryRoots(scanRoot string) []string {
 	clean := filepath.Clean(scanRoot)
@@ -240,12 +240,36 @@ func enrichWithV3(result *ScanResult, roots []string) {
 	}
 
 	// Phase 2: npm node_modules — per-project supply-chain + license extraction.
+	//
+	// Build the set of node_modules trees to walk from TWO sources:
+	//   1. Lockfile-anchored project dirs (``npmProjectDirs`` above) — the
+	//      canonical case for user projects.
+	//   2. node_modules ancestors derived from the v2 detector's
+	//      ``result.Packages``. IDE extensions (Cursor / VSCode) ship a
+	//      bundled ``dist/node_modules`` *without* a lockfile, so they
+	//      never appear in ``npmProjectDirs`` — but the v2 detector still
+	//      enumerated their packages. Without this second source the
+	//      licenses + supply-chain extractors silently skipped those trees,
+	//      leaving the packages with no license evidence even though their
+	//      package.json declares one.
+	npmNodeModulesDirs := make(map[string]struct{})
 	for dir := range npmProjectDirs {
 		nm := filepath.Join(dir, "node_modules")
-		st, err := os.Stat(nm)
-		if err != nil || !st.IsDir() {
+		if st, err := os.Stat(nm); err == nil && st.IsDir() {
+			npmNodeModulesDirs[nm] = struct{}{}
+		}
+	}
+	for _, pkg := range result.Packages {
+		if pkg.EnvType != "npm" || pkg.InstallPath == "" {
 			continue
 		}
+		if nm := nodeModulesAncestor(pkg.InstallPath); nm != "" {
+			npmNodeModulesDirs[nm] = struct{}{}
+		}
+	}
+
+	for nm := range npmNodeModulesDirs {
+		nm := nm
 		safeCall("supplychain.DetectInNodeModules", func() {
 			if signals, err := supplychain.DetectInNodeModules(nm); err != nil {
 				slog.Warn("v3 npm supply-chain detection failed", "node_modules", nm, "err", err.Error())
@@ -380,8 +404,8 @@ func enrichWithV3(result *ScanResult, roots []string) {
 // candidateSitePackages returns plausible site-packages dirs under
 // projectDir for the common venv layouts.  Only existing dirs are
 // returned.  Cross-platform: handles both POSIX
-// (``lib/pythonX.Y/site-packages``) and Windows
-// (``Lib/site-packages``) layouts.
+// (“lib/pythonX.Y/site-packages“) and Windows
+// (“Lib/site-packages“) layouts.
 func candidateSitePackages(projectDir string) []string {
 	var out []string
 	for _, venvName := range []string{".venv", "venv", "env"} {
@@ -501,4 +525,24 @@ func existingFiles(paths []string) []string {
 		}
 	}
 	return out
+}
+
+// nodeModulesAncestor returns the nearest ancestor of p whose basename is
+// “node_modules“, or "" if there is none. An npm package's install_path
+// looks like “.../node_modules/<pkg>“ (flat) or
+// “.../node_modules/@scope/<pkg>“ (scoped); both unwind to the same
+// “node_modules“ directory. The path is treated purely as a string —
+// nothing here touches the filesystem.
+func nodeModulesAncestor(p string) string {
+	cur := filepath.Clean(p)
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return ""
+		}
+		if filepath.Base(parent) == "node_modules" {
+			return parent
+		}
+		cur = parent
+	}
 }
