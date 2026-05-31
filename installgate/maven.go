@@ -115,7 +115,13 @@ func WriteMaven(m *scanner.InstallGateMap, scope MavenScope, marker MarkerFields
 		return res, fmt.Errorf("installgate.WriteMaven: nil policy map")
 	}
 
-	endpoint := strings.TrimSpace(m.ProxyEndpoints["maven"])
+	// Prefer the customer-configured trusted registry (PR #118 on
+	// server, this PR on agent).  Maven's <mirrorOf>*</mirrorOf> lets
+	// one URL serve every upstream; we use the first trusted-registry
+	// URL when set.  Multiple-mirror support (per-repository
+	// <mirrorOf> patterns) is left for a follow-up — the dashboard
+	// stores the list but writers currently honour only the primary.
+	endpoint, _ := m.PickRegistryEndpoint("maven")
 	if endpoint == "" {
 		// Fail-open path — same Sentari-managed gate as pip + npm.
 		managed, err := isSentariManaged(res.Path)

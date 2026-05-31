@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
@@ -344,5 +345,116 @@ func TestHostOf_Variants(t *testing.T) {
 		if got != c.want {
 			t.Errorf("hostOf(%q): got %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Trusted-registries override — pip writer reads through
+// AllRegistryEndpoints so the customer Nexus becomes index-url and any
+// remaining entries become extra-index-url lines.
+// ---------------------------------------------------------------------------
+
+func TestRenderPipConf_TrustedRegistryBecomesPrimaryIndexUrl(t *testing.T) {
+	got, err := renderPipConf(
+		"https://nexus.acme.com/repository/pypi/",
+		nil,
+		MarkerFields{KeyID: "test", Applied: time.Unix(1717200000, 0).UTC(), Version: 1},
+	)
+	if err != nil {
+		t.Fatalf("renderPipConf: %v", err)
+	}
+	out := string(got)
+	if !strings.Contains(out, "index-url = https://nexus.acme.com/repository/pypi/") {
+		t.Errorf("missing index-url line: %s", out)
+	}
+	if strings.Contains(out, "extra-index-url") {
+		t.Errorf("unexpected extra-index-url with single endpoint: %s", out)
+	}
+	if !strings.Contains(out, "trusted-host = nexus.acme.com") {
+		t.Errorf("trusted-host missing: %s", out)
+	}
+}
+
+func TestRenderPipConf_ExtrasBecomeExtraIndexUrls(t *testing.T) {
+	got, err := renderPipConf(
+		"https://nexus.acme.com/repository/pypi/",
+		[]string{
+			"https://nexus-eu.acme.com/repository/pypi/",
+			"https://sentari-proxy.example.com/pypi/",
+		},
+		MarkerFields{KeyID: "test", Applied: time.Unix(1717200000, 0).UTC(), Version: 1},
+	)
+	if err != nil {
+		t.Fatalf("renderPipConf: %v", err)
+	}
+	out := string(got)
+	if !strings.Contains(out, "index-url = https://nexus.acme.com/repository/pypi/") {
+		t.Errorf("primary missing: %s", out)
+	}
+	// All extras must land on a SINGLE extra-index-url line, space-
+	// separated, because Python's configparser refuses duplicate
+	// option names within a section.  Pre-fix the writer emitted
+	// one line per URL, which would have crashed pip's config load.
+	if !strings.Contains(out,
+		"extra-index-url = https://nexus-eu.acme.com/repository/pypi/ https://sentari-proxy.example.com/pypi/",
+	) {
+		t.Errorf("extras should be one whitespace-separated line: %s", out)
+	}
+	if c := strings.Count(out, "extra-index-url ="); c != 1 {
+		t.Errorf("extra-index-url emitted %d times, want exactly 1 (configparser rejects duplicates)", c)
+	}
+	// trusted-host carries every distinct host on one line, in
+	// insertion order.
+	if !strings.Contains(out, "trusted-host = nexus.acme.com nexus-eu.acme.com sentari-proxy.example.com") {
+		t.Errorf("trusted-host should carry all three hosts: %s", out)
+	}
+}
+
+func TestRenderPipConf_RejectsBadExtraEndpoint(t *testing.T) {
+	// Embedded space is the canonical 'bad URL' signal that
+	// validateEndpoint catches — pip + npm both silently truncate on
+	// whitespace and an embedded space would produce a half-applied
+	// URL.  The error path must surface the offending extra so an
+	// operator can pinpoint which list entry was bad.
+	_, err := renderPipConf(
+		"https://nexus.acme.com/repository/pypi/",
+		[]string{"https://nexus-eu.acme.com/repo with space/"},
+		MarkerFields{KeyID: "test", Applied: time.Unix(1717200000, 0).UTC(), Version: 1},
+	)
+	if err == nil {
+		t.Fatal("expected validation error on bad extra endpoint")
+	}
+	if !strings.Contains(err.Error(), "extra") {
+		t.Errorf("error should name the extra endpoint: %v", err)
+	}
+}
+
+func TestRenderPipConf_DedupesIdenticalExtras(t *testing.T) {
+	// An operator who lists the same URL twice (paste mistake) shouldn't
+	// see it duplicated in the generated config.  The post-fix writer
+	// emits a single extra-index-url line so we assert the URL itself
+	// appears exactly once on that line.
+	got, err := renderPipConf(
+		"https://nexus.acme.com/repository/pypi/",
+		[]string{
+			"https://nexus.acme.com/repository/pypi/", // dup of primary
+			"https://nexus-eu.acme.com/repository/pypi/",
+			"https://nexus-eu.acme.com/repository/pypi/", // self-dup
+		},
+		MarkerFields{KeyID: "test", Applied: time.Unix(1717200000, 0).UTC(), Version: 1},
+	)
+	if err != nil {
+		t.Fatalf("renderPipConf: %v", err)
+	}
+	out := string(got)
+	if c := strings.Count(out, "extra-index-url ="); c != 1 {
+		t.Errorf("extra-index-url emitted %d times, want exactly 1", c)
+	}
+	if c := strings.Count(out, "https://nexus-eu.acme.com/repository/pypi/"); c != 1 {
+		t.Errorf("EU URL appeared %d times on the extra-index-url line, want 1", c)
+	}
+	// Primary must not duplicate as an extra either.
+	if c := strings.Count(out, "https://nexus.acme.com/repository/pypi/"); c != 1 {
+		t.Errorf("primary URL appeared %d times in output, want 1 (only on index-url)", c)
 	}
 }

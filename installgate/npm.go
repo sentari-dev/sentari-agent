@@ -115,7 +115,15 @@ func WriteNpm(m *scanner.InstallGateMap, scope NpmScope, marker MarkerFields) (W
 		return res, fmt.Errorf("installgate.WriteNpm: nil policy map")
 	}
 
-	endpoint := strings.TrimSpace(m.ProxyEndpoints["npm"])
+	// Prefer the customer-configured trusted registry (post-PR-#118
+	// on the server) over Sentari-Proxy.  npm supports per-scope
+	// registries too, but a per-tenant 'use my Nexus everywhere'
+	// override applies to the root ``registry=`` line — additional
+	// trusted registries beyond the first are out of scope for the
+	// .npmrc shape (npm only resolves one root registry; multi-
+	// registry workflows use scope mappings the operator declares
+	// outside this writer).
+	endpoint, _ := m.PickRegistryEndpoint("npm")
 	if endpoint == "" {
 		managed, err := isSentariManaged(res.Path)
 		if err != nil {
