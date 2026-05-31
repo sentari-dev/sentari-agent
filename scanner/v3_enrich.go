@@ -514,9 +514,25 @@ func systemPythonCandidateRoots() []string {
 			"/usr/local/lib", // compiled-from-source
 		}
 	case "windows":
+		// Per-machine: each interpreter installs at
+		// ``<ProgramFiles>\Python<XY>\`` (e.g.
+		// ``C:\Program Files\Python311\``).  There is no umbrella
+		// ``<ProgramFiles>\Python\`` parent — every Python<XY>/ is a
+		// sibling under ProgramFiles itself.  Enumerate them here so
+		// the detector's ``HasPrefix(base, "Python")`` case can read
+		// each one directly.  Also include the umbrella ``\Python\``
+		// path as a defensive fallback in case a future installer
+		// changes the layout.
 		if pf := os.Getenv("ProgramFiles"); pf != "" {
+			if matches, _ := filepath.Glob(filepath.Join(pf, "Python*")); len(matches) > 0 {
+				candidates = append(candidates, matches...)
+			}
 			candidates = append(candidates, filepath.Join(pf, "Python"))
 		}
+		// Per-user: %LOCALAPPDATA%\Programs\Python\Python<XY>\ is
+		// the canonical 'pip install for current user' layout —
+		// the detector's ``base == "Programs"`` branch walks the
+		// parent for Python<XY> children.
 		if local := os.Getenv("LOCALAPPDATA"); local != "" {
 			candidates = append(candidates, filepath.Join(local, "Programs", "Python"))
 		}

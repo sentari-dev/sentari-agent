@@ -45,8 +45,16 @@ func TestDetectAllSystemPythons_homebrewCellar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := versions(DetectAllSystemPythons([]string{root}))
-	want := []string{"3.12.4", "3.12.5", "3.13.7"}
+	assertVersions(t, versions(DetectAllSystemPythons([]string{root})), []string{"3.12.4", "3.12.5", "3.13.7"})
+}
+
+// assertVersions checks the detected version list both in length AND
+// content.  Pre-PR-#43-fix the layout tests only asserted len() — a
+// regression that returned three garbage strings would have passed
+// silently.  Centralising the deep-equal check here keeps the
+// individual tests readable.
+func assertVersions(t *testing.T, got, want []string) {
+	t.Helper()
 	if len(got) != len(want) {
 		t.Fatalf("versions = %v, want %v", got, want)
 	}
@@ -68,11 +76,7 @@ func TestDetectAllSystemPythons_pythonFramework(t *testing.T) {
 	// component, also not a series, ignore.
 	mustMkdir(t, filepath.Join(root, "3"))
 
-	got := versions(DetectAllSystemPythons([]string{root}))
-	want := []string{"3.11", "3.12"}
-	if len(got) != len(want) {
-		t.Fatalf("versions = %v, want %v", got, want)
-	}
+	assertVersions(t, versions(DetectAllSystemPythons([]string{root})), []string{"3.11", "3.12"})
 }
 
 func TestDetectAllSystemPythons_distroLib(t *testing.T) {
@@ -86,11 +90,7 @@ func TestDetectAllSystemPythons_distroLib(t *testing.T) {
 	// walker only matches the top level.
 	mustMkdir(t, filepath.Join(root, "python3.11", "site-packages"))
 
-	got := versions(DetectAllSystemPythons([]string{root}))
-	want := []string{"2.7", "3.10", "3.11"}
-	if len(got) != len(want) {
-		t.Fatalf("versions = %v, want %v", got, want)
-	}
+	assertVersions(t, versions(DetectAllSystemPythons([]string{root})), []string{"2.7", "3.10", "3.11"})
 }
 
 func TestDetectAllSystemPythons_windowsLayout(t *testing.T) {
@@ -103,11 +103,19 @@ func TestDetectAllSystemPythons_windowsLayout(t *testing.T) {
 	mustMkdir(t, filepath.Join(root, "Common Files"))
 	mustMkdir(t, filepath.Join(root, "Python3-tools")) // 'Python3-…' doesn't match Python<XY>
 
-	got := versions(DetectAllSystemPythons([]string{root}))
-	want := []string{"3.10", "3.11", "3.13"}
-	if len(got) != len(want) {
-		t.Fatalf("versions = %v, want %v", got, want)
-	}
+	assertVersions(t, versions(DetectAllSystemPythons([]string{root})), []string{"3.10", "3.11", "3.13"})
+}
+
+// Direct per-machine ProgramFiles layout: each ``Python<XY>\`` is a
+// sibling of ProgramFiles itself, not under an umbrella ``Python/``
+// parent.  v3_enrich.go now globs those siblings and feeds each one
+// directly — which triggers the detector's ``HasPrefix(base,
+// "Python")`` branch.  Exercise that path so the regression doesn't
+// silently revert.
+func TestDetectAllSystemPythons_directPython311Root(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Python311")
+	mustMkdir(t, root)
+	assertVersions(t, versions(DetectAllSystemPythons([]string{root})), []string{"3.11"})
 }
 
 func TestDetectAllSystemPythons_unknownRootSkipped(t *testing.T) {
