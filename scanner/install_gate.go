@@ -156,9 +156,11 @@ type InstallGateMap struct {
 // credentials.
 //
 // ``Label`` is an optional human-friendly tag the operator set in
-// the dashboard.  Surfaced in audit log entries and rendered as a
-// comment line in the generated config so the operator can spot which
-// registry a writer picked without re-reading the policy envelope.
+// the dashboard.  Decoded off the envelope and held on the in-
+// memory struct so future writer changes (registry-aware audit-log
+// entries, generated-config comment lines) can surface it without a
+// schema change.  Today's writers don't render it — they pick a URL
+// and stop — but the field round-trips through the agent unchanged.
 type TrustedRegistry struct {
 	URL   string `json:"url"`
 	Label string `json:"label,omitempty"`
@@ -190,10 +192,19 @@ func (m *InstallGateMap) PickRegistryEndpoint(ecosystem string) (url string, tru
 
 // AllRegistryEndpoints returns every URL configured for an ecosystem:
 // the trusted-registry list first (in declaration order), then the
-// Sentari-Proxy endpoint when present.  Writers that support a
-// primary-plus-mirrors model (pip extra-index-url, NuGet <add key>,
-// Maven mirrorOf) call this; writers that take exactly one URL
-// (uv, pdm) call ``PickRegistryEndpoint`` instead.
+// Sentari-Proxy endpoint when present.
+//
+// Today only the pip writer consumes the full list (it renders the
+// primary URL as ``index-url`` and the rest as a single
+// ``extra-index-url`` line).  The npm, Maven, and NuGet writers
+// currently take a single URL via ``PickRegistryEndpoint``, and the
+// uv / pdm writers still read ``ProxyEndpoints`` directly.  The
+// helper is exported for the day NuGet ``<add key>`` chains and
+// Maven per-repository ``<mirrorOf>`` patterns become writer-
+// supported — leaving them as a one-line helper change away.
+//
+// Keep this docstring in sync with the writer matrix when that
+// expands.
 func (m *InstallGateMap) AllRegistryEndpoints(ecosystem string) []string {
 	if m == nil {
 		return nil

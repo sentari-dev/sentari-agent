@@ -391,11 +391,17 @@ func TestRenderPipConf_ExtrasBecomeExtraIndexUrls(t *testing.T) {
 	if !strings.Contains(out, "index-url = https://nexus.acme.com/repository/pypi/") {
 		t.Errorf("primary missing: %s", out)
 	}
-	if !strings.Contains(out, "extra-index-url = https://nexus-eu.acme.com/repository/pypi/") {
-		t.Errorf("EU extra-index-url missing: %s", out)
+	// All extras must land on a SINGLE extra-index-url line, space-
+	// separated, because Python's configparser refuses duplicate
+	// option names within a section.  Pre-fix the writer emitted
+	// one line per URL, which would have crashed pip's config load.
+	if !strings.Contains(out,
+		"extra-index-url = https://nexus-eu.acme.com/repository/pypi/ https://sentari-proxy.example.com/pypi/",
+	) {
+		t.Errorf("extras should be one whitespace-separated line: %s", out)
 	}
-	if !strings.Contains(out, "extra-index-url = https://sentari-proxy.example.com/pypi/") {
-		t.Errorf("Sentari-Proxy extra-index-url missing: %s", out)
+	if c := strings.Count(out, "extra-index-url ="); c != 1 {
+		t.Errorf("extra-index-url emitted %d times, want exactly 1 (configparser rejects duplicates)", c)
 	}
 	// trusted-host carries every distinct host on one line, in
 	// insertion order.
@@ -425,7 +431,9 @@ func TestRenderPipConf_RejectsBadExtraEndpoint(t *testing.T) {
 
 func TestRenderPipConf_DedupesIdenticalExtras(t *testing.T) {
 	// An operator who lists the same URL twice (paste mistake) shouldn't
-	// see it duplicated in the generated config.
+	// see it duplicated in the generated config.  The post-fix writer
+	// emits a single extra-index-url line so we assert the URL itself
+	// appears exactly once on that line.
 	got, err := renderPipConf(
 		"https://nexus.acme.com/repository/pypi/",
 		[]string{
@@ -440,6 +448,13 @@ func TestRenderPipConf_DedupesIdenticalExtras(t *testing.T) {
 	}
 	out := string(got)
 	if c := strings.Count(out, "extra-index-url ="); c != 1 {
-		t.Errorf("extra-index-url emitted %d times, want 1", c)
+		t.Errorf("extra-index-url emitted %d times, want exactly 1", c)
+	}
+	if c := strings.Count(out, "https://nexus-eu.acme.com/repository/pypi/"); c != 1 {
+		t.Errorf("EU URL appeared %d times on the extra-index-url line, want 1", c)
+	}
+	// Primary must not duplicate as an extra either.
+	if c := strings.Count(out, "https://nexus.acme.com/repository/pypi/"); c != 1 {
+		t.Errorf("primary URL appeared %d times in output, want 1 (only on index-url)", c)
 	}
 }

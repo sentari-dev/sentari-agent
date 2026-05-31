@@ -299,11 +299,15 @@ func renderPipConf(endpoint string, extras []string, marker MarkerFields) ([]byt
 	b.WriteString("[global]\n")
 	fmt.Fprintf(&b, "index-url = %s\n", endpoint)
 	if len(cleaned) > 0 {
-		// pip accepts extra-index-url as a space- or newline-separated
-		// list.  Use one line per entry — easier to grep + diff.
-		for _, e := range cleaned {
-			fmt.Fprintf(&b, "extra-index-url = %s\n", e)
-		}
+		// pip's [global] section is parsed by Python's configparser,
+		// which rejects duplicate option names with a
+		// ``DuplicateOptionError``.  ``extra-index-url`` must therefore
+		// be a *single* option whose value is the whitespace-separated
+		// list of URLs — pip then splits on whitespace at install
+		// time.  (Initial-PR-#44 emitted one ``extra-index-url`` line
+		// per URL, which configparser would refuse before pip even
+		// saw it — Copilot flag.)
+		fmt.Fprintf(&b, "extra-index-url = %s\n", strings.Join(cleaned, " "))
 	}
 	fmt.Fprintf(&b, "trusted-host = %s\n", strings.Join(extraHosts, " "))
 	return []byte(b.String()), nil
