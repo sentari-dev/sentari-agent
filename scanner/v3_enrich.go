@@ -393,6 +393,20 @@ func enrichWithV3(result *ScanResult, roots []string) {
 		}
 	})
 
+	// System Python interpreters (Homebrew Cellar, Python.framework,
+	// distro /usr/lib/pythonX.Y, Windows installers).  Separate from
+	// the venv walker above because the on-disk shape is completely
+	// different — no pyvenv.cfg to read.  Phase 4 deferred this; we're
+	// undeferring it so EOL evidence picks up the interpreters running
+	// dev-box scripts and CI runners, not only the venvs spawned from
+	// them.
+	safeCall("runtimeversions.SystemPython", func() {
+		roots := systemPythonCandidateRoots()
+		if len(roots) > 0 {
+			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllSystemPythons(roots)...)
+		}
+	})
+
 	safeCall("runtimeversions.Node", func() {
 		paths := nodeCandidateBinaries()
 		if len(paths) > 0 {
@@ -465,8 +479,8 @@ func jdkCandidateRoots() []string {
 }
 
 // pythonCandidateRoots returns directories under which Python venvs
-// (carrying pyvenv.cfg) typically live. System Pythons are out of
-// scope for Phase 4.
+// (carrying pyvenv.cfg) typically live.  System Pythons live elsewhere
+// — see systemPythonCandidateRoots below.
 func pythonCandidateRoots() []string {
 	candidates := []string{"/opt", "/srv"}
 	if home, err := os.UserHomeDir(); err == nil {
@@ -474,6 +488,54 @@ func pythonCandidateRoots() []string {
 			filepath.Join(home, ".virtualenvs"),
 			filepath.Join(home, ".pyenv", "versions"),
 		)
+	}
+	return existingDirs(candidates)
+}
+
+// systemPythonCandidateRoots returns directories that hold *interpreter*
+// installs — distinct from the venv roots above.  Each entry must be one
+// of the layout-anchors DetectAllSystemPythons recognises (Homebrew
+// Cellar, Python.framework Versions, distro /usr/lib*, Windows install
+// parents).  Only existing dirs are returned so an empty install on a
+// given host doesn't trigger a walk.
+func systemPythonCandidateRoots() []string {
+	var candidates []string
+	switch runtime.GOOS {
+	case "darwin":
+		candidates = []string{
+			"/opt/homebrew/Cellar",                       // Apple Silicon Homebrew
+			"/usr/local/Cellar",                          // Intel Homebrew
+			"/Library/Frameworks/Python.framework/Versions",
+		}
+	case "linux":
+		candidates = []string{
+			"/usr/lib",       // Debian/Ubuntu (pythonX.Y subdirs)
+			"/usr/lib64",     // RHEL/Fedora
+			"/usr/local/lib", // compiled-from-source
+		}
+	case "windows":
+		// Per-machine: each interpreter installs at
+		// ``<ProgramFiles>\Python<XY>\`` (e.g.
+		// ``C:\Program Files\Python311\``).  There is no umbrella
+		// ``<ProgramFiles>\Python\`` parent — every Python<XY>/ is a
+		// sibling under ProgramFiles itself.  Enumerate them here so
+		// the detector's ``HasPrefix(base, "Python")`` case can read
+		// each one directly.  Also include the umbrella ``\Python\``
+		// path as a defensive fallback in case a future installer
+		// changes the layout.
+		if pf := os.Getenv("ProgramFiles"); pf != "" {
+			if matches, _ := filepath.Glob(filepath.Join(pf, "Python*")); len(matches) > 0 {
+				candidates = append(candidates, matches...)
+			}
+			candidates = append(candidates, filepath.Join(pf, "Python"))
+		}
+		// Per-user: %LOCALAPPDATA%\Programs\Python\Python<XY>\ is
+		// the canonical 'pip install for current user' layout —
+		// the detector's ``base == "Programs"`` branch walks the
+		// parent for Python<XY> children.
+		if local := os.Getenv("LOCALAPPDATA"); local != "" {
+			candidates = append(candidates, filepath.Join(local, "Programs", "Python"))
+		}
 	}
 	return existingDirs(candidates)
 }
