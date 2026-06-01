@@ -209,11 +209,17 @@ func ParsePipfileLock(path string) ([]DepEdge, error) {
 //   - "flask[async]>=2.0"  (extras stripped from name)
 //   - "django"             (bare name, no version — NOT pinned)
 //
-// Inline environment markers (";  python_version>='3.8'") and
-// hash trailers (--hash=sha256:...) are stripped by the caller before
-// this regex is applied.  VCS / URL forms ("pkg @ git+https://...")
-// match the name only — version stays empty.
-var requirementsLineRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._\-]*(?:\[[^\]]*\])?)\s*((?:===|==|!=|~=|>=|<=|>|<)[^;#\s]*)?`)
+// Inline environment markers (";  python_version>='3.8'") are stripped
+// inside ParseRequirementsTxt below before this regex sees the line.
+// Hash trailers (--hash=sha256:...) are not removed but are tolerated
+// because the regex matches a prefix and ignores the trailer.  VCS /
+// URL forms ("pkg @ git+https://...") match the name only — version
+// stays empty.
+//
+// Whitespace between the name, the comparator, and the version is
+// accepted (e.g. "requests == 2.31.0" or ">= 1.26") — PEP 440/508
+// permit it and hand-written requirements files commonly use it.
+var requirementsLineRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._\-]*(?:\[[^\]]*\])?)\s*((?:===|==|!=|~=|>=|<=|>|<)\s*[^;#\s]*)?`)
 
 // ParseRequirementsTxt reads a requirements.txt and emits direct edges
 // only. Hash pins (--hash=...) and includes (-r other.txt) are ignored.

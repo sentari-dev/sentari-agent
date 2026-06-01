@@ -59,7 +59,10 @@ type pendingDep struct {
 // top-level pom has no <dependencies>) surface their full dep graph
 // instead of silently emitting zero edges.
 func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
-	raw, err := safeio.ReadFile(pomPath, maxLockfileBytes)
+	// POMs are bounded XML manifests; the 1 MiB cap covers every
+	// real-world reactor parent we've encountered and refuses to load
+	// a hostile/oversized file before it reaches the XML decoder.
+	raw, err := safeio.ReadFile(pomPath, maxPomBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", pomPath, err)
 	}
@@ -254,7 +257,9 @@ func collectReactorModules(parentDir string, parent mavenPom, reactorRootVersion
 		}
 		visited[childPomPath] = true
 
-		raw, err := safeio.ReadFile(childPomPath, maxLockfileBytes)
+		// Same 1 MiB POM cap as the reactor root above — child
+		// module POMs are no more permissive than the parent.
+		raw, err := safeio.ReadFile(childPomPath, maxPomBytes)
 		if err != nil {
 			continue // module dir or pom missing — skip silently
 		}

@@ -1,8 +1,10 @@
 package comms
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -92,7 +94,7 @@ func TestLoadVulnMapTrust_MissingReturnsNil(t *testing.T) {
 }
 
 // TestLoadVulnMapTrust_RejectsPartialRecord: a trust file missing
-// either ``key_id`` or ``pubkey_b64`` is corrupt; loading must fail
+// either “key_id“ or “pubkey_b64“ is corrupt; loading must fail
 // rather than returning a record the caller would misuse.
 func TestLoadVulnMapTrust_RejectsPartialRecord(t *testing.T) {
 	dir := t.TempDir()
@@ -136,18 +138,36 @@ func TestVulnMapTrustFileIsDistinctFromOthers(t *testing.T) {
 	}
 }
 
-// TestVulnMapTrustResponseFieldOmitEmpty: the RegisterResponse
-// struct carries ``vuln_map_pubkey,omitempty`` and
-// ``vuln_map_key_id,omitempty`` so an older server that doesn't
-// emit these fields still produces a wire-format the agent
-// round-trips unchanged.  Belt-and-braces: confirms the JSON tag
-// shape matches what the server emits and what older agents will
-// silently tolerate.
+// TestVulnMapTrustResponseFieldOmitEmpty: belt-and-braces over the
+// JSON tag contract for the new fields on RegisterResponse.  Two
+// guarantees in one test:
+//
+//	(a) When VulnMapKeyID / VulnMapPubKey are empty, the JSON-marshal
+//	    output omits them entirely — older servers that don't emit
+//	    these keys produce a wire format the agent round-trips
+//	    without surprises.
+//	(b) Calling SaveVulnMapTrust with the empty zero values is a
+//	    no-op-safe operation that doesn't error or create a trust
+//	    file the loader would later treat as authoritative.
 func TestVulnMapTrustResponseFieldOmitEmpty(t *testing.T) {
 	resp := RegisterResponse{DeviceID: "d"}
-	// Field is intentionally read via reflection-free path: we just
-	// verify the empty-string default round-trips without populating
-	// the trust file by simulating the SaveVulnMapTrust call.
+
+	// (a) Marshal-assertion: confirm the omitempty tags actually fire.
+	out, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal RegisterResponse: %v", err)
+	}
+	encoded := string(out)
+	if strings.Contains(encoded, "vuln_map_pubkey") {
+		t.Errorf("expected vuln_map_pubkey omitted on empty value; got %s", encoded)
+	}
+	if strings.Contains(encoded, "vuln_map_key_id") {
+		t.Errorf("expected vuln_map_key_id omitted on empty value; got %s", encoded)
+	}
+
+	// (b) Empty-value safety: SaveVulnMapTrust must accept zero values
+	// without writing a trust file the loader would later mistake for
+	// an authoritative answer.
 	if err := SaveVulnMapTrust(t.TempDir(), resp.VulnMapKeyID, resp.VulnMapPubKey); err != nil {
 		t.Errorf("empty fields must be no-op-safe: %v", err)
 	}

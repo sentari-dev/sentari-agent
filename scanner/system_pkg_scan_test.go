@@ -3,6 +3,7 @@ package scanner
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 )
 
@@ -230,5 +231,9 @@ func keysOf(m map[string]string) []string {
 	for k := range m {
 		out = append(out, k)
 	}
+	// Sort so error messages built from the slice are deterministic;
+	// Go's map iteration order is randomised and would otherwise
+	// produce flaky output between identical test runs.
+	sort.Strings(out)
 	return out
 }
