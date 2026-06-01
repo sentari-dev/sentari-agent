@@ -161,9 +161,75 @@ type InstallGateMap struct {
 // entries, generated-config comment lines) can surface it without a
 // schema change.  Today's writers don't render it — they pick a URL
 // and stop — but the field round-trips through the agent unchanged.
+//
+// ``Auth`` is the optional credential block the server inlines when
+// the operator has configured per-registry auth via the install-gate
+// trusted-registries API.  Absent on entries that don't require auth
+// (the common case — public mirrors, anonymous Nexus instances).
+// Pointer-typed so the JSON tag's ``omitempty`` actually omits the
+// field on serialise; a value-typed struct with all empty fields
+// would still marshal to ``"auth":{}`` and the server-side contract
+// requires that "no auth" mean "no field".  When the server's
+// decrypt path fails (PR #126 ``_resolve_registry_auth``), the
+// server ships the entry with ``Auth == nil`` — writers MUST treat
+// that as "apply URL only" without retrying without auth, and the
+// resulting 401 against the private mirror is the operator-visible
+// signal that the credential side is broken.
 type TrustedRegistry struct {
-	URL   string `json:"url"`
-	Label string `json:"label,omitempty"`
+	URL   string        `json:"url"`
+	Label string        `json:"label,omitempty"`
+	Auth  *RegistryAuth `json:"auth,omitempty"`
+}
+
+// RegistryAuth carries the cleartext credentials reconstituted from
+// the server's encrypted ``system_config`` sibling rows.  See
+// ``docs/contracts/install-gate-policy-map-v1.md`` (server-side
+// copy) for the wire shape — agent-side this file is the byte-
+// identical mirror.
+//
+// Two modes are valid today; an unknown ``Mode`` is treated as
+// "apply URL only" by the writers (forwards-compatibility — the
+// server may add modes ahead of the agent).
+//
+//   - ``bearer``: ``Token`` carries the value.  Apply as
+//     ``Authorization: Bearer <Token>`` (npm
+//     ``_authToken``, Maven ``httpHeaders``, NuGet password slot
+//     with literal username "any") or as a pip ``~/.netrc`` line
+//     with login ``__token__``.
+//
+//   - ``basic``: ``Username`` + ``Password``.  Apply as the
+//     ecosystem's native basic-auth idiom (netrc, npm
+//     ``_auth``/``_password``, Maven ``<server>`` username +
+//     password, NuGet ``<add key="Username">`` +
+//     ``<add key="ClearTextPassword">``).
+//
+// The struct is intentionally not stringified anywhere — writers
+// embed fields into rendered files directly, and the agent must
+// never log the cleartext (the per-writer code paths in this PR
+// reference only redaction-safe identifiers).
+type RegistryAuth struct {
+	Mode     string `json:"mode"`
+	Token    string `json:"token,omitempty"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
+// HasUsableAuth returns true when the auth block carries enough to
+// authenticate.  An entry whose ``Auth`` field is non-nil but whose
+// mode is unknown or fields are missing is treated as "no auth" so
+// writers fail closed against the mirror rather than emit a half-
+// formed credential.
+func (r *RegistryAuth) HasUsableAuth() bool {
+	if r == nil {
+		return false
+	}
+	switch r.Mode {
+	case "bearer":
+		return r.Token != ""
+	case "basic":
+		return r.Username != "" && r.Password != ""
+	}
+	return false
 }
 
 // PickRegistryEndpoint returns the URL the writers should use for an
@@ -217,6 +283,45 @@ func (m *InstallGateMap) AllRegistryEndpoints(ecosystem string) []string {
 	}
 	if u := strings.TrimSpace(m.ProxyEndpoints[ecosystem]); u != "" {
 		out = append(out, u)
+	}
+	return out
+}
+
+// RegistryEndpoint is a (URL, Auth) pair returned by credential-aware
+// selectors below.  Writers consume this when they need to apply
+// per-mirror credentials to native config files (pip's ``~/.netrc``,
+// npm's ``_authToken`` lines, Maven ``<servers>`` block, NuGet
+// ``<packageSourceCredentials>``).  The Sentari-Proxy fallback
+// always has ``Auth == nil`` (the proxy uses agent mTLS for AuthN);
+// only operator-curated trusted-registry entries can carry auth.
+type RegistryEndpoint struct {
+	URL  string
+	Auth *RegistryAuth
+}
+
+// AllRegistryEndpointsWithAuth returns each configured endpoint paired
+// with its auth block (nil when the entry has no credentials).  Order
+// is identical to ``AllRegistryEndpoints``: trusted-registries first
+// in declaration order, then the Sentari-Proxy fallback.
+//
+// Writers that need both URLs and credentials use this helper; older
+// writers that only need URLs keep calling ``AllRegistryEndpoints``
+// (which now thin-wraps this one) and stay credential-agnostic.
+func (m *InstallGateMap) AllRegistryEndpointsWithAuth(ecosystem string) []RegistryEndpoint {
+	if m == nil {
+		return nil
+	}
+	var out []RegistryEndpoint
+	for i := range m.TrustedRegistries[ecosystem] {
+		entry := &m.TrustedRegistries[ecosystem][i]
+		u := strings.TrimSpace(entry.URL)
+		if u == "" {
+			continue
+		}
+		out = append(out, RegistryEndpoint{URL: u, Auth: entry.Auth})
+	}
+	if u := strings.TrimSpace(m.ProxyEndpoints[ecosystem]); u != "" {
+		out = append(out, RegistryEndpoint{URL: u, Auth: nil})
 	}
 	return out
 }

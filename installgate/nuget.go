@@ -109,7 +109,13 @@ func WriteNuGet(m *scanner.InstallGateMap, scope NuGetScope, marker MarkerFields
 	// <add key=… value=… /> entries; future work can chain trusted
 	// registries here, but the MVP uses just the primary URL — that's
 	// what the dashboard surfaces for now.
-	endpoint, _ := m.PickRegistryEndpoint("nuget")
+	endpoints := m.AllRegistryEndpointsWithAuth("nuget")
+	var endpoint string
+	var endpointAuth *scanner.RegistryAuth
+	if len(endpoints) > 0 {
+		endpoint = endpoints[0].URL
+		endpointAuth = endpoints[0].Auth
+	}
 	if endpoint == "" {
 		managed, err := isSentariManaged(res.Path)
 		if err != nil {
@@ -139,7 +145,7 @@ func WriteNuGet(m *scanner.InstallGateMap, scope NuGetScope, marker MarkerFields
 		return res, fmt.Errorf("installgate.WriteNuGet: stat %s: %w", res.Path, err)
 	}
 
-	body, err := renderNuGetConfig(endpoint, marker)
+	body, err := renderNuGetConfig(endpoint, endpointAuth, marker)
 	if err != nil {
 		return res, err
 	}
@@ -160,7 +166,26 @@ func WriteNuGet(m *scanner.InstallGateMap, scope NuGetScope, marker MarkerFields
 // NuGet.Config.  Layout per design doc §4.4: ``<packageSources>``
 // with ``<clear/>`` to drop inherited defaults, then a single
 // ``<add>`` element pointing at Sentari-Proxy.
-func renderNuGetConfig(endpoint string, marker MarkerFields) ([]byte, error) {
+//
+// When ``auth`` is usable, a ``<packageSourceCredentials>`` block is
+// emitted with one ``<feed>`` element whose tag matches the
+// ``<packageSources>`` key.  NuGet's credential resolution binds the
+// two by element name (the source key becomes the wrapping element's
+// XML local name), so we use a constant key — ``sentari-proxy`` —
+// for both the source and the credentials entry.
+//
+// Bearer mode: NuGet has no native bearer concept; the documented
+// idiom (Artifactory, Azure Artifacts, GitHub Packages) is to use a
+// literal username of "any" (some servers accept anything) and put
+// the token in ``ClearTextPassword``.  We render with username
+// ``__token__`` for symmetry with pip's netrc bearer convention so
+// the same string identifies a bearer credential across writers.
+//
+// Basic mode: ``Username`` + ``ClearTextPassword``.  NuGet also
+// supports ``Password`` (DPAPI-encrypted on Windows), but DPAPI is
+// per-user reversible and not portable to POSIX hosts — cleartext is
+// the universal mechanism.
+func renderNuGetConfig(endpoint string, auth *scanner.RegistryAuth, marker MarkerFields) ([]byte, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if err := validateEndpoint(endpoint); err != nil {
 		return nil, fmt.Errorf("renderNuGetConfig: %w", err)
@@ -169,14 +194,52 @@ func renderNuGetConfig(endpoint string, marker MarkerFields) ([]byte, error) {
 		return nil, fmt.Errorf("renderNuGetConfig: %w", err)
 	}
 
+	const sourceKey = "sentari-proxy"
+
 	var b strings.Builder
 	b.WriteString("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n")
 	b.WriteString(renderXMLMarker(marker))
 	b.WriteString("<configuration>\n")
 	b.WriteString("  <packageSources>\n")
 	b.WriteString("    <clear />\n")
-	fmt.Fprintf(&b, "    <add key=\"sentari-proxy\" value=\"%s\" />\n", xmlEscape(endpoint))
+	fmt.Fprintf(&b, "    <add key=\"%s\" value=\"%s\" />\n", sourceKey, xmlEscape(endpoint))
 	b.WriteString("  </packageSources>\n")
+
+	if auth.HasUsableAuth() {
+		if err := renderNuGetCredentialsBlock(&b, sourceKey, auth); err != nil {
+			return nil, fmt.Errorf("renderNuGetConfig: %w", err)
+		}
+	}
+
 	b.WriteString("</configuration>\n")
 	return []byte(b.String()), nil
+}
+
+// renderNuGetCredentialsBlock emits the ``<packageSourceCredentials>``
+// element binding ``auth`` to the source whose key is ``sourceKey``.
+// NuGet's resolution rule: ``<packageSourceCredentials>`` carries one
+// child element per source, NAMED after the source's key — so for a
+// source ``sentari-proxy`` we emit ``<sentari-proxy>``.  Inside that
+// element, ``<add key="Username" value="…" />`` and
+// ``<add key="ClearTextPassword" value="…" />`` carry the values.
+func renderNuGetCredentialsBlock(b *strings.Builder, sourceKey string, auth *scanner.RegistryAuth) error {
+	var username, password string
+	switch auth.Mode {
+	case "basic":
+		username = auth.Username
+		password = auth.Password
+	case "bearer":
+		username = "__token__"
+		password = auth.Token
+	default:
+		return fmt.Errorf("unknown auth mode %q", auth.Mode)
+	}
+
+	b.WriteString("  <packageSourceCredentials>\n")
+	fmt.Fprintf(b, "    <%s>\n", sourceKey)
+	fmt.Fprintf(b, "      <add key=\"Username\" value=\"%s\" />\n", xmlEscape(username))
+	fmt.Fprintf(b, "      <add key=\"ClearTextPassword\" value=\"%s\" />\n", xmlEscape(password))
+	fmt.Fprintf(b, "    </%s>\n", sourceKey)
+	b.WriteString("  </packageSourceCredentials>\n")
+	return nil
 }

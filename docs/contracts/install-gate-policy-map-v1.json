@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentari.dev/contracts/install-gate-policy-map-v1.json",
+  "title": "Install-Gate Policy-Map Envelope (signed payload, v1)",
+  "description": "Wire shape of the install-gate policy-map signed envelope returned by GET /api/v1/agent/policy-map. The envelope itself is {payload, signature, key_id}; this schema describes the inner 'payload' object, which is what gets canonical-JSON-encoded and signed.",
+  "type": "object",
+  "required": ["version", "ecosystems", "proxy_endpoints"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Epoch (UNIX seconds) of the latest mutation among policy rules + trusted-registries row. Agents compare against their cached value and skip the apply step when unchanged. 0 means no rules ever existed."
+    },
+    "ecosystems": {
+      "type": "object",
+      "description": "Per-ecosystem rule sets. Always present, even with empty entries, so writers can confidently remove a config file that previously had rules and now has none.",
+      "patternProperties": {
+        "^[a-z][a-z0-9_-]*$": {
+          "type": "object",
+          "required": ["mode", "entries"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["deny_list", "allow_list"]
+            },
+            "entries": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["pattern"],
+                "additionalProperties": false,
+                "properties": {
+                  "pattern": {"type": "string"},
+                  "version_range": {"type": ["string", "null"]},
+                  "severity": {"type": ["string", "null"]},
+                  "reason": {"type": ["string", "null"]},
+                  "scope_env_tag": {"type": ["string", "null"]},
+                  "expires_at": {
+                    "type": ["string", "null"],
+                    "format": "date-time"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "proxy_endpoints": {
+      "type": "object",
+      "description": "Base URL of the Sentari-Proxy fallback per ecosystem. Always present (one key per declared ecosystem). null when the operator hasn't enabled Sentari-Proxy for that ecosystem.",
+      "additionalProperties": {"type": ["string", "null"]}
+    },
+    "trusted_registries": {
+      "type": "object",
+      "description": "Optional. When present, per-ecosystem override of proxy_endpoints — the agent's writer must prefer one of the URLs here over the proxy endpoint. Omitted entirely when no operator-configured overrides exist.",
+      "patternProperties": {
+        "^[a-z][a-z0-9_-]*$": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "required": ["url"],
+            "additionalProperties": false,
+            "properties": {
+              "url": {
+                "type": "string",
+                "maxLength": 500,
+                "minLength": 1
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "auth": {
+                "description": "Cleartext credentials applied to the native config file. Omitted per-entry when no auth is configured or when decryption failed server-side (writer must fail closed against the mirror in that case rather than retrying without auth).",
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "required": ["mode", "token"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "mode": {"const": "bearer"},
+                      "token": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "required": ["mode", "username", "password"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "mode": {"const": "basic"},
+                      "username": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096
+                      },
+                      "password": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

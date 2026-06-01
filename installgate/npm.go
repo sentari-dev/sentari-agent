@@ -22,6 +22,7 @@
 package installgate
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -123,7 +124,13 @@ func WriteNpm(m *scanner.InstallGateMap, scope NpmScope, marker MarkerFields) (W
 	// .npmrc shape (npm only resolves one root registry; multi-
 	// registry workflows use scope mappings the operator declares
 	// outside this writer).
-	endpoint, _ := m.PickRegistryEndpoint("npm")
+	endpoints := m.AllRegistryEndpointsWithAuth("npm")
+	var endpoint string
+	var endpointAuth *scanner.RegistryAuth
+	if len(endpoints) > 0 {
+		endpoint = endpoints[0].URL
+		endpointAuth = endpoints[0].Auth
+	}
 	if endpoint == "" {
 		managed, err := isSentariManaged(res.Path)
 		if err != nil {
@@ -153,7 +160,7 @@ func WriteNpm(m *scanner.InstallGateMap, scope NpmScope, marker MarkerFields) (W
 		return res, fmt.Errorf("installgate.WriteNpm: inspect existing config: %w", err)
 	}
 
-	body, err := renderNpmrcMerged(existing, endpoint, marker)
+	body, err := renderNpmrcMerged(existing, endpoint, endpointAuth, marker)
 	if err != nil {
 		return res, err
 	}
@@ -198,7 +205,7 @@ const (
 // duplicate-key semantics mean our trailing ``registry=`` overrides any
 // operator ``registry=`` earlier in the file — enforcement holds while
 // the operator's other settings survive.
-func renderNpmrcMerged(existing []byte, endpoint string, marker MarkerFields) ([]byte, error) {
+func renderNpmrcMerged(existing []byte, endpoint string, auth *scanner.RegistryAuth, marker MarkerFields) ([]byte, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if err := validateEndpoint(endpoint); err != nil {
 		return nil, fmt.Errorf("renderNpmrcMerged: %w", err)
@@ -229,9 +236,90 @@ func renderNpmrcMerged(existing []byte, endpoint string, marker MarkerFields) ([
 	b.WriteString("\n")
 	b.WriteString(renderHashMarker(marker))
 	fmt.Fprintf(&b, "registry=%s\n", endpoint)
+
+	// Auth lines, when configured.  npm's authentication directives are
+	// keyed by the **registry URL without scheme**, with a leading
+	// ``//`` — e.g. ``//nexus.acme.com/repository/npm/:_authToken=...``.
+	// We derive that key once and use it for every auth directive so
+	// bearer / basic both bind to the exact endpoint we just wrote on
+	// the registry= line; a mismatch (host typo, trailing-slash drift)
+	// silently breaks auth at install time.
+	if auth.HasUsableAuth() {
+		if err := renderNpmAuthLines(&b, endpoint, auth); err != nil {
+			return nil, fmt.Errorf("renderNpmrcMerged: %w", err)
+		}
+	}
+
 	b.WriteString(npmBlockEnd)
 	b.WriteString("\n")
 	return []byte(b.String()), nil
+}
+
+// renderNpmAuthLines emits npm's per-registry auth directives.  Two
+// shapes supported:
+//
+//	bearer:  //host/path/:_authToken=<token>
+//	         //host/path/:always-auth=true
+//	basic:   //host/path/:_auth=<base64(user:password)>
+//	         //host/path/:always-auth=true
+//
+// The ``always-auth=true`` line forces npm to send credentials on
+// every request (including tarball downloads) — without it, npm only
+// authenticates the metadata request and tarball fetches go
+// anonymous, which fails on a 401-requiring Nexus.
+//
+// Credential validation (no whitespace / control chars in the values)
+// is enforced server-side; this function adds a defensive guard that
+// returns an error rather than emit a malformed .npmrc line — better
+// to fail the apply than write a half-broken file that npm rejects.
+func renderNpmAuthLines(b *strings.Builder, endpoint string, auth *scanner.RegistryAuth) error {
+	prefix, err := npmAuthKeyPrefix(endpoint)
+	if err != nil {
+		return err
+	}
+	switch auth.Mode {
+	case "bearer":
+		if strings.ContainsAny(auth.Token, " \t\r\n") {
+			return fmt.Errorf("bearer token contains whitespace")
+		}
+		fmt.Fprintf(b, "%s:_authToken=%s\n", prefix, auth.Token)
+		fmt.Fprintf(b, "%s:always-auth=true\n", prefix)
+	case "basic":
+		if strings.ContainsAny(auth.Username, " \t\r\n:") {
+			return fmt.Errorf("basic username contains whitespace or colon")
+		}
+		if strings.ContainsAny(auth.Password, "\r\n") {
+			return fmt.Errorf("basic password contains line terminator")
+		}
+		encoded := base64.StdEncoding.EncodeToString([]byte(auth.Username + ":" + auth.Password))
+		fmt.Fprintf(b, "%s:_auth=%s\n", prefix, encoded)
+		fmt.Fprintf(b, "%s:always-auth=true\n", prefix)
+	default:
+		// Unknown mode — caller's HasUsableAuth check should have
+		// gated this out.  Defence-in-depth: return error.
+		return fmt.Errorf("unknown auth mode %q", auth.Mode)
+	}
+	return nil
+}
+
+// npmAuthKeyPrefix converts a registry URL into the ``//host/path/``
+// form npm uses to key auth directives.  Strips the scheme, keeps
+// host + port + path with a guaranteed trailing slash.
+func npmAuthKeyPrefix(endpoint string) (string, error) {
+	rest := endpoint
+	for _, scheme := range []string{"https://", "http://"} {
+		if strings.HasPrefix(rest, scheme) {
+			rest = rest[len(scheme):]
+			break
+		}
+	}
+	if rest == "" {
+		return "", fmt.Errorf("endpoint %q has no host", endpoint)
+	}
+	if !strings.HasSuffix(rest, "/") {
+		rest += "/"
+	}
+	return "//" + rest, nil
 }
 
 // stripSentariBlock returns ``content`` with any single Sentari-managed
