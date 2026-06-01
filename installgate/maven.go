@@ -274,14 +274,8 @@ func renderMavenServersBlock(b *strings.Builder, mirrorID string, auth *scanner.
 
 	switch auth.Mode {
 	case "basic":
-		if strings.ContainsAny(auth.Username, "<>&") {
-			// XML-escape via xmlEscape below handles this safely;
-			// but a username with control bytes is a sign of a server
-			// validation gap, so log via the error path so the apply
-			// fails loudly rather than emit a borderline-legal XML.
-			// (xmlEscape handles the actual escape; this is a
-			// belt-and-braces guard.)
-		}
+		// xmlEscape below handles ``&<>`` correctly; no separate guard
+		// needed — Copilot flagged the earlier no-op block on PR #45.
 		fmt.Fprintf(b, "      <username>%s</username>\n", xmlEscape(auth.Username))
 		fmt.Fprintf(b, "      <password>%s</password>\n", xmlEscape(auth.Password))
 	case "bearer":

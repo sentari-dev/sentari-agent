@@ -220,8 +220,15 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 		// pre-existing ``.netrc`` while preserving operator records
 		// outside it.  Errors here are non-fatal — pip.conf is gone,
 		// the operator's main intent is honoured.
-		if path, _, dropped, nerr := applyPipNetrc(m, marker); nerr == nil {
+		//
+		// When the prior netrc had operator records + a Sentari
+		// block, the rewrite path produces ``changed=true`` AND
+		// ``removed=true`` (block dropped, file rewritten); we
+		// surface both flags so an audit-log consumer reading
+		// NetrcChanged still sees the rewrite — Copilot, PR #45.
+		if path, changed, dropped, nerr := applyPipNetrc(m, marker); nerr == nil {
 			res.NetrcPath = path
+			res.NetrcChanged = changed
 			res.NetrcRemoved = dropped
 		}
 		return res, nil
