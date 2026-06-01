@@ -195,8 +195,38 @@ func ParsePipfileLock(path string) ([]DepEdge, error) {
 	return edges, nil
 }
 
+// requirementsLineRe matches a hand-written requirements.txt line per
+// PEP 508 / PEP 440.  It captures:
+//
+//	[1] package name (with optional [extras])
+//	[2] the version specifier — may be empty for bare-name lines
+//
+// Accepts:
+//   - "requests==2.31.0"   (pinned)
+//   - "requests===2.31.0"  (arbitrary equality — also pinned)
+//   - "urllib3>=1.26"      (lower bound, NOT pinned)
+//   - "urllib3~=1.26.0"    (compatible release, NOT pinned)
+//   - "flask[async]>=2.0"  (extras stripped from name)
+//   - "django"             (bare name, no version — NOT pinned)
+//
+// Inline environment markers (";  python_version>='3.8'") and
+// hash trailers (--hash=sha256:...) are stripped by the caller before
+// this regex is applied.  VCS / URL forms ("pkg @ git+https://...")
+// match the name only — version stays empty.
+var requirementsLineRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._\-]*(?:\[[^\]]*\])?)\s*((?:===|==|!=|~=|>=|<=|>|<)[^;#\s]*)?`)
+
 // ParseRequirementsTxt reads a requirements.txt and emits direct edges
 // only. Hash pins (--hash=...) and includes (-r other.txt) are ignored.
+//
+// All PEP 440 specifiers are accepted: pinned (`==` / `===`) edges get
+// Resolved=true and a clean version string; range / compatible-release
+// edges (`>=`, `~=`, `!=`, `<`, ...) get Resolved=false and the raw
+// specifier as ChildVersion so the server-side drift detector knows
+// the dep is intentionally unpinned and doesn't trigger false alerts
+// every scan.
+//
+// Extras (`pkg[async]`) are stripped from the emitted name; environment
+// markers (`; python_version >= "3.8"`) are dropped from the line.
 func ParseRequirementsTxt(path string) ([]DepEdge, error) {
 	f, err := safeio.Open(path)
 	if err != nil {
@@ -214,7 +244,6 @@ func ParseRequirementsTxt(path string) ([]DepEdge, error) {
 
 	rootName := "(unknown)"
 	rootVersion := ""
-	specRe := regexp.MustCompile(`^([A-Za-z0-9_.\-]+)\s*==\s*([A-Za-z0-9_.\-+]+)`)
 	var edges []DepEdge
 	scanner := bufio.NewScanner(f)
 	first := true
@@ -234,21 +263,52 @@ func ParseRequirementsTxt(path string) ([]DepEdge, error) {
 		if i := strings.Index(line, " #"); i >= 0 {
 			line = strings.TrimSpace(line[:i])
 		}
-		m := specRe.FindStringSubmatch(line)
+		// Drop environment markers ("; python_version >= ...").
+		if i := strings.Index(line, ";"); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		if line == "" {
+			continue
+		}
+		m := requirementsLineRe.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}
+		nameWithExtras := m[1]
+		spec := strings.TrimSpace(m[2])
+
+		// Strip extras from the emitted name — "flask[async]" → "flask".
+		emitName := nameWithExtras
+		if i := strings.Index(emitName, "["); i >= 0 {
+			emitName = emitName[:i]
+		}
+
+		isPinned := strings.HasPrefix(spec, "===") || (strings.HasPrefix(spec, "==") && !strings.HasPrefix(spec, "==="))
+		var version string
+		switch {
+		case strings.HasPrefix(spec, "==="):
+			version = strings.TrimSpace(strings.TrimPrefix(spec, "==="))
+		case strings.HasPrefix(spec, "=="):
+			version = strings.TrimSpace(strings.TrimPrefix(spec, "=="))
+		default:
+			// Store the raw specifier (e.g. ">=1.26", "~=1.26.0") so
+			// operators can still see WHAT the line said even though the
+			// version is not concretely pinned.  Empty for bare-name
+			// lines ("django" with no operator).
+			version = spec
+		}
+
 		edges = append(edges, DepEdge{
 			ParentName:       rootName,
 			ParentVersion:    rootVersion,
-			ChildName:        m[1],
-			ChildVersion:     m[2],
+			ChildName:        emitName,
+			ChildVersion:     version,
 			Ecosystem:        "pypi",
 			Type:             "direct",
 			Scope:            "",
 			Depth:            1,
-			IntroducedByPath: []string{rootName, m[1]},
-			Resolved:         true,
+			IntroducedByPath: []string{rootName, emitName},
+			Resolved:         isPinned,
 		})
 	}
 	if err := scanner.Err(); err != nil {
