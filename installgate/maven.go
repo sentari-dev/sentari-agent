@@ -121,7 +121,13 @@ func WriteMaven(m *scanner.InstallGateMap, scope MavenScope, marker MarkerFields
 	// URL when set.  Multiple-mirror support (per-repository
 	// <mirrorOf> patterns) is left for a follow-up — the dashboard
 	// stores the list but writers currently honour only the primary.
-	endpoint, _ := m.PickRegistryEndpoint("maven")
+	endpoints := m.AllRegistryEndpointsWithAuth("maven")
+	var endpoint string
+	var endpointAuth *scanner.RegistryAuth
+	if len(endpoints) > 0 {
+		endpoint = endpoints[0].URL
+		endpointAuth = endpoints[0].Auth
+	}
 	if endpoint == "" {
 		// Fail-open path — same Sentari-managed gate as pip + npm.
 		managed, err := isSentariManaged(res.Path)
@@ -158,7 +164,7 @@ func WriteMaven(m *scanner.InstallGateMap, scope MavenScope, marker MarkerFields
 		return res, fmt.Errorf("installgate.WriteMaven: stat %s: %w", res.Path, err)
 	}
 
-	body, err := renderSettingsXML(endpoint, marker)
+	body, err := renderSettingsXML(endpoint, endpointAuth, marker)
 	if err != nil {
 		return res, err
 	}
@@ -183,7 +189,19 @@ func WriteMaven(m *scanner.InstallGateMap, scope MavenScope, marker MarkerFields
 // a single ``<mirror>`` with ``<mirrorOf>*</mirrorOf>`` so every
 // Maven repository the project resolves redirects through
 // Sentari-Proxy.
-func renderSettingsXML(endpoint string, marker MarkerFields) ([]byte, error) {
+//
+// When ``auth`` is non-nil and usable, a ``<servers>`` block is
+// emitted alongside ``<mirrors>``.  Maven's resolution rule is that
+// a ``<server>`` whose ``<id>`` matches a ``<mirror>``'s ``<id>``
+// supplies the credentials for that mirror; we use a constant
+// ``sentari-proxy`` id for both halves so the binding is implicit.
+//
+// Bearer mode is rendered via Maven's ``<configuration>``
+// ``<httpHeaders>`` mechanism — Maven core has no native bearer
+// concept, but the Wagon HTTP transport supports arbitrary headers
+// since Maven 3.5+, which is below the floor we support.  Basic
+// mode uses the long-standing ``<username>``/``<password>`` fields.
+func renderSettingsXML(endpoint string, auth *scanner.RegistryAuth, marker MarkerFields) ([]byte, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if err := validateEndpoint(endpoint); err != nil {
 		return nil, fmt.Errorf("renderSettingsXML: %w", err)
@@ -197,20 +215,85 @@ func renderSettingsXML(endpoint string, marker MarkerFields) ([]byte, error) {
 		return nil, fmt.Errorf("renderSettingsXML: %w", err)
 	}
 
+	const mirrorID = "sentari-proxy"
+
 	var b strings.Builder
 	b.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
 	b.WriteString(renderXMLMarker(marker))
 	b.WriteString("<settings>\n")
 	b.WriteString("  <mirrors>\n")
 	b.WriteString("    <mirror>\n")
-	b.WriteString("      <id>sentari-proxy</id>\n")
+	fmt.Fprintf(&b, "      <id>%s</id>\n", mirrorID)
 	b.WriteString("      <mirrorOf>*</mirrorOf>\n")
 	b.WriteString("      <name>Sentari-managed mirror</name>\n")
 	fmt.Fprintf(&b, "      <url>%s</url>\n", xmlEscape(endpoint))
 	b.WriteString("    </mirror>\n")
 	b.WriteString("  </mirrors>\n")
+
+	if auth.HasUsableAuth() {
+		if err := renderMavenServersBlock(&b, mirrorID, auth); err != nil {
+			return nil, fmt.Errorf("renderSettingsXML: %w", err)
+		}
+	}
+
 	b.WriteString("</settings>\n")
 	return []byte(b.String()), nil
+}
+
+// renderMavenServersBlock emits the ``<servers>`` element that binds
+// credentials to the mirror's ``<id>``.  Two shapes:
+//
+//	basic:
+//	  <server>
+//	    <id>sentari-proxy</id>
+//	    <username>user</username>
+//	    <password>pass</password>
+//	  </server>
+//
+//	bearer:
+//	  <server>
+//	    <id>sentari-proxy</id>
+//	    <configuration>
+//	      <httpHeaders>
+//	        <property>
+//	          <name>Authorization</name>
+//	          <value>Bearer <token></value>
+//	        </property>
+//	      </httpHeaders>
+//	    </configuration>
+//	  </server>
+//
+// Bearer-via-httpHeaders is the documented Maven Wagon idiom — we
+// pick it (rather than the also-valid ``<privateKey>`` slot for
+// custom auth) because Wagon HTTP is the default transport and
+// httpHeaders is the most widely-supported mechanism across mvn 3.5+.
+func renderMavenServersBlock(b *strings.Builder, mirrorID string, auth *scanner.RegistryAuth) error {
+	b.WriteString("  <servers>\n")
+	b.WriteString("    <server>\n")
+	fmt.Fprintf(b, "      <id>%s</id>\n", mirrorID)
+
+	switch auth.Mode {
+	case "basic":
+		// xmlEscape below handles ``&<>`` correctly; no separate guard
+		// needed — Copilot flagged the earlier no-op block on PR #45.
+		fmt.Fprintf(b, "      <username>%s</username>\n", xmlEscape(auth.Username))
+		fmt.Fprintf(b, "      <password>%s</password>\n", xmlEscape(auth.Password))
+	case "bearer":
+		b.WriteString("      <configuration>\n")
+		b.WriteString("        <httpHeaders>\n")
+		b.WriteString("          <property>\n")
+		b.WriteString("            <name>Authorization</name>\n")
+		fmt.Fprintf(b, "            <value>Bearer %s</value>\n", xmlEscape(auth.Token))
+		b.WriteString("          </property>\n")
+		b.WriteString("        </httpHeaders>\n")
+		b.WriteString("      </configuration>\n")
+	default:
+		return fmt.Errorf("unknown auth mode %q", auth.Mode)
+	}
+
+	b.WriteString("    </server>\n")
+	b.WriteString("  </servers>\n")
+	return nil
 }
 
 // xmlEscape returns ``s`` with the five XML predefined entities

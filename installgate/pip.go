@@ -121,6 +121,27 @@ type WritePipResult struct {
 	// The orchestrator surfaces this flag to the audit log so the
 	// replacement is never a silent clobber.
 	ReplacedOperator bool
+
+	// NetrcPath is the resolved ``~/.netrc`` destination (or empty
+	// when no home directory could be resolved on this host).
+	// Per-registry credentials are applied via ``.netrc`` — pip /
+	// pipenv / poetry / uv all consult it natively, and it keeps the
+	// credential string out of ``pip config list`` (which would dump
+	// the URL of a URL-embedded credential).  The Sentari-managed
+	// section is delimited by sentinel lines so operator records
+	// outside our block survive verbatim.
+	NetrcPath string
+
+	// NetrcChanged is true iff the writer created the file or its
+	// contents differ from what was there.
+	NetrcChanged bool
+
+	// NetrcRemoved is true iff the policy-map carries no credentialed
+	// registries any more and the writer dropped the Sentari-managed
+	// section from an existing ``.netrc`` (preserving operator records
+	// outside the section).  The whole file is removed only when the
+	// preserved content is empty.
+	NetrcRemoved bool
 }
 
 // WritePip applies the pip section of a verified policy-map to the
@@ -191,6 +212,25 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 			return res, err
 		}
 		res.Removed = removed
+
+		// Symmetric tear-down on the netrc side: an empty policy is
+		// telling us "do nothing for pypi", so the Sentari-managed
+		// credential block must also go.  Pass an effectively empty
+		// map so applyPipNetrc strips its sentinel block from any
+		// pre-existing ``.netrc`` while preserving operator records
+		// outside it.  Errors here are non-fatal — pip.conf is gone,
+		// the operator's main intent is honoured.
+		//
+		// When the prior netrc had operator records + a Sentari
+		// block, the rewrite path produces ``changed=true`` AND
+		// ``removed=true`` (block dropped, file rewritten); we
+		// surface both flags so an audit-log consumer reading
+		// NetrcChanged still sees the rewrite — Copilot, PR #45.
+		if path, changed, dropped, nerr := applyPipNetrc(m, marker); nerr == nil {
+			res.NetrcPath = path
+			res.NetrcChanged = changed
+			res.NetrcRemoved = dropped
+		}
 		return res, nil
 	}
 
@@ -237,6 +277,26 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 	// content-differs path, so Changed && replacingOperator ⇒ backup
 	// written.
 	res.ReplacedOperator = changed && replacingOperator
+
+	// Apply per-registry credentials via ``~/.netrc`` companion.
+	// pip / pipenv / poetry / uv all read it natively; the credential
+	// string never lands in ``pip.conf`` (where it would surface in
+	// ``pip config list``).  See ``applyPipNetrc`` for failure modes
+	// and the documented limitation around system-scope vs the
+	// agent's home directory.
+	netrcPath, netrcChanged, netrcRemoved, err := applyPipNetrc(m, marker)
+	if err != nil {
+		// pip.conf was already written; surface the netrc failure but
+		// don't unwind the URL apply — partial application (URL applied,
+		// credentials missing) surfaces as an auth failure against the
+		// mirror, which is preferable to rolling back the URL and
+		// reverting to public PyPI on a host where the operator wanted
+		// the private mirror.
+		return res, fmt.Errorf("installgate.WritePip: apply netrc: %w", err)
+	}
+	res.NetrcPath = netrcPath
+	res.NetrcChanged = netrcChanged
+	res.NetrcRemoved = netrcRemoved
 	return res, nil
 }
 
