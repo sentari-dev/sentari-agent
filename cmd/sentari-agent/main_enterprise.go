@@ -346,6 +346,19 @@ func main() {
 		); err != nil {
 			regLog.Warn("persist install-gate trust failed", slog.String("err", err.Error()))
 		}
+		// Same persistence story for the vuln-map (offline CVE channel)
+		// signing pubkey.  Older servers that don't ship a vuln-map
+		// signing key send empty strings — SaveVulnMapTrust no-ops in
+		// that case, leaving any pre-existing trust file undisturbed so
+		// an upgrade-then-downgrade cycle doesn't blank the cached
+		// pubkey out.
+		if err := comms.SaveVulnMapTrust(
+			certDir,
+			regResp.VulnMapKeyID,
+			regResp.VulnMapPubKey,
+		); err != nil {
+			regLog.Warn("persist vuln-map trust failed", slog.String("err", err.Error()))
+		}
 		logAudit(auditLog, "agent.registered", fmt.Sprintf("device_id=%s", regResp.DeviceID))
 		regLog.Info("certificates saved", slog.String("cert_dir", certDir))
 	}
