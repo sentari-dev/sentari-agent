@@ -25,11 +25,44 @@ import (
 // declarative XML, so 1 MiB is well above any realistic size.
 const maxPomBytes = 1 << 20 // 1 MiB
 
+// maxReactorDepth bounds <modules> recursion so a cyclic or pathological
+// reactor layout cannot drive the walker into a runaway loop.  In
+// practice reactor trees are flat (2 levels) — a cap of 8 leaves
+// plenty of headroom for nested multi-module Spring layouts while
+// still terminating on malice.
+const maxReactorDepth = 8
+
+// pendingDep is a BFS queue item shared between ParseMavenPom (the BFS
+// driver) and collectReactorModules (the <modules> walker that feeds
+// the queue with each child module's <dependencies>).
+//
+// fromReactorModule marks deps declared by a reactor child module.
+// Such deps are logically direct from the project's POV even though
+// their IntroducedByPath has two elements ([reactor-root, module])
+// before the dep coord is appended.
+type pendingDep struct {
+	parent            mavenGA
+	parentVer         string
+	parentPath        []string
+	dep               mavenDep
+	fromReactorModule bool
+}
+
 // ParseMavenPom reads a pom.xml + recurses through ~/.m2 to emit dep
 // edges. m2Dir is the absolute path to a Maven local repository root
 // (typically ~/.m2/repository).
+//
+// When the root pom is a reactor parent (it declares <modules>), the
+// walker recursively reads each child module's pom.xml and treats their
+// <dependencies> as if they were declared in the same project.  This
+// lets multi-module Spring Boot / Quarkus / Camel projects (where the
+// top-level pom has no <dependencies>) surface their full dep graph
+// instead of silently emitting zero edges.
 func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
-	raw, err := safeio.ReadFile(pomPath, maxLockfileBytes)
+	// POMs are bounded XML manifests; the 1 MiB cap covers every
+	// real-world reactor parent we've encountered and refuses to load
+	// a hostile/oversized file before it reaches the XML decoder.
+	raw, err := safeio.ReadFile(pomPath, maxPomBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", pomPath, err)
 	}
@@ -49,13 +82,6 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 		return v
 	}
 
-	// Track edges + path metadata.
-	type pendingDep struct {
-		parent     mavenGA
-		parentVer  string
-		parentPath []string
-		dep        mavenDep
-	}
 	// Resolved version per (groupId,artifactId), populated as BFS proceeds.
 	// Nearest-wins mediation: the FIRST time we resolve a GA wins.
 	resolved := map[mavenGA]string{}
@@ -96,6 +122,16 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 		})
 	}
 
+	// Walk reactor child modules (depth-bounded).  Each child's
+	// <dependencies> are appended to the same BFS queue using the
+	// child module's GA as the parent — that way edges retain the
+	// "this dep was introduced by module X" attribution and the
+	// existing nearest-wins map dedupes across modules.
+	if len(root.Modules) > 0 {
+		visited := map[string]bool{pomPath: true}
+		collectReactorModules(filepath.Dir(pomPath), root, rootVersion, rootCoord, &queue, visited, 1)
+	}
+
 	// BOM imports emit Resolved=false at depth 1 — but no transitive recursion.
 	for _, d := range root.DependencyManagement.Dependencies {
 		if strings.EqualFold(d.Scope, "import") {
@@ -133,8 +169,11 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 
 		parentName := mavenCoord(head.parent)
 
+		// Direct iff declared by the reactor root OR by any reactor
+		// module (logically direct from the project's POV; the path
+		// still traces back through the module so attribution survives).
 		edgeType := "transitive"
-		if head.parent == rootGA {
+		if head.parent == rootGA || head.fromReactorModule {
 			edgeType = "direct"
 		}
 		emit(
@@ -170,6 +209,8 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 			}
 			// Apply child's interpolation to its dep versions.
 			gd.Version = childInterpolate(gd.Version)
+			// Transitive recursion never sets fromReactorModule — by
+			// definition it's no longer logically-direct.
 			queue = append(queue, pendingDep{
 				parent:     ga,
 				parentVer:  version,
@@ -191,6 +232,92 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 	return edges, nil
 }
 
+// collectReactorModules walks <modules> entries beneath a reactor parent
+// pom and appends every reachable child module's <dependencies> to the
+// shared queue.  Each child contributes deps under its OWN GA as the
+// parent (so edge attribution survives), but the IntroducedByPath
+// traces back to the reactor root so depth-1 edges still report
+// reactor-root → module → dep.
+//
+// The walk is depth-bounded by maxReactorDepth and refuses to revisit
+// a pom path more than once, so cyclic <modules> declarations cannot
+// drive a runaway loop.
+func collectReactorModules(parentDir string, parent mavenPom, reactorRootVersion, reactorRootCoord string, queue *[]pendingDep, visited map[string]bool, depth int) {
+	if depth > maxReactorDepth {
+		return
+	}
+	for _, mod := range parent.Modules {
+		mod = strings.TrimSpace(mod)
+		if mod == "" {
+			continue
+		}
+		childPomPath := filepath.Join(parentDir, mod, "pom.xml")
+		if visited[childPomPath] {
+			continue
+		}
+		visited[childPomPath] = true
+
+		// Same 1 MiB POM cap as the reactor root above — child
+		// module POMs are no more permissive than the parent.
+		raw, err := safeio.ReadFile(childPomPath, maxPomBytes)
+		if err != nil {
+			continue // module dir or pom missing — skip silently
+		}
+		var child mavenPom
+		if err := xml.Unmarshal(raw, &child); err != nil {
+			continue
+		}
+
+		// Inherit groupId/version from the reactor parent when the child
+		// pom omits them — Maven inheritance, simplified.
+		childGroupId := child.GroupID
+		if childGroupId == "" {
+			childGroupId = parent.GroupID
+		}
+		childArtifactId := child.ArtifactID
+		// artifactId is REQUIRED by the POM spec, so we don't synthesise
+		// one — if it's empty the module is malformed; skip.
+		if childArtifactId == "" {
+			continue
+		}
+		childVersion := child.Version
+		if childVersion == "" {
+			childVersion = parent.Version
+			if childVersion == "" {
+				childVersion = reactorRootVersion
+			}
+		}
+
+		childGA := mavenGA{groupId: childGroupId, artifactId: childArtifactId}
+		childCoord := mavenCoord(childGA)
+
+		// Child's path traces back to the reactor root: [root, child].
+		childPath := []string{reactorRootCoord, childCoord}
+
+		childInterpolate := func(v string) string {
+			if v == "${project.version}" {
+				return childVersion
+			}
+			return v
+		}
+		for _, d := range child.Dependencies {
+			d.Version = childInterpolate(d.Version)
+			*queue = append(*queue, pendingDep{
+				parent:            childGA,
+				parentVer:         childVersion,
+				parentPath:        childPath,
+				dep:               d,
+				fromReactorModule: true,
+			})
+		}
+
+		// Recurse into this child's own <modules> (nested reactor).
+		if len(child.Modules) > 0 {
+			collectReactorModules(filepath.Dir(childPomPath), child, reactorRootVersion, reactorRootCoord, queue, visited, depth+1)
+		}
+	}
+}
+
 func mavenPomLocation(m2Dir, groupId, artifactId, version string) string {
 	groupPath := strings.ReplaceAll(groupId, ".", string(filepath.Separator))
 	return filepath.Join(m2Dir, groupPath, artifactId, version, fmt.Sprintf("%s-%s.pom", artifactId, version))
@@ -210,6 +337,7 @@ type mavenPom struct {
 	GroupID              string              `xml:"groupId"`
 	ArtifactID           string              `xml:"artifactId"`
 	Version              string              `xml:"version"`
+	Modules              []string            `xml:"modules>module"`
 	Dependencies         []mavenDep          `xml:"dependencies>dependency"`
 	DependencyManagement mavenDependencyMgmt `xml:"dependencyManagement"`
 }

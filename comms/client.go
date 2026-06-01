@@ -84,7 +84,19 @@ type RegisterResponse struct {
 	// than trust unsigned policy.
 	InstallGatePubKey string `json:"install_gate_pubkey"`
 	InstallGateKeyID  string `json:"install_gate_key_id"`
-	Message           string `json:"message"`
+	// Vuln-map (offline CVE channel) signing — same trust-bootstrap
+	// story as the license-map and install-gate fields above; a third
+	// independent keypair so a compromise of one channel never leaks
+	// across the others.  Empty when the server has not provisioned a
+	// vuln-map signing key (older deployments, or an air-gap operator
+	// who has not yet imported the NVD bundle) — the agent silently
+	// treats the vuln-map channel as unavailable and falls back to the
+	// server's online correlation path.  ``omitempty`` keeps the wire
+	// format byte-identical for older servers that don't emit these
+	// fields at all, so older agents round-trip the response unchanged.
+	VulnMapPubKey string `json:"vuln_map_pubkey,omitempty"`
+	VulnMapKeyID  string `json:"vuln_map_key_id,omitempty"`
+	Message       string `json:"message"`
 }
 
 // AgentConfig is the configuration received from the server during polling.
@@ -574,6 +586,74 @@ func LoadInstallGateTrust(certDir string) (*InstallGateTrust, error) {
 	}
 	if trust.KeyID == "" || trust.PubKeyB64 == "" {
 		return nil, fmt.Errorf("%s: key_id and pubkey_b64 both required", installGateTrustFile)
+	}
+	return &trust, nil
+}
+
+// vulnMapTrustFile is the on-disk filename where the agent persists
+// the server's vuln-map signing pubkey, learned at /register.
+// Co-located with the mTLS certs because trust for the bundle rides
+// on the same TLS-fingerprint bootstrap that issued the cert.
+// Separate from the license-map and install-gate trust files so a
+// key rotation on one channel never touches the others — same
+// independence story those two have between each other.
+const vulnMapTrustFile = "vuln_map_trust.json"
+
+// VulnMapTrust is the persisted shape of the trusted vuln-map signing
+// key learned during /register.  ``KeyID`` identifies which pinned
+// entry envelopes set; ``PubKeyB64`` is the raw 32-byte ed25519
+// public key, base64-encoded.  Same wire shape as the license-map
+// and install-gate trust records — kept identical so a future
+// rotation/refresh tool can read all three by name.
+type VulnMapTrust struct {
+	KeyID     string `json:"key_id"`
+	PubKeyB64 string `json:"pubkey_b64"`
+}
+
+// SaveVulnMapTrust persists the vuln-map pubkey returned by /register
+// to ``certDir/vuln_map_trust.json``.  Empty fields are silently
+// no-op'd so a server that has not provisioned a vuln-map signing
+// key (older deployments, or air-gap operators who haven't imported
+// an NVD bundle yet) does not blank out an existing trust file
+// with zeroes.
+func SaveVulnMapTrust(certDir, keyID, pubKeyB64 string) error {
+	if keyID == "" || pubKeyB64 == "" {
+		return nil
+	}
+	if err := os.MkdirAll(certDir, 0o700); err != nil {
+		return fmt.Errorf("create cert dir: %w", err)
+	}
+	data, err := json.Marshal(VulnMapTrust{KeyID: keyID, PubKeyB64: pubKeyB64})
+	if err != nil {
+		return fmt.Errorf("marshal trust record: %w", err)
+	}
+	path := filepath.Join(certDir, vulnMapTrustFile)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", vulnMapTrustFile, err)
+	}
+	return nil
+}
+
+// LoadVulnMapTrust returns the persisted vuln-map pubkey, or
+// (nil, nil) if no trust file exists yet (fresh install pre-register,
+// or a server that doesn't ship a vuln-map signing key).  Decode
+// errors return (nil, err) so callers can log and skip vuln-map
+// envelope verification rather than crash.
+func LoadVulnMapTrust(certDir string) (*VulnMapTrust, error) {
+	path := filepath.Join(certDir, vulnMapTrustFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", vulnMapTrustFile, err)
+	}
+	var trust VulnMapTrust
+	if err := json.Unmarshal(data, &trust); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", vulnMapTrustFile, err)
+	}
+	if trust.KeyID == "" || trust.PubKeyB64 == "" {
+		return nil, fmt.Errorf("%s: key_id and pubkey_b64 both required", vulnMapTrustFile)
 	}
 	return &trust, nil
 }

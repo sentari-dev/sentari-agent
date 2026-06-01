@@ -13,6 +13,12 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
+// dpkgStatusPath is the dpkg status file location.  Declared as a var
+// (not a const) so tests can point it at a TempDir to exercise
+// SENTARI_SCAN_OS_PACKAGES=all / "python_only" without needing a real
+// Debian host.
+var dpkgStatusPath = "/var/lib/dpkg/status"
+
 // debScanner discovers system-installed Python packages on Debian/Ubuntu
 // by reading /var/lib/dpkg/status directly.  It's a RootScanner because
 // the dpkg database is a single fixed file, not something the walker
@@ -30,7 +36,7 @@ func (debScanner) DiscoverAll(ctx context.Context) ([]Environment, []ScanError) 
 	if !IsFullSystemScan(ctx) {
 		return nil, nil
 	}
-	if _, err := os.Stat("/var/lib/dpkg/status"); err != nil {
+	if _, err := os.Stat(dpkgStatusPath); err != nil {
 		return nil, nil // dpkg absent → not a Debian-family host
 	}
 	return []Environment{{
@@ -63,11 +69,17 @@ func scanDebianPackages() ([]PackageRecord, []ScanError) {
 }
 
 // scanDebianViaStatusFile parses /var/lib/dpkg/status for Python packages.
+//
+// When SENTARI_SCAN_OS_PACKAGES=all is set, the isPythonPackage filter is
+// lifted and every installed package is emitted so curated CPE entries
+// for non-Python OS packages (openssl, libssl3, glibc, ...) can match on
+// the server side.  Default ("python_only") preserves the historical
+// Python-only behaviour.
 func scanDebianViaStatusFile() ([]PackageRecord, []ScanError) {
 	var packages []PackageRecord
 	var errors []ScanError
 
-	statusFile := "/var/lib/dpkg/status"
+	statusFile := dpkgStatusPath
 	// Bound the file first — a 1 TB malicious status file would
 	// otherwise OOM the scanner during bufio streaming.  Size-cap
 	// the size via os.Stat before opening for line-by-line read.
@@ -95,6 +107,9 @@ func scanDebianViaStatusFile() ([]PackageRecord, []ScanError) {
 	}
 	defer file.Close()
 
+	mode := osScanMode()
+	emitAll := mode == "all"
+
 	var currentPkg PackageRecord
 	scanner := bufio.NewScanner(file)
 
@@ -102,7 +117,7 @@ func scanDebianViaStatusFile() ([]PackageRecord, []ScanError) {
 		line := scanner.Text()
 
 		if line == "" {
-			if currentPkg.Name != "" && isPythonPackage(currentPkg.Name) {
+			if currentPkg.Name != "" && (emitAll || isPythonPackage(currentPkg.Name)) {
 				extractDebLicense(&currentPkg)
 				packages = append(packages, currentPkg)
 			}
@@ -118,7 +133,7 @@ func scanDebianViaStatusFile() ([]PackageRecord, []ScanError) {
 	}
 
 	// Handle last entry (no trailing blank line).
-	if currentPkg.Name != "" && isPythonPackage(currentPkg.Name) {
+	if currentPkg.Name != "" && (emitAll || isPythonPackage(currentPkg.Name)) {
 		extractDebLicense(&currentPkg)
 		packages = append(packages, currentPkg)
 	}
@@ -139,7 +154,7 @@ func scanDebianViaStatusFile() ([]PackageRecord, []ScanError) {
 // populates license fields.  Sets tier to "unknown" when:
 //   - the copyright file is missing
 //   - the copyright file is a symlink (a malicious package can plant
-//     ``copyright -> /etc/shadow`` and our earlier implementation would
+//     “copyright -> /etc/shadow“ and our earlier implementation would
 //     exfiltrate the target into the scan payload — now refused)
 //   - the copyright file exceeds maxDebCopyrightSize
 //   - the raw license text is empty
