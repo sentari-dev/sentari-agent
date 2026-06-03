@@ -1,10 +1,38 @@
 package runtimeversions
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// Modern node binaries (v20+, v24) place the `node-vX.Y.Z` marker tens of MiB
+// in, past the old 16 MiB cap. The streaming search must find a marker that
+// sits beyond a single window and straddles window boundaries.
+func TestScanNodeVersion_findsMarkerBeyondWindow(t *testing.T) {
+	var buf bytes.Buffer
+	buf.Write(bytes.Repeat([]byte{0x00}, 100)) // junk well past the tiny window
+	buf.WriteString("node-v24.7.0")            // marker spanning later chunks
+	buf.Write(bytes.Repeat([]byte{0x00}, 40))
+	got, err := scanNodeVersionChunked(&buf, 16) // 16-byte window forces streaming
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "24.7.0" {
+		t.Fatalf("got %q, want 24.7.0", got)
+	}
+}
+
+func TestScanNodeVersion_noMarker(t *testing.T) {
+	got, err := scanNodeVersionChunked(bytes.NewReader(bytes.Repeat([]byte("ELF\x00junk"), 50)), 16)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("got %q, want empty", got)
+	}
+}
 
 func TestDetectNodeBinary_embeddedVersion(t *testing.T) {
 	got, err := DetectNodeBinary(filepath.Join("testdata", "node", "node"))

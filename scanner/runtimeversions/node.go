@@ -20,13 +20,20 @@ import (
 // scan latency; a cap of 4 still finds every real-world node layout.
 const _defaultNodeWalkDepth = 4
 
-// maxNodeBinaryBytes is intentionally bounded to the first 16 MiB of the
-// binary. The `node-vX.Y.Z` marker is embedded in .rodata and is reliably
-// present near the start of the binary across all Node versions we've seen.
-// Reading 100+ MiB just to grep for a 15-byte marker is wasteful.
-// If a future Node binary moves the marker past the cap, this detector
-// will silently miss it; a streaming search is the proper Phase 5 fix.
-const maxNodeBinaryBytes = 16 * 1024 * 1024
+// Node binaries embed the `node-vX.Y.Z` marker in .rodata. The old detector
+// read only the first 16 MiB, but modern builds (v20+, v24) are 80–180 MiB and
+// place the marker ~20–26 MiB in, so that cap silently missed them. We instead
+// stream the file in bounded windows (constant memory) and search each window,
+// carrying a small overlap so the marker is never split across a chunk
+// boundary. A generous hard ceiling guards against pathological reads.
+const (
+	_nodeReadChunk   = 8 * 1024 * 1024   // streaming window size
+	_nodeReadCeiling = 512 * 1024 * 1024 // never read past this many bytes
+	// Overlap kept between windows — must exceed the longest possible marker
+	// ("node-v" + three numeric components) so a marker straddling a window
+	// boundary is reassembled in the next iteration.
+	_nodeMarkerOverlap = 64
+)
 
 var nodeVersionRe = regexp.MustCompile(`node-v(\d+\.\d+\.\d+)`)
 
@@ -68,17 +75,16 @@ func detectNodeBinaryWithLimit(originalPath, path string, redirectsLeft int) (*I
 	}
 	defer f.Close()
 
-	// Bounded read — we never need the full binary. See doc on
-	// maxNodeBinaryBytes for the rationale.
-	raw, err := io.ReadAll(io.LimitReader(f, maxNodeBinaryBytes))
+	// Streaming search — node binaries are large and the marker can sit tens
+	// of MiB in (see const doc). A bounded window + overlap keeps memory flat
+	// while covering the whole file up to the ceiling.
+	version, err := scanNodeVersion(io.LimitReader(f, _nodeReadCeiling))
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	m := nodeVersionRe.FindSubmatch(raw)
-	if m == nil {
+	if version == "" {
 		return nil, nil
 	}
-	version := string(m[1])
 	return &InstalledRuntime{
 		Name:    "node",
 		Version: version,
@@ -88,6 +94,42 @@ func detectNodeBinaryWithLimit(originalPath, path string, redirectsLeft int) (*I
 		// the resolved Cellar / nvm dir.
 		InstallPath: originalPath,
 	}, nil
+}
+
+// scanNodeVersion streams r in bounded windows and returns the first
+// `node-vX.Y.Z` version found (or "" if none). The last _nodeMarkerOverlap
+// bytes of each window are prepended to the next so a marker spanning a
+// read boundary is still matched.
+func scanNodeVersion(r io.Reader) (string, error) {
+	return scanNodeVersionChunked(r, _nodeReadChunk)
+}
+
+// scanNodeVersionChunked is the testable core of scanNodeVersion with an
+// injectable window size so tests can exercise the cross-boundary overlap
+// without materializing multi-MiB inputs.
+func scanNodeVersionChunked(r io.Reader, chunkSize int) (string, error) {
+	chunk := make([]byte, chunkSize)
+	var carry []byte
+	for {
+		n, rerr := r.Read(chunk)
+		if n > 0 {
+			hay := append(carry, chunk[:n]...)
+			if m := nodeVersionRe.FindSubmatch(hay); m != nil {
+				return string(m[1]), nil
+			}
+			if len(hay) > _nodeMarkerOverlap {
+				carry = append(carry[:0], hay[len(hay)-_nodeMarkerOverlap:]...)
+			} else {
+				carry = append(carry[:0], hay...)
+			}
+		}
+		if errors.Is(rerr, io.EOF) {
+			return "", nil
+		}
+		if rerr != nil {
+			return "", rerr
+		}
+	}
 }
 
 // DetectAllNodes scans candidate binary paths.

@@ -503,8 +503,8 @@ func systemPythonCandidateRoots() []string {
 	switch runtime.GOOS {
 	case "darwin":
 		candidates = []string{
-			"/opt/homebrew/Cellar",                       // Apple Silicon Homebrew
-			"/usr/local/Cellar",                          // Intel Homebrew
+			"/opt/homebrew/Cellar", // Apple Silicon Homebrew
+			"/usr/local/Cellar",    // Intel Homebrew
 			"/Library/Frameworks/Python.framework/Versions",
 		}
 	case "linux":
@@ -545,7 +545,8 @@ func systemPythonCandidateRoots() []string {
 // any per-version installs under ~/.nvm.
 func nodeCandidateBinaries() []string {
 	candidates := []string{
-		"/usr/local/bin/node",
+		"/opt/homebrew/bin/node", // Apple Silicon Homebrew
+		"/usr/local/bin/node",    // Intel Homebrew / generic
 		"/usr/bin/node",
 		"/opt/node/bin/node",
 	}
