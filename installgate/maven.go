@@ -168,10 +168,15 @@ func WriteMaven(m *scanner.InstallGateMap, scope MavenScope, marker MarkerFields
 	if err != nil {
 		return res, err
 	}
+	// 0o600: settings.xml can carry ``<password>`` / Authorization-
+	// header credentials, so it gets the same owner-only mode as the
+	// pip netrc (policy-map contract: credential-bearing files MUST
+	// be 0600).  WriteAtomic chmods the temp file before the rename,
+	// so a pre-existing world-readable file is tightened on rewrite.
 	changed, err := WriteAtomic(WriteOptions{
 		Path:     res.Path,
 		Content:  body,
-		FileMode: 0o644,
+		FileMode: 0o600,
 		Now:      marker.Applied,
 	})
 	if err != nil {

@@ -3,11 +3,60 @@ package installgate
 import (
 	"encoding/base64"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
+
+// --- file mode (POSIX) ----------------------------------------------------
+
+func TestWriteNpm_CredentialedNpmrcWrittenMode0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file mode not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	path := npmHomeOverride(t, dir)
+
+	makeMap := func(token string) *scanner.InstallGateMap {
+		return makeMapWithTrustedRegistries(map[string][]scanner.TrustedRegistry{
+			"npm": {
+				{
+					URL:  "https://nexus.acme.com/repository/npm/",
+					Auth: &scanner.RegistryAuth{Mode: "bearer", Token: token},
+				},
+			},
+		})
+	}
+
+	// Fresh write must land owner-only.
+	if _, err := WriteNpm(makeMap("NPM-tok-one"), NpmScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime}); err != nil {
+		t.Fatalf("WriteNpm (fresh): %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat npmrc: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("fresh npmrc mode: got %#o, want 0600 — credential file must be owner-only", perm)
+	}
+
+	// Overwriting a pre-existing world-readable file must tighten it.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod npmrc to 0644: %v", err)
+	}
+	if _, err := WriteNpm(makeMap("NPM-tok-two"), NpmScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime}); err != nil {
+		t.Fatalf("WriteNpm (overwrite): %v", err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat npmrc after overwrite: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("overwritten npmrc mode: got %#o, want 0600 — credential file must be owner-only", perm)
+	}
+}
 
 // --- bearer happy path ----------------------------------------------------
 
