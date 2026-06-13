@@ -75,20 +75,31 @@ func ParseNpmPackageLock(lockPath string) ([]DepEdge, error) {
 		head := queue[0]
 		queue = queue[1:]
 		entry := lock.Packages[head.key]
-		for childSpec := range entry.Dependencies {
-			childKey, childEntry, found := npmResolveChild(lock.Packages, head.key, childSpec)
-			if !found {
-				continue
+		// Walk the same parent->child relationships appendEdges emits:
+		// runtime deps everywhere, plus dev/peer/optional at root. Without
+		// the root extras, the entire dev/peer/optional subtree would be
+		// BFS-unreachable and its edges would fall back to sub-2-element
+		// introduced_by_path values, violating the contract's minItems=2.
+		depMaps := []map[string]string{entry.Dependencies}
+		if head.key == "" {
+			depMaps = append(depMaps, entry.DevDependencies, entry.PeerDependencies, entry.OptionalDependencies)
+		}
+		for _, deps := range depMaps {
+			for childSpec := range deps {
+				childKey, childEntry, found := npmResolveChild(lock.Packages, head.key, childSpec)
+				if !found {
+					continue
+				}
+				if _, seen := depthByKey[childKey]; seen {
+					continue
+				}
+				childPath := append([]string{}, head.path...)
+				childPath = append(childPath, npmPackageNameFromKey(childKey))
+				depthByKey[childKey] = head.depth + 1
+				pathByKey[childKey] = childPath
+				queue = append(queue, bfsItem{key: childKey, path: childPath, depth: head.depth + 1})
+				_ = childEntry // marker to keep variable in scope for readability
 			}
-			if _, seen := depthByKey[childKey]; seen {
-				continue
-			}
-			childPath := append([]string{}, head.path...)
-			childPath = append(childPath, npmPackageNameFromKey(childKey))
-			depthByKey[childKey] = head.depth + 1
-			pathByKey[childKey] = childPath
-			queue = append(queue, bfsItem{key: childKey, path: childPath, depth: head.depth + 1})
-			_ = childEntry // marker to keep variable in scope for readability
 		}
 	}
 
@@ -132,8 +143,8 @@ func appendEdges(
 		}
 		childName := keyToName[childKey]
 		childPath := pathByKey[childKey]
-		if len(childPath) == 0 {
-			// Shouldn't happen given BFS above, but defensively append.
+		if len(childPath) == 0 && len(parentPath) > 0 {
+			// Child not BFS-reached but parent was: extend the parent chain.
 			childPath = append([]string{}, parentPath...)
 			childPath = append(childPath, childName)
 		}
@@ -150,7 +161,7 @@ func appendEdges(
 			Type:             edgeType,
 			Scope:            "",
 			Depth:            depthByKey[childKey],
-			IntroducedByPath: childPath,
+			IntroducedByPath: SafePath(childPath, parentName, childName),
 			Resolved:         true,
 		})
 	}
