@@ -281,12 +281,17 @@ func main() {
 	}
 
 	// Build initial (no-cert) client for registration.
-	// If --bootstrap-ca-fingerprint is set, the TLS handshake will verify the
-	// server's certificate fingerprint to prevent MITM during first contact.
+	// Trust precedence per ADR 0004: an operator-distributed CA cert
+	// (ca_cert_file in the config — NOT the certs-dir fallback, which does
+	// not exist before registration) anchors the bootstrap handshake via
+	// standard chain validation.  If --bootstrap-ca-fingerprint is also
+	// set, the fingerprint pin runs as an additional check; with a
+	// fingerprint alone, the pin is the sole verification.
 	bootstrapClient, err := comms.NewClient(comms.ClientConfig{
 		ServerURL:            serverURL,
 		Timeout:              30 * time.Second,
 		Proxy:                proxyConfig,
+		CACertFile:           agentCfg.Server.CACertFile,
 		BootstrapFingerprint: *bootstrapCAFP,
 	})
 	if err != nil {

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sentari-dev/sentari-agent/common/logging"
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
@@ -111,6 +112,12 @@ type AgentConfig struct {
 type Client struct {
 	serverURL  string
 	httpClient *http.Client
+	// systemTrustBootstrap records that the client was built with neither
+	// a CA cert file nor a bootstrap fingerprint, so server verification
+	// falls back to the OS trust store — a mechanism ADR 0004 rejects as
+	// the sole bootstrap anchor.  RegisterWithToken logs a warning when
+	// trust is anchored through such a client so the gap is observable.
+	systemTrustBootstrap bool
 	// retry, when non-nil, overrides the defaultRetryConfig used by
 	// doRequest.  Tests set this to shrink waits; production leaves
 	// it nil so the 5-attempt / 60 s-cap defaults apply.
@@ -151,12 +158,38 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		tlsConfig.Certificates = []tls.Certificate{cert}
 	}
 
+	// Load CA certificate for server verification (certificate pinning).
+	// Loaded BEFORE the fingerprint block: per ADR 0004 the CA file is the
+	// primary trust anchor and the fingerprint only stands alone when no
+	// CA is configured.
+	if cfg.CACertFile != "" {
+		caCert, err := os.ReadFile(cfg.CACertFile)
+		if err != nil {
+			return nil, fmt.Errorf("load CA certificate: %w", err)
+		}
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+		tlsConfig.RootCAs = caCertPool
+	}
+
 	// Pin the server TLS certificate by SHA-256 fingerprint during bootstrap.
 	// This prevents MITM attacks when the agent has not yet received the CA
 	// certificate from the server.
+	//
+	// Trust precedence (ADR 0004):
+	//   - CA configured + fingerprint: standard chain validation against the
+	//     CA pool stays ON, and the pin runs as an ADDITIONAL check —
+	//     crypto/tls invokes VerifyConnection only after normal verification
+	//     succeeds when InsecureSkipVerify is false.
+	//   - Fingerprint only: no CA to chain-walk against, so chain validation
+	//     is disabled and the pin is the sole (manual) verification.
 	if cfg.BootstrapFingerprint != "" {
 		expected := strings.ToLower(strings.ReplaceAll(cfg.BootstrapFingerprint, ":", ""))
-		tlsConfig.InsecureSkipVerify = true // We verify manually via fingerprint.
+		if tlsConfig.RootCAs == nil {
+			tlsConfig.InsecureSkipVerify = true // We verify manually via fingerprint.
+		}
 		tlsConfig.VerifyConnection = func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) == 0 {
 				return fmt.Errorf("server presented no TLS certificate")
@@ -169,19 +202,6 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 			}
 			return nil
 		}
-	}
-
-	// Load CA certificate for server verification (certificate pinning).
-	if cfg.CACertFile != "" {
-		caCert, err := os.ReadFile(cfg.CACertFile)
-		if err != nil {
-			return nil, fmt.Errorf("load CA certificate: %w", err)
-		}
-		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM(caCert) {
-			return nil, fmt.Errorf("failed to parse CA certificate")
-		}
-		tlsConfig.RootCAs = caCertPool
 	}
 
 	timeout := cfg.Timeout
@@ -203,7 +223,8 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 
 	return &Client{
-		serverURL: cfg.ServerURL,
+		serverURL:            cfg.ServerURL,
+		systemTrustBootstrap: cfg.CACertFile == "" && cfg.BootstrapFingerprint == "",
 		httpClient: &http.Client{
 			Timeout:   timeout,
 			Transport: transport,
@@ -322,6 +343,15 @@ func (c *Client) Register(hostname string) (*RegisterResponse, []byte, error) {
 // the server joins the agent's startup trace.  Retries on transient
 // network / 429 / 5xx via doRequest with exponential backoff.
 func (c *Client) RegisterWithToken(ctx context.Context, hostname, enrollmentToken string) (*RegisterResponse, []byte, error) {
+	// Registration is the moment trust is anchored: the CA cert and signing
+	// pubkeys returned here are pinned for every subsequent connection.
+	// Doing that over a connection verified only by the OS trust store is
+	// the silent-TOFU gap ADR 0004 warns about — make it loud.
+	if c.systemTrustBootstrap {
+		logging.LoggerFromContext(ctx).Warn(
+			"bootstrap trust falling back to system trust store; configure ca_cert_file or --bootstrap-ca-fingerprint")
+	}
+
 	// Generate ECDSA P-256 keypair on the agent.
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
