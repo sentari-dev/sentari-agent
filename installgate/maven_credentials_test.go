@@ -3,11 +3,61 @@ package installgate
 import (
 	"encoding/xml"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
+
+// --- file mode (POSIX) ----------------------------------------------------
+
+func TestWriteMaven_CredentialedSettingsXMLWrittenMode0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file mode not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	path := mavenHomeOverride(t, dir)
+
+	makeMap := func(token string) *scanner.InstallGateMap {
+		return makeMapWithTrustedRegistries(map[string][]scanner.TrustedRegistry{
+			"maven": {
+				{
+					URL:  "https://nexus.acme.com/repository/maven/",
+					Auth: &scanner.RegistryAuth{Mode: "bearer", Token: token},
+				},
+			},
+		})
+	}
+
+	// Fresh write must land owner-only.
+	if _, err := WriteMaven(makeMap("MVN-tok-one"), MavenScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime}); err != nil {
+		t.Fatalf("WriteMaven (fresh): %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat settings.xml: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("fresh settings.xml mode: got %#o, want 0600 — credential file must be owner-only", perm)
+	}
+
+	// Overwriting a pre-existing world-readable (Sentari-managed)
+	// file must tighten it.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod settings.xml to 0644: %v", err)
+	}
+	if _, err := WriteMaven(makeMap("MVN-tok-two"), MavenScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime}); err != nil {
+		t.Fatalf("WriteMaven (overwrite): %v", err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat settings.xml after overwrite: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("overwritten settings.xml mode: got %#o, want 0600 — credential file must be owner-only", perm)
+	}
+}
 
 // --- bearer happy path: <httpHeaders> Authorization: Bearer ---------------
 

@@ -3,11 +3,61 @@ package installgate
 import (
 	"encoding/xml"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
+
+// --- file mode (POSIX) ----------------------------------------------------
+
+func TestWriteNuGet_CredentialedConfigWrittenMode0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file mode not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	path := nugetHomeOverride(t, dir)
+
+	makeMap := func(token string) *scanner.InstallGateMap {
+		return makeMapWithTrustedRegistries(map[string][]scanner.TrustedRegistry{
+			"nuget": {
+				{
+					URL:  "https://nexus.acme.com/repository/nuget/",
+					Auth: &scanner.RegistryAuth{Mode: "bearer", Token: token},
+				},
+			},
+		})
+	}
+
+	// Fresh write must land owner-only.
+	if _, err := WriteNuGet(makeMap("NUGET-tok-one"), NuGetScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime}); err != nil {
+		t.Fatalf("WriteNuGet (fresh): %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat NuGet.Config: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("fresh NuGet.Config mode: got %#o, want 0600 — credential file must be owner-only", perm)
+	}
+
+	// Overwriting a pre-existing world-readable (Sentari-managed)
+	// file must tighten it.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod NuGet.Config to 0644: %v", err)
+	}
+	if _, err := WriteNuGet(makeMap("NUGET-tok-two"), NuGetScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime}); err != nil {
+		t.Fatalf("WriteNuGet (overwrite): %v", err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat NuGet.Config after overwrite: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("overwritten NuGet.Config mode: got %#o, want 0600 — credential file must be owner-only", perm)
+	}
+}
 
 // --- bearer happy path: __token__ + ClearTextPassword -------------------
 
