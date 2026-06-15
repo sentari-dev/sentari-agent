@@ -48,7 +48,7 @@
         "package_name": { "type": "string" },
         "package_version": { "type": "string" },
         "ecosystem": { "type": "string", "enum": ["pypi", "npm", "maven", "nuget"] },
-        "signal_type": { "type": "string", "enum": ["postinstall_script", "preinstall_script", "install_script", "unsigned", "provenance_attested", "yanked", "deprecated", "maintainer_changed", "typosquat_suspect", "npm_malware_advisory"] },
+        "signal_type": { "type": "string", "enum": ["postinstall_script", "preinstall_script", "install_script", "unsigned", "provenance_attested", "yanked", "deprecated", "maintainer_changed", "typosquat_suspect", "npm_malware_advisory", "pypi_malware_advisory", "maven_malware_advisory", "nuget_malware_advisory"] },
         "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
         "source": { "type": "string" },
         "raw": { "type": "object", "additionalProperties": true }
