@@ -450,8 +450,18 @@ func main() {
 		return
 	}
 
-	// --serve: daemon loop
-	runServe(client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir)
+	// --serve: daemon loop.  Pass the mTLS-client material so the loop can
+	// rebuild its client in-memory after a certificate renewal (same config as
+	// the client built above).
+	renewCfg := renewClientConfig{
+		serverURL: serverURL,
+		certFile:  certFile,
+		keyFile:   keyFile,
+		caFile:    caFile,
+		timeout:   5 * time.Minute,
+		proxy:     proxyConfig,
+	}
+	runServe(client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir, renewCfg)
 }
 
 // runUpload performs a single drain-cache → scan → upload cycle.
@@ -860,6 +870,119 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 	return nil
 }
 
+// renewBeforeDays is how many days before the device cert's NotAfter the agent
+// starts attempting renewal.  On the 365-day device cert this gives the agent
+// roughly a month of (hourly) renewal attempts before expiry, enough to ride
+// out a multi-week offline stretch yet short enough not to re-issue constantly.
+const renewBeforeDays = 30
+
+// renewClientConfig carries the mTLS-client material the serve loop needs to
+// rebuild its client in-memory after a successful certificate renewal, so the
+// next upload uses the new identity without a daemon restart.  It mirrors the
+// comms.ClientConfig built at startup (main_enterprise.go ~line 418).
+type renewClientConfig struct {
+	serverURL string
+	certFile  string
+	keyFile   string
+	caFile    string
+	timeout   time.Duration
+	proxy     comms.ProxyConfig
+}
+
+// maybeRenewCertificate checks the local device cert's remaining validity and,
+// if it is inside the renewal window, attempts a renewal over the current mTLS
+// client.  On success it atomically swaps the on-disk cert+key, re-saves the
+// (idempotent) signing-pubkey trust files, rebuilds the mTLS client from the
+// new material, and returns the new client.  On any failure it logs a warning
+// and returns the unchanged client — renewal is always non-fatal and never
+// leaves a half-written cert (the swap is atomic).
+//
+// The check reads the LOCAL cert NotAfter (no server round-trip just to
+// decide), so an outside-window call is cheap: one file parse and return.
+func maybeRenewCertificate(ctx context.Context, client *comms.Client, rc renewClientConfig, certDir, hostname string, auditLog *audit.AuditLog) *comms.Client {
+	log := logging.LoggerFromContext(ctx)
+
+	notAfter, err := comms.DeviceCertNotAfter(certDir)
+	if err != nil {
+		// Can't read the cert (not yet registered, or unreadable) — nothing
+		// to renew this cycle; the register path owns first issuance.
+		log.Warn("cert renewal: could not read device cert NotAfter; skipping",
+			slog.String("err", err.Error()))
+		return client
+	}
+
+	remaining := time.Until(notAfter)
+	if remaining >= renewBeforeDays*24*time.Hour {
+		return client // Outside the window — no-op.
+	}
+
+	log.Info("device certificate within renewal window; attempting renewal",
+		slog.Duration("remaining", remaining))
+
+	resp, keyPEM, err := client.RenewCertificate(ctx, hostname)
+	if err != nil {
+		// Non-fatal: keep the current cert+client and retry next cycle.  Covers
+		// an old server (404), a transient outage, or an air-gap window lapse.
+		log.Warn("certificate renewal failed; keeping current cert",
+			slog.String("err", err.Error()))
+		return client
+	}
+
+	if err := comms.SaveCertificatesAtomic(certDir,
+		[]byte(resp.CACert), []byte(resp.DeviceCert), keyPEM); err != nil {
+		// Atomic saver guarantees the old pair is untouched on failure.
+		log.Warn("certificate renewal: atomic save failed; keeping current cert",
+			slog.String("err", err.Error()))
+		return client
+	}
+
+	// Re-persist signing pubkeys so a device that lost a trust file recovers it
+	// on renewal.  These no-op on empty fields, so an older server that omits
+	// them never blanks an existing trust file.
+	if err := comms.SaveLicenseMapTrust(certDir, resp.LicenseMapKeyID, resp.LicenseMapPubKey); err != nil {
+		log.Warn("cert renewal: re-save license-map trust failed", slog.String("err", err.Error()))
+	}
+	if err := comms.SaveInstallGateTrust(certDir, resp.InstallGateKeyID, resp.InstallGatePubKey); err != nil {
+		log.Warn("cert renewal: re-save install-gate trust failed", slog.String("err", err.Error()))
+	}
+	if err := comms.SaveVulnMapTrust(certDir, resp.VulnMapKeyID, resp.VulnMapPubKey); err != nil {
+		log.Warn("cert renewal: re-save vuln-map trust failed", slog.String("err", err.Error()))
+	}
+
+	// Rebuild the mTLS client from the freshly-saved material so the next
+	// upload authenticates with the new identity.  On rebuild failure, keep the
+	// old client — the new cert is on disk and will be picked up on restart,
+	// and the old fingerprint is still server-side valid during the overlap.
+	newClient, err := comms.NewClient(comms.ClientConfig{
+		ServerURL:  rc.serverURL,
+		CertFile:   rc.certFile,
+		KeyFile:    rc.keyFile,
+		CACertFile: rc.caFile,
+		Timeout:    rc.timeout,
+		Proxy:      rc.proxy,
+	})
+	if err != nil {
+		log.Warn("cert renewal: saved new cert but failed to rebuild mTLS client; will apply on next restart",
+			slog.String("err", err.Error()))
+		return client
+	}
+
+	log.Info("device certificate renewed",
+		slog.Time("new_not_after", notAfterOrZero(certDir)))
+	logAudit(auditLog, "cert.renewed", fmt.Sprintf("device_id=%s", resp.DeviceID))
+	return newClient
+}
+
+// notAfterOrZero reads the (now-renewed) device cert NotAfter for logging,
+// returning the zero time if it can't be re-read.  Best-effort observability
+// only — never affects control flow.
+func notAfterOrZero(certDir string) time.Time {
+	if t, err := comms.DeviceCertNotAfter(certDir); err == nil {
+		return t
+	}
+	return time.Time{}
+}
+
 // runServe runs the agent as a daemon, uploading scans on a configurable schedule.
 // Listens for SIGINT/SIGTERM for graceful shutdown: finishes the current cycle
 // before exiting.
@@ -868,7 +991,7 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 // server returns a different scan_interval, the agent applies it immediately
 // for the next sleep. This lets administrators change the scan frequency via the
 // system_config table without restarting agents.
-func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.Cache, agentCfg config.AgentConfig, hostname, sbomOutPath, certDir, dataDir string) {
+func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.Cache, agentCfg config.AgentConfig, hostname, sbomOutPath, certDir, dataDir string, renewCfg renewClientConfig) {
 	scanInterval := time.Duration(agentCfg.Scanner.Interval) * time.Second
 	if scanInterval <= 0 {
 		scanInterval = 3600 * time.Second
@@ -917,6 +1040,12 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 		if err := runUpload(ctx, client, auditLog, scanCache, agentCfg, hostname, sbomOutPath, certDir, dataDir, igDisableDebounce); err != nil {
 			log.Error("cycle error", slog.String("err", err.Error()))
 		}
+
+		// Renew the device cert well before expiry, over the current mTLS
+		// client.  Cheap when outside the window (one local cert parse); on a
+		// successful renewal the client is rebuilt in-memory so subsequent
+		// cycles use the new identity.  Always non-fatal.
+		client = maybeRenewCertificate(ctx, client, renewCfg, certDir, hostname, auditLog)
 
 		// Poll server for configuration updates (scan interval, scan root, etc.).
 		if serverCfg, err := client.PollConfig(ctx); err == nil {

@@ -352,32 +352,12 @@ func (c *Client) RegisterWithToken(ctx context.Context, hostname, enrollmentToke
 			"bootstrap trust falling back to system trust store; configure ca_cert_file or --bootstrap-ca-fingerprint")
 	}
 
-	// Generate ECDSA P-256 keypair on the agent.
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	// Generate a fresh ECDSA P-256 keypair and CSR on the agent.  Shared
+	// byte-for-byte with the renewal path via buildCSR.
+	csrPEM, keyPEM, err := buildCSR(hostname)
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate device key: %w", err)
+		return nil, nil, err
 	}
-
-	// Build a CSR with the hostname as CN.
-	csrTemplate := &x509.CertificateRequest{
-		Subject: pkix.Name{
-			Organization:       []string{"Sentari"},
-			OrganizationalUnit: []string{"Device"},
-			CommonName:         hostname,
-		},
-	}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, privateKey)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create CSR: %w", err)
-	}
-	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-
-	// Encode private key to PEM (kept locally).
-	keyDER, err := x509.MarshalECPrivateKey(privateKey)
-	if err != nil {
-		return nil, nil, fmt.Errorf("marshal device key: %w", err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
 	payload := map[string]string{
 		"hostname":         hostname,
@@ -427,6 +407,92 @@ func (c *Client) RegisterWithToken(ctx context.Context, hostname, enrollmentToke
 	}
 
 	return &regResp, keyPEM, nil
+}
+
+// buildCSR generates a fresh ECDSA P-256 keypair and a CSR with the given
+// hostname as CN, returning the PEM-encoded CSR and the PEM-encoded private
+// key.  Both registration and renewal use this so the two paths emit a
+// byte-identical CSR shape; the private key never leaves the agent.
+func buildCSR(hostname string) (csrPEM, keyPEM []byte, err error) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate device key: %w", err)
+	}
+
+	csrTemplate := &x509.CertificateRequest{
+		Subject: pkix.Name{
+			Organization:       []string{"Sentari"},
+			OrganizationalUnit: []string{"Device"},
+			CommonName:         hostname,
+		},
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, privateKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create CSR: %w", err)
+	}
+	csrPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+
+	keyDER, err := x509.MarshalECPrivateKey(privateKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal device key: %w", err)
+	}
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return csrPEM, keyPEM, nil
+}
+
+// RenewCertificate requests a new device certificate over the agent's existing
+// authenticated mTLS channel.  It is registration-minus-the-enrollment-token:
+// a FRESH P-256 keypair + CSR (key rotation comes free with cert rotation) is
+// POSTed to /api/v1/agent/renew; the current still-valid cert is the
+// authentication, so there is no enrollment token in the body and the server
+// derives identity from the presenting cert, ignoring any hostname here.
+//
+// On success it returns the re-issued bundle and the fresh private key (PEM);
+// the caller atomically swaps both on disk (see SaveCertificatesAtomic) and
+// rebuilds its mTLS client.  A non-2xx or network error returns an error and
+// the caller keeps using the current cert — renewal is always non-fatal.
+//
+// The returned device cert is verified to chain to the returned CA before
+// returning, mirroring the registration guard: a buggy/compromised server must
+// not be able to make the agent persist a cert that won't verify against the
+// CA it is about to pin.
+func (c *Client) RenewCertificate(ctx context.Context, hostname string) (*RegisterResponse, []byte, error) {
+	csrPEM, keyPEM, err := buildCSR(hostname)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	payload := map[string]string{"csr": string(csrPEM)}
+	body, _ := json.Marshal(payload)
+
+	resp, err := c.doRequest(ctx, "agent_renew", func(ctx context.Context) (*http.Request, error) {
+		r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.serverURL+"/api/v1/agent/renew", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		r.Header.Set("Content-Type", "application/json")
+		return r, nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+		return nil, nil, fmt.Errorf("renewal failed (HTTP %d): %s", resp.StatusCode, truncateBytes(respBody, maxErrorBodyLog))
+	}
+
+	var renewResp RegisterResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize)).Decode(&renewResp); err != nil {
+		return nil, nil, fmt.Errorf("decode renewal response: %w", err)
+	}
+
+	if err := verifyDeviceCertChain([]byte(renewResp.DeviceCert), []byte(renewResp.CACert)); err != nil {
+		return nil, nil, fmt.Errorf("renewal bundle rejected: %w", err)
+	}
+
+	return &renewResp, keyPEM, nil
 }
 
 // verifyDeviceCertChain confirms the PEM device cert verifies against the PEM
@@ -486,6 +552,113 @@ func SaveCertificates(certDir string, caCert, deviceCert, deviceKey []byte) erro
 	}
 
 	return nil
+}
+
+// SaveCertificatesAtomic writes the CA cert, device cert, and device key to
+// certDir using a write-temp + fsync + rename sequence so a crash mid-write can
+// never leave the agent with a new cert paired with an old key (or vice versa).
+// It is the renewal-path saver; SaveCertificates stays for the registration
+// path where there is no existing pair to protect.
+//
+// Sequence: write all three files to "name.tmp" in the same dir, fsync each,
+// then rename them into place (rename is atomic per-file on POSIX).  The key is
+// renamed before the cert so the only crash window is "new key, old cert",
+// which next-startup chain/key validation detects and re-renews — strictly
+// safer than the inverse "new cert, old key" which would silently break mTLS.
+// On any error, all temp files are removed and the existing files are left
+// untouched.
+//
+// File modes match SaveCertificates: ca.crt 0640, device.crt and device.key
+// 0600.
+func SaveCertificatesAtomic(certDir string, caCert, deviceCert, deviceKey []byte) error {
+	if err := os.MkdirAll(certDir, 0700); err != nil {
+		return fmt.Errorf("create cert dir: %w", err)
+	}
+
+	type certFile struct {
+		name    string
+		tmpPath string
+		data    []byte
+		mode    os.FileMode
+	}
+	// Order matters for the rename phase below: key first, then cert.  ca.crt
+	// is not paired with the key so its ordering is irrelevant; keep it last.
+	files := []certFile{
+		{name: "device.key", data: deviceKey, mode: 0600},
+		{name: "device.crt", data: deviceCert, mode: 0600},
+		{name: "ca.crt", data: caCert, mode: 0640},
+	}
+
+	// Phase 1: write + fsync every temp file.  If any write fails, unlink all
+	// temps and bail — the live files are untouched.
+	cleanup := func() {
+		for i := range files {
+			if files[i].tmpPath != "" {
+				_ = os.Remove(files[i].tmpPath)
+			}
+		}
+	}
+	for i := range files {
+		tmp := filepath.Join(certDir, files[i].name+".tmp")
+		files[i].tmpPath = tmp
+		if err := writeAndSync(tmp, files[i].data, files[i].mode); err != nil {
+			cleanup()
+			return fmt.Errorf("write %s: %w", files[i].name, err)
+		}
+	}
+
+	// Phase 2: rename each temp into place (atomic per-file).  A failure here
+	// can leave a partial swap, but each rename is itself atomic so no file is
+	// ever half-written; remaining temps are cleaned up and the error returned.
+	for i := range files {
+		dst := filepath.Join(certDir, files[i].name)
+		if err := os.Rename(files[i].tmpPath, dst); err != nil {
+			files[i].tmpPath = "" // already consumed (or attempted)
+			cleanup()
+			return fmt.Errorf("rename %s: %w", files[i].name, err)
+		}
+		files[i].tmpPath = "" // consumed; nothing to clean for this one
+	}
+
+	return nil
+}
+
+// writeAndSync writes data to path with the given mode and fsyncs it to disk
+// before returning, so the bytes are durable before the caller renames the
+// file into place.
+func writeAndSync(path string, data []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// DeviceCertNotAfter parses certDir/device.crt and returns its NotAfter time.
+// Used by the serve loop to decide whether the cert is within the renewal
+// window without a server round-trip.
+func DeviceCertNotAfter(certDir string) (time.Time, error) {
+	data, err := os.ReadFile(filepath.Join(certDir, "device.crt"))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read device.crt: %w", err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return time.Time{}, fmt.Errorf("device.crt is not valid PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse device.crt: %w", err)
+	}
+	return cert.NotAfter, nil
 }
 
 // CertsExist returns true if all three certificate files are present in certDir.
