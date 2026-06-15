@@ -6,8 +6,8 @@
 // /api/v1/agent/policy-map returns 404 with the response header
 // X-Sentari-Install-Gate-Disabled: true.  This is intentionally
 // distinguishable from a transient 404 — agents tear down host
-// configs immediately rather than waiting for the existing 7-day
-// fail-open grace window.
+// configs immediately. A plain/transient 404 or unreachable server,
+// by contrast, leaves the last-good cached policy enforced (fail-closed).
 
 package comms
 
@@ -20,7 +20,7 @@ import (
 // when the server explicitly signals install-gate is disabled.
 // Callers should treat this as "tear down host configs, persist a
 // marker, do not retry until next cycle" — distinct from a transient
-// 404 which triggers the existing 7-day fail-open path.
+// 404, which leaves the last-good cached policy enforced (fail-closed).
 var ErrInstallGateServerDisabled = errors.New("install-gate disabled by server")
 
 // isInstallGateServerDisabled reports whether a 404 response carries

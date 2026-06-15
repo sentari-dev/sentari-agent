@@ -36,8 +36,11 @@ GET /api/v1/agent/policy-map
   (rotation-friendly).
 - **Gating:** when the install-gate master switch is disabled, returns
   `404` + `X-Sentari-Install-Gate-Disabled: true` so agents tear down
-  any cached policy immediately rather than waiting for the 7-day
-  fail-open grace window that applies to plain 404s.
+  any cached policy immediately. This explicit-disable signal is
+  distinct from a plain/transient `404` or an unreachable server, on
+  which the agent fails **closed** — it keeps enforcing its last-good
+  cached policy indefinitely rather than dropping enforcement. (There
+  is no time-based fail-open grace window.)
 - **503** on signing-key access failure or payload-size cap overrun —
   agent retains its last-good cached envelope.
 - A machine-checkable JSON Schema lives alongside this doc
