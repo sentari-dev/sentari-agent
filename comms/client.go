@@ -90,11 +90,11 @@ type RegisterResponse struct {
 	// independent keypair so a compromise of one channel never leaks
 	// across the others.  Empty when the server has not provisioned a
 	// vuln-map signing key (older deployments, or an air-gap operator
-	// who has not yet imported the NVD bundle) — the agent silently
-	// treats the vuln-map channel as unavailable and falls back to the
-	// server's online correlation path.  ``omitempty`` keeps the wire
-	// format byte-identical for older servers that don't emit these
-	// fields at all, so older agents round-trip the response unchanged.
+	// who has not yet imported the NVD bundle).  When present these are
+	// persisted via SaveVulnMapTrust so a later vuln-map consumer can
+	// verify signed envelopes; ``omitempty`` keeps the wire format
+	// byte-identical for older servers that don't emit these fields at
+	// all, so older agents round-trip the response unchanged.
 	VulnMapPubKey string `json:"vuln_map_pubkey,omitempty"`
 	VulnMapKeyID  string `json:"vuln_map_key_id,omitempty"`
 	Message       string `json:"message"`

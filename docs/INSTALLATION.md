@@ -9,8 +9,9 @@ This guide walks you through installing the Sentari agent on your devices.
 1. [Choose Your Edition](#choose-your-edition)
 2. [Community Edition (OSS)](#community-edition-oss)
 3. [Enterprise Edition](#enterprise-edition)
-4. [Verify the Installation](#verify-the-installation)
-5. [Troubleshooting](#troubleshooting)
+4. [Configuration Reference](#configuration-reference)
+5. [Verify the Installation](#verify-the-installation)
+6. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -835,6 +836,61 @@ xattr -d com.apple.quarantine sentari-agent-darwin-arm64 2>/dev/null || true
 ```
 
 When done, delete the binary and `/tmp/sentari-agent/`. Nothing is installed system-wide.
+
+---
+
+## Configuration Reference
+
+`agent.conf` is an INI-style file with `key = value` pairs grouped into
+sections. Lines beginning with `#` or `;` are comments. Unknown keys and
+sections are ignored with a warning rather than failing startup. The examples
+above only set the common keys; the full set the parser accepts is below.
+
+```ini
+[server]
+url            = https://sentari.yourcompany.com:8000   # Sentari server URL
+cert_file      = /etc/sentari/client.crt                # client cert (mTLS)
+key_file       = /etc/sentari/client.key                # client key (mTLS)
+ca_cert_file   = /etc/sentari/ca.crt                    # server CA to pin
+poll_interval  = 900                                    # config poll seconds (default 900)
+systemd_unit   = sentari-agent.service                  # service to bounce on self-update (Linux)
+launchd_label  = system/dev.sentari.agent               # service to bounce on self-update (macOS)
+
+[scanner]
+scan_root      = /                                      # filesystem root (default / or C:\)
+scan_max_depth = 12                                     # max directory depth (default 8)
+interval       = 3600                                   # scan interval seconds (default 3600)
+containers     = false                                  # scan container images (default false)
+
+[proxy]
+https_proxy          = http://proxy.example.com:3128    # forward proxy URL
+no_proxy             = .internal,10.0.0.0/8             # bypass list (comma-separated)
+proxy_auth_user      = svc-sentari                      # proxy auth username
+proxy_auth_pass_file = /etc/sentari/proxy-pass          # file holding proxy password
+
+[logging]
+level = info                                            # debug | info | warn | error
+file  =                                                 # log file path (empty = stderr)
+
+[agent]
+tags = environment:production, team:platform            # per-host metadata (max 32 entries)
+
+[install_gate]                                          # preventive enforcement (off by default)
+enabled       = false                                   # gate the whole install-gate feature
+python_scope  = user                                    # pip config target:  user | system
+node_scope    = user                                    # npm config target:  user | system
+maven_scope   = user                                    # Maven settings.xml: user | system
+nuget_scope   = user                                    # NuGet config:       user | system
+uv_scope      = user                                    # uv.toml:            user | system
+pdm_scope     = user                                    # pdm config:         user | system
+gradle_scope  = user                                    # gradle init script: user | system
+sbt_scope     = user                                    # sbt repositories:   user | system
+yarnberry_scope = user                                  # Yarn Berry .yarnrc.yml: user | system
+```
+
+The `[install_gate]` `*_scope` keys accept `user` or `system` (empty resolves
+to `user` at apply time); `system` targets may soft-no-op where a package
+manager has no system-wide config location.
 
 ---
 

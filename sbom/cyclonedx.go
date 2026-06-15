@@ -1,6 +1,7 @@
 // Package sbom generates CycloneDX and SPDX SBOM documents from scan results.
-// The agent writes a local SBOM file after every scan so air-gapped sites
-// can extract it independently of the server.
+// SBOM output is opt-in: when the operator passes --sbom-out <path>, the agent
+// writes a local CycloneDX SBOM file after the scan so air-gapped sites can
+// extract it independently of the server.
 package sbom
 
 import (

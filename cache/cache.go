@@ -24,9 +24,12 @@ import (
 // order means the oldest inventory snapshot is the least valuable to keep)
 // and logs a warning so the eviction is visible to operators.
 //
-// 500 hourly scans is ~3 weeks of continuous offline operation — comfortably
-// past the default air-gap license window while keeping the SQLite file small
-// (a few MiB).  Declared as a var, not a const, so tests can shrink it.
+// 500 hourly scans is ~3 weeks of continuous offline operation — far past the
+// 1-day default offline window, though short of the 365-day air-gap license
+// tier (a durably air-gapped fleet relies on the eviction-of-oldest behaviour
+// above rather than unbounded retention).  Keeping the cap here keeps the
+// SQLite file small (a few MiB).  Declared as a var, not a const, so tests can
+// shrink it.
 var maxPendingScans = 500
 
 // Cache wraps a SQLite database for local scan result storage.

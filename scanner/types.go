@@ -1,6 +1,10 @@
-// Package scanner detects all Python environments on a device and extracts
-// package metadata. It is the core of the sentari-agent and has zero network
-// dependencies — it only reads the local filesystem.
+// Package scanner detects installed software environments on a device and
+// extracts package metadata. Beyond Python (pip, conda, Poetry, Pipenv, system
+// dpkg/rpm), it covers multi-ecosystem dependency graphs, lockfiles, licenses
+// and supply-chain signals (see scanner/{deptree,lockfiles,licenses,supplychain})
+// and runtime versions for Python, Node and the JDK (scanner/runtimeversions).
+// It is the core of the sentari-agent and has zero network dependencies — it
+// only reads the local filesystem.
 package scanner
 
 import (

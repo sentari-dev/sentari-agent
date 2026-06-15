@@ -73,6 +73,21 @@ Adds server connectivity, mTLS registration, scheduled scanning, offline scan qu
 sentari-agent-enterprise --server-url https://sentari.example.com --serve
 ```
 
+Key operator flags:
+
+- `--bootstrap-ca-fingerprint <sha256>` — pin the server's TLS certificate
+  fingerprint (hex, colon-separated) for the first registration, so trust is
+  not anchored solely through the OS trust store.
+- `--enroll-token <token>` / `--enroll-token-file <path>` — enrollment token
+  for first-time registration; the `-file` form avoids exposing the token via
+  `/proc/cmdline`.
+- `--update-check` — probe the server for a newer signed agent release and
+  print the plan (no mutation, no service restart).
+- `--update-apply` — download, verify, atomically replace this binary, and
+  restart the agent service.
+- `--update-rollback` — restore the previous binary (kept at
+  `<install-path>.prev` by `--update-apply`) and restart the service.
+
 ## Building from source
 
 ```bash

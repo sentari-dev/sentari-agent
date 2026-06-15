@@ -1,12 +1,13 @@
 // Package scanner: v3 payload enrichment.
 //
-// enrichWithV3 is a purely-additive Phase-3 hook that augments a
-// completed v2 ScanResult with the four new payload sections:
+// enrichWithV3 is a purely-additive hook that augments a completed v2
+// ScanResult with the v3 payload sections:
 //
 //   - DepEdges            (per-lockfile dep-graph edges)
 //   - Lockfiles           (lockfile metadata for drift detection)
 //   - SupplyChainSignals  (postinstall scripts, unsigned artefacts, yanked pkgs)
 //   - LicenseEvidence     (per-package license discovery)
+//   - InstalledRuntimes   (Python / Node / JDK runtime versions for EOL correlation)
 //
 // Design notes:
 //

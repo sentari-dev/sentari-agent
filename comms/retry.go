@@ -192,9 +192,11 @@ func (c *Client) doRequest(
 		if resp != nil {
 			waitHint = parseRetryAfter(resp.Header.Get("Retry-After"))
 			// Drain fully (not just the first 512 B) so the keep-alive
-			// connection can be reused on the retry.  The server
-			// caps the response at maxResponseSize, so unbounded
-			// io.Copy is bounded in practice.
+			// connection can be reused on the retry.  This drain is the
+			// discard path for a response we are not decoding, so it is
+			// bounded only by what the server actually sends (the
+			// maxResponseSize client cap applies to the LimitReader-wrapped
+			// decode paths, not to this io.Copy).
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 		}

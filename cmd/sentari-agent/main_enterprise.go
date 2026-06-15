@@ -101,13 +101,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	// --scan runs before the --upload / --serve branches so
-	// enterprise operators can invoke the community-style
-	// one-shot diagnostic without any of the registration /
-	// cert-bootstrap / upload machinery firing.  Mutually
-	// exclusive with --upload and --serve: a host either
-	// scans locally or scans-and-uploads, not both in the
-	// same invocation.
 	// Update mode — mutually exclusive with --scan / --upload /
 	// --serve.  Runs the self-update flow against the server's
 	// signed release manifest and exits.
@@ -155,6 +148,11 @@ func main() {
 		os.Exit(runUpdate(mode, agentCfgLocal, *serverURLFlag, dataDirLocal, *updateInstallPathFlag))
 	}
 
+	// --scan lets enterprise operators invoke the community-style
+	// one-shot diagnostic without any of the registration /
+	// cert-bootstrap / upload machinery firing.  Mutually exclusive
+	// with --upload and --serve: a host either scans locally or
+	// scans-and-uploads, not both in the same invocation.
 	if *scanFlag {
 		if *uploadFlag || *serveFlag {
 			fmt.Fprintln(os.Stderr, "--scan is mutually exclusive with --upload / --serve")
