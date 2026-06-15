@@ -12,7 +12,7 @@ import (
 // X-Sentari-Install-Gate-Disabled response header set to "true".
 // FetchInstallGateMap must return ErrInstallGateServerDisabled in
 // that case so the caller can distinguish it from a transient 404
-// (which falls through to the existing 7-day fail-open grace).
+// (a plain 404 instead leaves the last-good cached policy enforced).
 
 func TestFetchInstallGateMap_DisabledHeaderReturnsSentinel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

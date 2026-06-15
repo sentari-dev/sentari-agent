@@ -834,7 +834,8 @@ func (c *Client) FetchInstallGateMap(ctx context.Context, currentVersion int) (*
 		// 404 + X-Sentari-Install-Gate-Disabled: true is an explicit
 		// tenant-wide disable signal.  Surface it as a distinct error
 		// so the main loop can tear down host configs immediately
-		// (rather than waiting for the 7-day fail-open grace).
+		// (a plain/transient 404 instead keeps the last-good cached
+		// policy enforced — fail-closed; there is no time-based grace).
 		if isInstallGateServerDisabled(resp) {
 			return nil, nil, ErrInstallGateServerDisabled
 		}
