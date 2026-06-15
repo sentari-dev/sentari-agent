@@ -67,13 +67,13 @@ Six open questions raised in the initial Aikido-v2 draft were settled in the 202
 
 **When:** After npm lands so the dispatch pattern is proven.
 
-### Install-gate mode — HORIZON 3, discuss after ecosystem expansion ships (Size: S for design, XL for impl)
+### Install-gate mode (Size: S for design, XL for impl)
 
-**What:** Agent-resident enforcement layer that blocks disallowed installs before they land. Per-ecosystem wrappers (pip, npm, Maven, NuGet), signed policy delivery from server, company-wide configurable at install-time + server-push, local audit of every block, dashboard-driven emergency override, fail-open default.
+**What:** Agent-resident enforcement layer that blocks disallowed installs before they land. Per-ecosystem wrappers (pip, npm, Maven, NuGet), signed policy delivery from server, company-wide configurable at install-time + server-push, local audit of every block, dashboard-driven emergency override, fail-mode (fail-open or fail-closed) selectable per policy-map.
 
-**Status:** Deferred to Horizon 3 per the 2026-04-24 decision. Discuss the design once npm + NuGet scanners ship and UX revalidation completes. Rationale: an install-gate that covers only Python + Java is thin messaging; ecosystem coverage must be complete first.
+**Status:** Shipping. The agent fetches the policy-map as a signed ed25519 envelope and verifies it against a pinned key (`scanner/install_gate.go`), per-ecosystem config writers consume the verified map, per-registry credentials are injected into each native config, and the agent reacts to the server's disable header by tearing down managed configs (see Recently shipped, 2026-05-04). Off by default; only fetches and applies when the operator enables `[install_gate]`. The 2026-04-24 review had deferred this behind ecosystem expansion; that gate has since cleared (npm + NuGet scanners shipped) and the feature was built out.
 
-**Decisions already pinned for when we do start** (from 2026-04-24, see the Decisions block above):
+**Decisions pinned for this work** (from 2026-04-24, see the Decisions block above):
 
 - Fail-open default; fail-closed is opt-in.
 - CLI rollout first; IDE plugins later.
@@ -82,7 +82,7 @@ Six open questions raised in the initial Aikido-v2 draft were settled in the 202
 
 **Why the gate, given v1 recommended against:** procurement headline + preventive (not just detective) answer to the supply-chain question + the user's specific "code must be in the agent, visibly enforced" constraint makes it a defensible sovereignty-first gate rather than a cloud-dependent one.
 
-**Why the design-doc gate on top of that:** real implementation is a quarter of focused engineering + per-ecosystem maintenance surface + retire the "agent never executes package managers" invariant that's been load-bearing since day one (see [`sentari/docs/adr/0003-zero-binary-execution.md`](https://github.com/sentari-dev/sentari/blob/main/docs/adr/0003-zero-binary-execution.md) — ADRs live in the internal server repo, not here). Not a thing to start on intuition. Full decision-input in [`sentari/docs/47_AIKIDO_ANALYSIS.md §5`](https://github.com/sentari-dev/sentari/blob/main/docs/47_AIKIDO_ANALYSIS.md#5-install-gate-mode--full-decision-analysis).
+**Why the design-doc gate preceded the build:** implementation was a quarter of focused engineering + per-ecosystem maintenance surface + retiring the "agent never executes package managers" invariant that had been load-bearing since day one (see [`sentari/docs/adr/0003-zero-binary-execution.md`](https://github.com/sentari-dev/sentari/blob/main/docs/adr/0003-zero-binary-execution.md) — ADRs live in the internal server repo, not here). It was not something to start on intuition. Full decision-input in [`sentari/docs/47_AIKIDO_ANALYSIS.md §5`](https://github.com/sentari-dev/sentari/blob/main/docs/47_AIKIDO_ANALYSIS.md#5-install-gate-mode--full-decision-analysis).
 
 ### Offline malicious-package feed consumer (Size: M)
 
