@@ -1,6 +1,6 @@
 # Sentari Agent
 
-The Sentari agent scans endpoints for Python environments and packages. It is a single statically-linked binary with zero runtime dependencies — no Python, no package manager, no runtime required.
+The Sentari agent scans endpoints for installed software across multiple ecosystems — Python, npm, NuGet, JVM (Maven/Gradle), and OS packages — plus language runtimes and AI-agent tooling. It is a single statically-linked binary with zero runtime dependencies — no Python, no package manager, no runtime required.
 
 ## Quick start
 
@@ -41,19 +41,33 @@ See [docs/INSTALLATION.md](docs/INSTALLATION.md) for the full guide including ed
 
 ## What it does
 
-The agent walks the filesystem and extracts package metadata from:
+The agent walks the filesystem and extracts package metadata across several
+ecosystems, all by reading files only — never by invoking a package manager.
+
+**Python**
 
 - **pip / venv** — `.dist-info/METADATA` and `.egg-info/PKG-INFO`
 - **conda** — `conda-meta/` JSON metadata
 - **Poetry** — `poetry.lock` (TOML)
 - **Pipenv** — `Pipfile.lock` (JSON)
-- **System (Debian)** — `/var/lib/dpkg/status`
-- **System (RPM)** — `/var/lib/rpm/rpmdb.sqlite`
 - **pyenv / asdf** — explicit version manager directory discovery
 - **Windows Registry** — `HKLM/HKCU\SOFTWARE\Python\PythonCore`
 - **Legacy editable installs** — `.egg-link` files
 
-The agent **never executes** `pip`, `conda`, `python`, or any other binary. All data is read directly from the filesystem.
+**Other ecosystems**
+
+- **npm** — `node_modules/*/package.json` (npm classic, yarn classic, pnpm hoisted)
+- **NuGet** — global-packages `<id>/<version>/<id>.nuspec`
+- **JVM** — Maven/Gradle caches, JDK runtimes, and app-server library trees (Tomcat, JBoss/WildFly, WebLogic, WebSphere, Jetty, GlassFish/Payara)
+- **System packages** — Debian `/var/lib/dpkg/status`, RPM `/var/lib/rpm/rpmdb.sqlite`
+
+**Beyond packages**
+
+- **Language runtimes** — Python / Node / JDK versions for end-of-life correlation
+- **Container images** — Docker / Podman / CRI-O image layers (opt-in via `[scanner] containers = true`)
+- **AI-agent tooling** — MCP server configs, Claude Code agents/skills/plugins, and AI-oriented IDE extensions
+
+The agent **never executes** `pip`, `conda`, `python`, `npm`, or any other binary. All data is read directly from the filesystem.
 
 ## Editions
 
