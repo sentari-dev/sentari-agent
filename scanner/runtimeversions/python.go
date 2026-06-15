@@ -27,9 +27,10 @@ const _defaultPythonWalkDepth = 4
 // the `version = X.Y.Z` line gives us the runtime version. Returns
 // (nil, nil) when no pyvenv.cfg or no version field is present.
 //
-// System Pythons (not in a venv) are NOT detected here — they require
-// reading the interpreter's _sysconfigdata file or similar; that's
-// out of scope for Phase 4 (most fleet installs run code in venvs).
+// System Pythons (not in a venv) are NOT detected here — this path only
+// reads pyvenv.cfg. The underlying interpreter installs (Homebrew,
+// python.org framework, distro packages, the Windows installer) are
+// surfaced separately by DetectAllSystemPythons in python_system.go.
 func DetectPythonInDir(dir string) (*InstalledRuntime, error) {
 	cfgPath := filepath.Join(dir, "pyvenv.cfg")
 	raw, err := safeio.ReadFile(cfgPath, maxPyvenvCfgBytes)

@@ -2,9 +2,12 @@
 // verified policy-map and returns aggregated results suitable for
 // structured logging.
 //
-// PR-3 ships pip only; npm / Maven / NuGet / apt / yum register
-// here as no-ops via the same ``Apply`` entry point so the caller's
-// code path doesn't change as ecosystems land.
+// Every ecosystem writer (pip, npm, Maven, NuGet, uv, pdm, Gradle,
+// sbt, Yarn Berry) runs through this single ``Apply`` entry point so
+// the caller's code path stays constant.  Writers whose target is
+// absent on the host (e.g. a system-scope config path that doesn't
+// exist for that package manager) soft-no-op internally rather than
+// erroring.
 
 package installgate
 
