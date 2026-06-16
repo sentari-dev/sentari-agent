@@ -41,6 +41,20 @@ func purlFor(pkg scanner.PackageRecord) string {
 	case scanner.EnvPip, scanner.EnvVenv, scanner.EnvConda, scanner.EnvPoetry, scanner.EnvPipenv:
 		return fmt.Sprintf("pkg:pypi/%s@%s", url.PathEscape(pkg.Name), ver)
 	case "npm":
+		// Scoped packages ("@scope/name") map to a purl namespace +
+		// name: the scope's leading "@" is percent-encoded to "%40" and
+		// the "/" between scope and name is a real path separator, NOT
+		// "%2F". url.PathEscape would mangle the slash, so split on it
+		// and escape each segment independently. Unscoped names ("name")
+		// have no slash and pass through as a single escaped segment.
+		if scope, name, ok := strings.Cut(pkg.Name, "/"); ok && strings.HasPrefix(scope, "@") {
+			// url.PathEscape leaves "@" unescaped (it's an allowed
+			// path sub-delimiter), so encode the leading "@" to "%40"
+			// explicitly before escaping the rest of the scope segment.
+			escScope := "%40" + url.PathEscape(strings.TrimPrefix(scope, "@"))
+			return fmt.Sprintf("pkg:npm/%s/%s@%s",
+				escScope, url.PathEscape(name), ver)
+		}
 		return fmt.Sprintf("pkg:npm/%s@%s", url.PathEscape(pkg.Name), ver)
 	case "jvm":
 		// JVM records carry the name as "groupID:artifactID"; the maven
