@@ -106,6 +106,34 @@ func TestPurlForMaven(t *testing.T) {
 	}
 }
 
+// TestPurlForNpm checks npm purl construction for both unscoped and scoped
+// packages. Per the package-url spec a scoped npm package is encoded as a
+// namespace + name: the scope's leading "@" becomes "%40" and the "/" between
+// scope and name is preserved as a real path separator (NOT %2F). Unscoped
+// packages stay pkg:npm/<name>@<ver>.
+func TestPurlForNpm(t *testing.T) {
+	cases := []struct {
+		name string
+		pkg  string
+		want string
+	}{
+		{"unscoped", "lodash", "pkg:npm/lodash@4.17.21"},
+		{"scoped", "@angular/core", "pkg:npm/%40angular/core@4.17.21"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := purlFor(scanner.PackageRecord{
+				Name:    tc.pkg,
+				Version: "4.17.21",
+				EnvType: "npm",
+			})
+			if got != tc.want {
+				t.Errorf("purlFor npm %q = %q, want %q", tc.pkg, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestPurlForNoEcosystem checks that ecosystems with no meaningful purl
 // (ai_agent, runtime/unknown) get an empty purl rather than a wrong one.
 func TestPurlForNoEcosystem(t *testing.T) {
