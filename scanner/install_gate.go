@@ -326,6 +326,54 @@ func (m *InstallGateMap) AllRegistryEndpointsWithAuth(ecosystem string) []Regist
 	return out
 }
 
+// HasRegistryCredentials reports whether any trusted-registry entry in
+// the map carries usable credential material.  Callers use this to
+// decide whether the verified envelope is safe to persist to the
+// on-disk cache: a credential-bearing map must NOT be written to disk
+// in cleartext (the agent re-fetches it from the server on the next
+// cycle instead).
+func (m *InstallGateMap) HasRegistryCredentials() bool {
+	if m == nil {
+		return false
+	}
+	for _, list := range m.TrustedRegistries {
+		for i := range list {
+			if list[i].Auth.HasUsableAuth() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ZeroRegistryCredentials overwrites the cleartext credential material
+// (token / username / password) on every trusted-registry auth block in
+// the map.  Registry URLs and all non-secret fields are preserved.
+//
+// Called once the per-ecosystem config writers have applied the
+// credentials, so the secret material does not stay resident on the
+// in-memory map for the remainder of the process lifetime.  Go strings
+// are immutable and the backing array may already have been copied by
+// the writers, so this is a best-effort shrink of the exposure window,
+// not a guarantee that no copy survives elsewhere — but it removes the
+// long-lived reference held by the map itself.
+func (m *InstallGateMap) ZeroRegistryCredentials() {
+	if m == nil {
+		return
+	}
+	for _, list := range m.TrustedRegistries {
+		for i := range list {
+			auth := list[i].Auth
+			if auth == nil {
+				continue
+			}
+			auth.Token = ""
+			auth.Username = ""
+			auth.Password = ""
+		}
+	}
+}
+
 // VerifyInstallGateEnvelope parses + verifies a signed policy-map
 // envelope and returns the inner ``InstallGateMap`` on success.
 // Returns a typed error for any failure so callers can log without
@@ -368,13 +416,13 @@ func VerifyInstallGateEnvelope(data []byte) (*InstallGateMap, error) {
 
 	// Re-canonicalise the payload so Go's map-iteration order does not
 	// affect verification.  Reuses the package-private helper that the
-	// license-map verifier has been using since Sprint 12; same byte
-	// output as ``server/services/signing.py:canonical_json``.
-	var asMap map[string]interface{}
-	if err := json.Unmarshal(env.Payload, &asMap); err != nil {
-		return nil, fmt.Errorf("install-gate envelope: payload not a JSON object: %w", err)
-	}
-	canonical, err := canonicalJSON(asMap)
+	// license-map verifier shares; same byte output as
+	// ``server/services/signing.py:canonical_json``.  The helper decodes
+	// numbers with json.Number (UseNumber) so the integer ``version``
+	// epoch round-trips exactly even at or above 2^53 — a plain
+	// map[string]interface{} would coerce it to float64 and break the
+	// signature check.
+	canonical, err := canonicalizePayload(env.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("install-gate envelope: canonicalize: %w", err)
 	}
@@ -448,6 +496,12 @@ func LoadVerifiedInstallGateFromFile(path string) (*InstallGateMap, []byte, erro
 // rather than trust the on-disk decoded form.  File mode 0600 — the
 // envelope embeds operator notes (the ``reason`` field on each rule)
 // that may include incident IDs or upstream-vendor references.
+//
+// SECURITY: the envelope is the verbatim signed bytes, which can embed
+// cleartext registry credentials (the auth block on each trusted-
+// registry entry).  Callers MUST check InstallGateMap.HasRegistryCredentials
+// and skip persisting credential-bearing maps — re-fetch from the server
+// on the next cycle instead of writing secrets to disk.
 func SaveVerifiedInstallGateEnvelopeToFile(path string, envelope []byte) error {
 	if len(envelope) > MaxInstallGatePayloadBytes {
 		return fmt.Errorf("install-gate envelope: exceeds max size")
