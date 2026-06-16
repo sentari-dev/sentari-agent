@@ -270,6 +270,13 @@ func main() {
 		caFile = certDir + "/ca.crt"
 	}
 
+	// The mTLS client loads its material from certFile/keyFile/caFile above.
+	// The registration gate, the renewal save/read, and the post-renewal
+	// client rebuild must all operate on these SAME resolved paths — not the
+	// hardcoded certDir/device.crt convention — so a config-overridden cert
+	// path rotates (and is existence-checked) where the client actually looks.
+	certPaths := comms.CertFilePaths{CertFile: certFile, KeyFile: keyFile, CAFile: caFile}
+
 	// Map proxy config from agent config to comms proxy config.
 	proxyConfig := comms.ProxyConfig{
 		HTTPSProxy:   agentCfg.Proxy.HTTPSProxy,
@@ -297,8 +304,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Register and obtain certificates if not already present.
-	if !comms.CertsExist(certDir) {
+	// Register and obtain certificates if not already present.  Checks the
+	// resolved (possibly config-overridden) cert paths the client uses, so a
+	// custom-path deployment with valid certs does not spuriously re-register.
+	if !comms.CertsExistAt(certPaths) {
 		// Mint the bootstrap request_id first, then bind every log
 		// line in the registration block to it.  Previously the
 		// "registering agent" / "save certificates failed" lines
@@ -315,8 +324,10 @@ func main() {
 			regLog.Error("registration failed", slog.String("err", err.Error()))
 			os.Exit(1)
 		}
-		if err := comms.SaveCertificates(
-			certDir,
+		// Write to the resolved cert paths (config override or certDir
+		// fallback) so the mTLS client built below finds them where it loads.
+		if err := comms.SaveCertificatesAtomicAt(
+			certPaths,
 			[]byte(regResp.CACert),
 			[]byte(regResp.DeviceCert),
 			deviceKeyPEM,
@@ -366,39 +377,13 @@ func main() {
 		regLog.Info("certificates saved", slog.String("cert_dir", certDir))
 	}
 
-	// Load the persisted license-map trust (learned at register time)
-	// and register it with the scanner so envelope verification can
-	// find a pubkey under the matching key_id.  A missing or invalid
-	// trust file is non-fatal: the agent just won't fetch/apply
-	// license-map overlays, it'll fall back to the compiled-in defaults.
-	if trust, err := comms.LoadLicenseMapTrust(certDir); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not load license-map trust: %v\n", err)
-	} else if trust != nil {
-		if raw, err := base64.StdEncoding.DecodeString(trust.PubKeyB64); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: license-map pubkey is not valid base64: %v\n", err)
-		} else if len(raw) != ed25519.PublicKeySize {
-			fmt.Fprintf(os.Stderr, "Warning: license-map pubkey has wrong length (%d)\n", len(raw))
-		} else {
-			scanner.RegisterTrustedMapKey(trust.KeyID, ed25519.PublicKey(raw))
-		}
-	}
-
-	// Same shape for the install-gate signing pubkey.  Trust file
-	// missing → install-gate-disabled mode (writers will bail out
-	// when verifying envelopes); base64 / length errors get logged
-	// loudly so an operator noticing a corrupt trust file can
-	// reset by re-registering.
-	if trust, err := comms.LoadInstallGateTrust(certDir); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not load install-gate trust: %v\n", err)
-	} else if trust != nil {
-		if raw, err := base64.StdEncoding.DecodeString(trust.PubKeyB64); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: install-gate pubkey is not valid base64: %v\n", err)
-		} else if len(raw) != ed25519.PublicKeySize {
-			fmt.Fprintf(os.Stderr, "Warning: install-gate pubkey has wrong length (%d)\n", len(raw))
-		} else {
-			scanner.RegisterTrustedInstallGateKey(trust.KeyID, ed25519.PublicKey(raw))
-		}
-	}
+	// Load the persisted signing-pubkey trust (learned at register time) and
+	// register it with the scanner keyring so envelope verification can find a
+	// pubkey under the matching key_id.  Missing/invalid trust files are
+	// non-fatal — the agent falls back to compiled-in defaults.  The same
+	// helper runs again after a successful cert renewal (which may carry a
+	// rotated signing key) so a key rotation takes effect without a restart.
+	loadSigningTrustIntoKeyring(certDir)
 
 	// Build mTLS client using the saved certificates.
 	//
@@ -901,6 +886,45 @@ type renewClientConfig struct {
 	proxy     comms.ProxyConfig
 }
 
+// certPaths returns the resolved cert material paths this config rebuilds from,
+// so the renewal save/read can address the SAME files the client loads.
+func (rc renewClientConfig) certPaths() comms.CertFilePaths {
+	return comms.CertFilePaths{CertFile: rc.certFile, KeyFile: rc.keyFile, CAFile: rc.caFile}
+}
+
+// loadSigningTrustIntoKeyring reads the persisted license-map and install-gate
+// signing-pubkey trust files from certDir and registers them with the scanner's
+// in-memory keyring.  Run at startup and again after a successful cert renewal
+// (which may re-save a rotated key) so a server signing-key rotation takes
+// effect without a daemon restart.  Every failure is non-fatal and logged on
+// stderr: a missing trust file just means that channel stays unverified, a
+// corrupt one is surfaced loudly so an operator can re-register to reset it.
+func loadSigningTrustIntoKeyring(certDir string) {
+	if trust, err := comms.LoadLicenseMapTrust(certDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not load license-map trust: %v\n", err)
+	} else if trust != nil {
+		if raw, err := base64.StdEncoding.DecodeString(trust.PubKeyB64); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: license-map pubkey is not valid base64: %v\n", err)
+		} else if len(raw) != ed25519.PublicKeySize {
+			fmt.Fprintf(os.Stderr, "Warning: license-map pubkey has wrong length (%d)\n", len(raw))
+		} else {
+			scanner.RegisterTrustedMapKey(trust.KeyID, ed25519.PublicKey(raw))
+		}
+	}
+
+	if trust, err := comms.LoadInstallGateTrust(certDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not load install-gate trust: %v\n", err)
+	} else if trust != nil {
+		if raw, err := base64.StdEncoding.DecodeString(trust.PubKeyB64); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: install-gate pubkey is not valid base64: %v\n", err)
+		} else if len(raw) != ed25519.PublicKeySize {
+			fmt.Fprintf(os.Stderr, "Warning: install-gate pubkey has wrong length (%d)\n", len(raw))
+		} else {
+			scanner.RegisterTrustedInstallGateKey(trust.KeyID, ed25519.PublicKey(raw))
+		}
+	}
+}
+
 // maybeRenewCertificate checks the local device cert's remaining validity and,
 // if it is inside the renewal window, attempts a renewal over the current mTLS
 // client.  On success it atomically swaps the on-disk cert+key, re-saves the
@@ -914,7 +938,7 @@ type renewClientConfig struct {
 func maybeRenewCertificate(ctx context.Context, client *comms.Client, rc renewClientConfig, certDir, hostname string, auditLog *audit.AuditLog) *comms.Client {
 	log := logging.LoggerFromContext(ctx)
 
-	notAfter, err := comms.DeviceCertNotAfter(certDir)
+	notAfter, err := comms.DeviceCertNotAfterAt(rc.certPaths().CertFile)
 	if err != nil {
 		// Can't read the cert (not yet registered, or unreadable) — nothing
 		// to renew this cycle; the register path owns first issuance.
@@ -940,7 +964,7 @@ func maybeRenewCertificate(ctx context.Context, client *comms.Client, rc renewCl
 		return client
 	}
 
-	if err := comms.SaveCertificatesAtomic(certDir,
+	if err := comms.SaveCertificatesAtomicAt(rc.certPaths(),
 		[]byte(resp.CACert), []byte(resp.DeviceCert), keyPEM); err != nil {
 		// Atomic saver guarantees the old pair is untouched on failure.
 		log.Warn("certificate renewal: atomic save failed; keeping current cert",
@@ -961,6 +985,13 @@ func maybeRenewCertificate(ctx context.Context, client *comms.Client, rc renewCl
 		log.Warn("cert renewal: re-save vuln-map trust failed", slog.String("err", err.Error()))
 	}
 
+	// Re-load the (possibly rotated) signing pubkeys into the running scanner
+	// keyring so a server-side signing-key rotation takes effect this cycle
+	// rather than waiting for a daemon restart.  Mirrors the startup load;
+	// non-fatal — a stale key just keeps verifying until the disk trust file
+	// and keyring next agree.
+	loadSigningTrustIntoKeyring(certDir)
+
 	// Rebuild the mTLS client from the freshly-saved material so the next
 	// upload authenticates with the new identity.  On rebuild failure, keep the
 	// old client — the new cert is on disk and will be picked up on restart,
@@ -980,16 +1011,16 @@ func maybeRenewCertificate(ctx context.Context, client *comms.Client, rc renewCl
 	}
 
 	log.Info("device certificate renewed",
-		slog.Time("new_not_after", notAfterOrZero(certDir)))
+		slog.Time("new_not_after", notAfterOrZero(rc.certPaths().CertFile)))
 	logAudit(auditLog, "cert.renewed", fmt.Sprintf("device_id=%s", resp.DeviceID))
 	return newClient
 }
 
-// notAfterOrZero reads the (now-renewed) device cert NotAfter for logging,
-// returning the zero time if it can't be re-read.  Best-effort observability
-// only — never affects control flow.
-func notAfterOrZero(certDir string) time.Time {
-	if t, err := comms.DeviceCertNotAfter(certDir); err == nil {
+// notAfterOrZero reads the (now-renewed) device cert NotAfter at the explicit
+// cert path for logging, returning the zero time if it can't be re-read.
+// Best-effort observability only — never affects control flow.
+func notAfterOrZero(certFile string) time.Time {
+	if t, err := comms.DeviceCertNotAfterAt(certFile); err == nil {
 		return t
 	}
 	return time.Time{}
