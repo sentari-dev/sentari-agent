@@ -554,6 +554,108 @@ func SaveCertificates(certDir string, caCert, deviceCert, deviceKey []byte) erro
 	return nil
 }
 
+// CertFilePaths is the explicit on-disk location of the three mTLS material
+// files.  It exists because an operator can override any of them in config
+// ([server] cert_file/key_file/ca_cert_file); when that happens the renewal
+// save/read AND the registration existence check must operate on the SAME
+// paths the mTLS client loads from — not a hardcoded <dir>/device.crt
+// convention, which would silently rotate (or re-register against) the wrong
+// files on custom-path deployments.
+type CertFilePaths struct {
+	CertFile string // device cert path (mTLS leaf)
+	KeyFile  string // device private key path
+	CAFile   string // server CA cert path (pin)
+}
+
+// SaveCertificatesAtomicAt is SaveCertificatesAtomic addressed by explicit file
+// paths rather than a directory + fixed filenames.  Same crash-safe sequence
+// (write-temp + fsync + rename, key renamed before cert), same file modes
+// (cert/key 0600, ca 0640).  Each file's parent directory is created if needed
+// so the three paths may live in different directories.
+func SaveCertificatesAtomicAt(p CertFilePaths, caCert, deviceCert, deviceKey []byte) error {
+	type certFile struct {
+		path    string
+		tmpPath string
+		data    []byte
+		mode    os.FileMode
+	}
+	// Order matters for the rename phase: key first, then cert.  ca is not
+	// paired with the key so its ordering is irrelevant; keep it last.
+	files := []certFile{
+		{path: p.KeyFile, data: deviceKey, mode: 0600},
+		{path: p.CertFile, data: deviceCert, mode: 0600},
+		{path: p.CAFile, data: caCert, mode: 0640},
+	}
+
+	// Phase 1: write + fsync every temp file alongside its destination.  If
+	// any write fails, unlink all temps and bail — the live files are
+	// untouched.
+	cleanup := func() {
+		for i := range files {
+			if files[i].tmpPath != "" {
+				_ = os.Remove(files[i].tmpPath)
+			}
+		}
+	}
+	for i := range files {
+		dir := filepath.Dir(files[i].path)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			cleanup()
+			return fmt.Errorf("create dir for %s: %w", files[i].path, err)
+		}
+		tmp := files[i].path + ".tmp"
+		files[i].tmpPath = tmp
+		if err := writeAndSync(tmp, files[i].data, files[i].mode); err != nil {
+			cleanup()
+			return fmt.Errorf("write %s: %w", files[i].path, err)
+		}
+	}
+
+	// Phase 2: rename each temp into place (atomic per-file).
+	for i := range files {
+		if err := os.Rename(files[i].tmpPath, files[i].path); err != nil {
+			files[i].tmpPath = ""
+			cleanup()
+			return fmt.Errorf("rename %s: %w", files[i].path, err)
+		}
+		files[i].tmpPath = ""
+	}
+
+	return nil
+}
+
+// DeviceCertNotAfterAt parses the device cert at the explicit path and returns
+// its NotAfter time.  The path-explicit twin of DeviceCertNotAfter, used when
+// the cert location is config-overridden.
+func DeviceCertNotAfterAt(certFile string) (time.Time, error) {
+	data, err := os.ReadFile(certFile)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read device cert: %w", err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return time.Time{}, fmt.Errorf("device cert is not valid PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse device cert: %w", err)
+	}
+	return cert.NotAfter, nil
+}
+
+// CertsExistAt returns true if all three explicit cert material files are
+// present.  The path-explicit twin of CertsExist, used by the registration
+// gate so a custom-path deployment with valid certs does not spuriously
+// re-register.
+func CertsExistAt(p CertFilePaths) bool {
+	for _, path := range []string{p.CAFile, p.CertFile, p.KeyFile} {
+		if _, err := os.Stat(path); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // SaveCertificatesAtomic writes the CA cert, device cert, and device key to
 // certDir using a write-temp + fsync + rename sequence so a crash mid-write can
 // never leave the agent with a new cert paired with an old key (or vice versa).
