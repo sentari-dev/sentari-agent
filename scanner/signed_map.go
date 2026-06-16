@@ -127,12 +127,12 @@ func VerifyMapEnvelope(data []byte) (*LicenseMap, error) {
 
 	// Re-canonicalize the payload: Go's json.Marshal sorts map keys
 	// alphabetically, and with HTML escaping disabled produces the
-	// same bytes as the server's canonicalizer.
-	var asMap map[string]interface{}
-	if err := json.Unmarshal(env.Payload, &asMap); err != nil {
-		return nil, fmt.Errorf("envelope: payload not a JSON object: %w", err)
-	}
-	canonical, err := canonicalJSON(asMap)
+	// same bytes as the server's canonicalizer.  Decode via
+	// canonicalizePayload (json.Number / UseNumber) so integer fields
+	// at or above 2^53 round-trip exactly — a plain
+	// map[string]interface{} would coerce every number to float64 and
+	// break ed25519.Verify on an otherwise-valid envelope.
+	canonical, err := canonicalizePayload(env.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("envelope: canonicalize: %w", err)
 	}
@@ -157,6 +157,31 @@ func VerifyMapEnvelope(data []byte) (*LicenseMap, error) {
 	}
 
 	return &m, nil
+}
+
+// canonicalizePayload re-serializes a raw signed payload into its
+// canonical form (sorted keys, no insignificant whitespace, no HTML
+// escaping, no trailing newline) WITHOUT losing integer precision.
+//
+// It decodes with json.Decoder + UseNumber so every JSON number is
+// held as a json.Number (its exact source text) rather than a float64.
+// json.Marshal then emits json.Number values verbatim, so an integer
+// such as the install-gate version epoch (>= 2^53) round-trips byte-
+// for-byte instead of being coerced to a float and re-rendered with
+// lost precision.  This keeps the agent's canonical bytes identical to
+// the Python server's signing.canonical_json output.  Mirrors
+// scanner/update/update.go:canonicalizePayload.
+func canonicalizePayload(raw []byte) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		return nil, fmt.Errorf("payload not valid JSON: %w", err)
+	}
+	if _, ok := v.(map[string]interface{}); !ok {
+		return nil, errors.New("payload not a JSON object")
+	}
+	return canonicalJSON(v)
 }
 
 // canonicalJSON produces the canonical byte representation used for

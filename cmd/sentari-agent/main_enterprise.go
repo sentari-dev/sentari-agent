@@ -587,7 +587,17 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 				log.Info("install-gate re-enabled by server; resuming policy enforcement")
 				logAudit(auditLog, "install_gate.reenabled_by_server", "")
 			}
-			if err := scanner.SaveVerifiedInstallGateEnvelopeToFile(igCachePath, envelope); err != nil {
+			// Persist the signed envelope for offline re-apply — but
+			// NOT when it embeds cleartext registry credentials.  The
+			// envelope is the verbatim signed bytes (auth tokens /
+			// passwords included), so caching a credential-bearing map
+			// would leave operator secrets at rest on the host.  We
+			// re-fetch from the server next cycle instead (currentVersion
+			// resets to 0 because nothing is cached).  Credential-free
+			// maps still cache normally.
+			if igMap.HasRegistryCredentials() {
+				log.Info("install-gate map carries registry credentials; not caching envelope on disk")
+			} else if err := scanner.SaveVerifiedInstallGateEnvelopeToFile(igCachePath, envelope); err != nil {
 				log.Warn("failed to cache install-gate map", slog.String("err", err.Error()))
 			}
 			res, errs := installgate.Apply(igMap, installGateApplyOptions(agentCfg, installgate.MarkerFields{
@@ -595,6 +605,10 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 				KeyID:   envelopeKeyID(envelope),
 				Applied: time.Now().UTC(),
 			}))
+			// Writers have consumed the credentials — clear the cleartext
+			// material from the in-memory map so it does not stay resident
+			// for the remainder of this run.
+			igMap.ZeroRegistryCredentials()
 			for _, e := range errs {
 				log.Warn("install-gate writer", slog.String("err", e.Error()))
 			}
