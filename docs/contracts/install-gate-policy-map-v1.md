@@ -1,11 +1,13 @@
 # Install-Gate Policy-Map Envelope — v1
 
-> **Status:** server side implemented (this repo, since PR #118 + #125 + this
-> PR). The agent-side writer halves that consume the new `auth` block per
-> trusted registry land in the `sentari-agent` repo as PR-B of the
-> credentials track; when they ship, copy this file and
-> `install-gate-policy-map-v1.json` into the agent repo **byte-identical**,
-> same convention as `agent-scan-payload-v3.*` and `agent-audit-ship-v1.*`.
+> **Status:** implemented on both sides. The server signs and serves the
+> policy-map envelope (this repo); the agent-side per-ecosystem writers that
+> consume the `auth` block per trusted registry have shipped in the
+> `sentari-agent` repo (`installgate/` — pip/uv/npm/yarn/maven/gradle/sbt/
+> nuget/pdm writers, with `*_credentials` consumers). This file and
+> `install-gate-policy-map-v1.json` are mirrored **byte-identical** into the
+> agent repo's `docs/contracts/`, same convention as `agent-scan-payload-v3.*`
+> and `agent-audit-ship-v1.*`; keep the two copies in sync on any change.
 
 ## Why
 
@@ -91,9 +93,9 @@ GET /api/v1/agent/policy-map
 
 | Field | Type | Notes |
 |---|---|---|
-| `version` | integer | Epoch (UNIX seconds) of the latest mutation among policy rules + trusted-registries row. Agents compare against their cached value and skip the apply step when unchanged. `0` means no rules ever existed (fresh install). |
+| `version` | integer | Epoch (UNIX seconds) of the latest mutation of the effective policy set, computed as the **max-fold** of: (1) `max(updated_at)` over all policy rows (active or not — deactivation/soft-delete bump it via `onupdate`); (2) `max(expires_at)` over rows whose expiry boundary has passed; (3) `max(effective_at)` over rows whose activation boundary has passed; and (4) the trusted-registries document's `updated_at` **whenever that document exists** — including the non-empty → empty clearing write, so tearing down a corporate-mirror override always bumps the version (IG-CORR-S1-02). Agents apply an envelope only when `version` is **strictly greater** than their cached value and otherwise skip the apply step. `0` means no rules ever existed and no trusted-registries document has ever been written (fresh install). |
 | `ecosystems.<eco>.mode` | string | `"deny_list"` or `"allow_list"`. When two rules in the same ecosystem disagree, the most-recently-updated one wins server-side; the value here reflects that resolution. |
-| `ecosystems.<eco>.entries[]` | object[] | One per active rule. Each has `pattern` (glob/exact package coordinate), `version_range` (PEP 440 / semver / nullable), `severity` (info/warn/block), `reason`, `scope_env_tag`, `expires_at` (ISO-8601 or null). |
+| `ecosystems.<eco>.entries[]` | object[] | One per active rule. Each has `pattern` (glob/exact package coordinate), `version_range` (PEP 440 / semver / nullable), `severity` (one of `critical` / `high` / `medium` / `low` — the same four-level scale used by the policy engine; the JSON Schema types it as nullable string), `reason`, `scope_env_tag`, `expires_at` (ISO-8601 or null). |
 | `proxy_endpoints.<eco>` | string \| null | Base URL of the Sentari-Proxy fallback per ecosystem; agent's writer points at this URL when no trusted registry is configured for that ecosystem. `null` when the operator hasn't enabled Sentari-Proxy for that ecosystem. |
 | `trusted_registries` | object | Optional. When present, **per-ecosystem override** of `proxy_endpoints` — the agent's writer must prefer one of the URLs in this list over the proxy endpoint. Up to 6 entries per ecosystem (`_MAX_REGISTRIES_PER_ECOSYSTEM`). |
 | `trusted_registries.<eco>[].url` | string | Required. Capped at 500 chars. |

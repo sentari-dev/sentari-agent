@@ -59,6 +59,71 @@ func TestRestartService_darwin_envOverride(t *testing.T) {
 	}
 }
 
+// A launchd label taken from the environment must be validated against
+// a strict allow-list before it is handed to exec on the highest-
+// privilege (self-update restart) path.  Labels carrying shell
+// metacharacters, whitespace, path traversal, or option-injection
+// dashes must be rejected without ever invoking the runner.
+func TestRestartService_darwin_rejectsMaliciousLabel(t *testing.T) {
+	bad := []string{
+		"evil; rm -rf /",
+		"label with spaces",
+		"system/../../etc/cron.d/x",
+		"label$(whoami)",
+		"label`id`",
+		"label|tee",
+		"system/dev.sentari.agent\nkickstart\nother",
+		"-malformed",
+		"/absolute/path",
+		"system//dev.sentari.agent",
+		"system/.hidden",
+	}
+	for _, label := range bad {
+		t.Run(label, func(t *testing.T) {
+			t.Setenv("SENTARI_AGENT_LAUNCHD_LABEL", label)
+			called := false
+			prev := cmdRunner
+			cmdRunner = func(name string, args ...string) ([]byte, error) {
+				called = true
+				return nil, nil
+			}
+			t.Cleanup(func() { cmdRunner = prev })
+			err := restartService("/usr/local/bin/sentari-agent")
+			if err == nil {
+				t.Fatalf("expected rejection for label %q, got nil error", label)
+			}
+			if called {
+				t.Fatalf("runner must not be invoked for rejected label %q", label)
+			}
+		})
+	}
+}
+
+func TestRestartService_darwin_acceptsValidLabels(t *testing.T) {
+	good := []string{
+		"system/dev.sentari.agent",
+		"system/com.example.sentari",
+		"gui/501/dev.sentari.agent",
+		"user/501/com.example.agent",
+		"dev.sentari.agent",
+		"plain-name",
+		"with_underscore.service",
+	}
+	for _, label := range good {
+		t.Run(label, func(t *testing.T) {
+			t.Setenv("SENTARI_AGENT_LAUNCHD_LABEL", label)
+			c := withStubRunner(t)
+			if err := restartService("/usr/local/bin/sentari-agent"); err != nil {
+				t.Fatalf("valid label %q rejected: %v", label, err)
+			}
+			want := []string{"kickstart", "-k", label}
+			if !reflect.DeepEqual(c.args, want) {
+				t.Fatalf("args mismatch for %q:\n  got:  %v\n  want: %v", label, c.args, want)
+			}
+		})
+	}
+}
+
 func TestRestartService_darwin_defaultMatchesShippedPlist(t *testing.T) {
 	// The install-time LaunchDaemons plist uses ``dev.sentari.agent``.
 	// If anyone changes the default to a different reverse-DNS label,

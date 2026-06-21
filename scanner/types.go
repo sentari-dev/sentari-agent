@@ -52,7 +52,10 @@ const (
 	maxEggLinkSize int64 = 64 << 10
 )
 
-// EnvType identifies the type of Python environment a package was found in.
+// EnvType identifies the type of environment a package was found in.
+// Despite the historically Python-centric values below, the scanner is
+// multi-ecosystem (see the package doc): this tags the package-manager
+// or system source a record was discovered through.
 type EnvType = string
 
 const (

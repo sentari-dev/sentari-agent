@@ -1,9 +1,9 @@
 // Package installgate writes the native package-manager config files
 // that route ``pip install``, ``npm install``, ``mvn`` etc. through
-// Sentari-Proxy.  Phase B of the install-gate feature; per-ecosystem
-// writers register themselves with this package and the agent
-// orchestrator (lands later) calls ``Apply`` once per scan cycle
-// with the verified policy-map.
+// Sentari-Proxy.  Each per-ecosystem writer lives in this package and
+// the agent orchestrator calls ``Apply`` (see orchestrator.go) once
+// per scan cycle with the verified policy-map; that single entry point
+// fans out to every writer.
 //
 // Why a top-level package and not a subdir of ``scanner/``: scanner
 // is the read side of the agent (discovers installed packages).
