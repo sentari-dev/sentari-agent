@@ -62,7 +62,7 @@ func TestExtractNpm_licenseFileFallback(t *testing.T) {
 		t.Fatalf("expected 1 fallback evidence, got %d: %+v", len(out), out)
 	}
 	e := out[0]
-	if e.RawText != "MIT License" || e.Source != "copyright_file" || e.SpdxID != "" || e.Confidence != 0.5 {
+	if e.RawText != "MIT License" || e.Source != "spdx_pkg" || e.SpdxID != "" || e.Confidence != 0.5 {
 		t.Errorf("wrong fallback evidence: %+v", e)
 	}
 }
@@ -81,7 +81,7 @@ func TestExtractNpm_licenseFileFallbackDetectsTitlelessMIT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}
-	if len(out) != 1 || out[0].RawText != "MIT License" || out[0].Source != "copyright_file" {
+	if len(out) != 1 || out[0].RawText != "MIT License" || out[0].Source != "spdx_pkg" {
 		t.Errorf("expected title-less MIT to be detected as 'MIT License', got: %+v", out)
 	}
 }
@@ -150,6 +150,33 @@ func TestExtractNpm_licenseFileFallbackEmptyWhenNoSignal(t *testing.T) {
 	}
 	if len(out) != 0 {
 		t.Errorf("expected no evidence for truly unmappable license, got: %+v", out)
+	}
+}
+
+// TestExtractNpm_licenseFileFallbackUsesAllowedSource guards the
+// license-provenance contract: the 4 Phase-3 ecosystems (incl. npm) MUST
+// NOT emit the reserved `copyright_file` / `rpm_header` / `server_enriched`
+// source values. The LICENSE-file fallback must use an agent-allowed source.
+func TestExtractNpm_licenseFileFallbackUsesAllowedSource(t *testing.T) {
+	root := t.TempDir()
+	pkg := filepath.Join(root, "fallback-src")
+	mustMkdir(t, pkg)
+	mustWrite(t, filepath.Join(pkg, "package.json"), `{"name":"fallback-src","version":"1.0.0"}`)
+	mustWrite(t, filepath.Join(pkg, "LICENSE"), "MIT License\n\nCopyright (c) 2020 Someone\n")
+	out, err := ExtractNpm(root)
+	if err != nil {
+		t.Fatalf("extract failed: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 fallback evidence, got %d: %+v", len(out), out)
+	}
+	forbidden := map[string]bool{"copyright_file": true, "rpm_header": true, "server_enriched": true}
+	allowed := map[string]bool{"spdx_pkg": true, "trove": true, "pom": true, "nuspec": true}
+	if forbidden[out[0].Source] {
+		t.Errorf("fallback emitted contract-forbidden source %q", out[0].Source)
+	}
+	if !allowed[out[0].Source] {
+		t.Errorf("fallback emitted non-allowed source %q (want one of spdx_pkg/trove/pom/nuspec)", out[0].Source)
 	}
 }
 

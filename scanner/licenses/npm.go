@@ -96,6 +96,13 @@ func ExtractNpm(nodeModulesDir string) ([]deptree.LicenseEvidence, error) {
 		// line (e.g. "MIT License") as low-confidence evidence — the server
 		// normalizes common license names to an SPDX id. spdx left empty so
 		// the server is the single source of truth for the mapping.
+		//
+		// Source is `spdx_pkg` — the contract reserves `copyright_file`
+		// (Debian DEP-5) for the OS-package scan paths; the 4 Phase-3
+		// ecosystems (incl. npm) MUST NOT emit it. The LICENSE file is part
+		// of the package's own metadata, so it belongs under the same
+		// package-level source as the package.json `license` field, just at
+		// lower confidence.
 		if len(out) == before {
 			if name := detectLicenseFile(path); name != "" {
 				out = append(out, deptree.LicenseEvidence{
@@ -103,7 +110,7 @@ func ExtractNpm(nodeModulesDir string) ([]deptree.LicenseEvidence, error) {
 					PackageVersion: pj.Version,
 					Ecosystem:      "npm",
 					SpdxID:         "",
-					Source:         "copyright_file",
+					Source:         "spdx_pkg",
 					Confidence:     0.5,
 					RawText:        name,
 				})
