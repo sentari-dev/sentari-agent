@@ -111,6 +111,28 @@ func trimSpace(s string) string {
 	return s[start:end]
 }
 
+// clampWaitHint bounds a server-supplied Retry-After hint so a hostile
+// or misconfigured server cannot stall an agent cycle indefinitely.  A
+// non-positive hint (absent/unparseable header) is passed through as 0
+// so the caller falls back to the computed backoff.  Any positive hint
+// is capped at cfg.MaxDelay — the same ceiling the local backoff
+// schedule honours — guaranteeing the server can never make the agent
+// wait longer than MaxDelay.  cfg.MaxDelay <= 0 (unbounded config) is
+// treated as the package default so the clamp always has a real ceiling.
+func clampWaitHint(hint time.Duration, cfg RetryConfig) time.Duration {
+	if hint <= 0 {
+		return 0
+	}
+	maxDelay := cfg.MaxDelay
+	if maxDelay <= 0 {
+		maxDelay = defaultRetryConfig.MaxDelay
+	}
+	if hint > maxDelay {
+		return maxDelay
+	}
+	return hint
+}
+
 // nextBackoff returns the wait before attempt n (1-indexed).  Classic
 // exponential: base * 2^(n-1), capped, with ±jitter.
 func nextBackoff(n int, cfg RetryConfig) time.Duration {
@@ -226,7 +248,7 @@ func (c *Client) doRequest(
 			break
 		}
 
-		wait := waitHint
+		wait := clampWaitHint(waitHint, cfg)
 		if wait <= 0 {
 			wait = nextBackoff(attempt, cfg)
 		}

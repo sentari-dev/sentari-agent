@@ -775,7 +775,7 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 		}
 	}
 
-	logAudit(auditLog,"scan.started", fmt.Sprintf("hostname=%s", hostname))
+	logAudit(auditLog, "scan.started", fmt.Sprintf("hostname=%s", hostname))
 
 	cfg := scanner.Config{
 		ScanRoot:       agentCfg.Scanner.ScanRoot,
@@ -789,7 +789,7 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 
 	result, err := scanner.NewScanner(cfg).Run(ctx)
 	if err != nil {
-		logAudit(auditLog,"scan.failed", err.Error())
+		logAudit(auditLog, "scan.failed", err.Error())
 		return fmt.Errorf("scan: %w", err)
 	}
 
@@ -808,7 +808,7 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 		containers.ScanAndAppend(ctx, cfg, result)
 	}
 
-	logAudit(auditLog,"scan.completed", fmt.Sprintf("packages=%d containers=%d",
+	logAudit(auditLog, "scan.completed", fmt.Sprintf("packages=%d containers=%d",
 		len(result.Packages), len(result.ContainerTargets)))
 
 	// Override scanner's local machine-id with the server-assigned UUID so the
@@ -846,7 +846,7 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 		return fmt.Errorf("upload: %w", uploadErr)
 	}
 
-	logAudit(auditLog,"upload.success", fmt.Sprintf("packages=%d", len(result.Packages)))
+	logAudit(auditLog, "upload.success", fmt.Sprintf("packages=%d", len(result.Packages)))
 
 	// Housekeeping: purge old uploaded entries even when no drain happened this
 	// cycle.  This covers the case where a previous cycle drained but the purge
@@ -1093,13 +1093,20 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 		// Poll server for configuration updates (scan interval, scan root, etc.).
 		if serverCfg, err := client.PollConfig(ctx); err == nil {
 			if serverCfg.ScanInterval > 0 {
-				newInterval := time.Duration(serverCfg.ScanInterval) * time.Second
+				clampedSecs := clampScanIntervalSeconds(serverCfg.ScanInterval)
+				if clampedSecs != serverCfg.ScanInterval {
+					log.Warn("clamping out-of-range scan_interval from server",
+						slog.Int("requested", serverCfg.ScanInterval),
+						slog.Int("applied", clampedSecs),
+					)
+				}
+				newInterval := time.Duration(clampedSecs) * time.Second
 				if newInterval != scanInterval {
 					log.Info("scan interval changed",
 						slog.Duration("old", scanInterval),
 						slog.Duration("new", newInterval),
 					)
-					logAudit(auditLog, "config.updated", fmt.Sprintf("scan_interval=%d", serverCfg.ScanInterval))
+					logAudit(auditLog, "config.updated", fmt.Sprintf("scan_interval=%d", clampedSecs))
 					scanInterval = newInterval
 				}
 			}
@@ -1114,7 +1121,14 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 				}
 			}
 			if serverCfg.MaxDepth > 0 {
-				agentCfg.Scanner.MaxDepth = serverCfg.MaxDepth
+				clampedDepth := clampMaxDepth(serverCfg.MaxDepth)
+				if clampedDepth != serverCfg.MaxDepth {
+					log.Warn("clamping out-of-range max_depth from server",
+						slog.Int("requested", serverCfg.MaxDepth),
+						slog.Int("applied", clampedDepth),
+					)
+				}
+				agentCfg.Scanner.MaxDepth = clampedDepth
 			}
 		} else {
 			log.Warn("config poll failed (using cached interval)",
@@ -1155,7 +1169,7 @@ func runServe(client *comms.Client, auditLog *audit.AuditLog, scanCache *cache.C
 
 // pipScopeFromConfig translates the operator's [install_gate]
 // python_scope INI value into the writer's typed scope.  Empty
-// or unrecognised → ``user`` (laptop default), matching the
+// or unrecognised → “user“ (laptop default), matching the
 // design-doc §4.1 default for non-server hosts.
 func pipScopeFromConfig(s string) installgate.PipScope {
 	switch s {
@@ -1257,14 +1271,14 @@ func yarnBerryScopeFromConfig(s string) installgate.YarnBerryScope {
 	}
 }
 
-// envelopeKeyID extracts the ``key_id`` field from a verified
+// envelopeKeyID extracts the “key_id“ field from a verified
 // signed envelope's outer wrapper.  The signature itself was
 // validated upstream in scanner.VerifyInstallGateEnvelope, so
 // this is a safe re-decode for marker bookkeeping — we are not
 // re-trusting the bytes, just lifting the already-verified key_id
-// for embedding in the rendered config's ``signed=`` marker.
+// for embedding in the rendered config's “signed=“ marker.
 //
-// Falls back to ``"primary"`` only when the envelope is malformed
+// Falls back to “"primary"“ only when the envelope is malformed
 // (which can't happen given the upstream verify) so the audit
 // trail stays internally consistent rather than blank.
 func envelopeKeyID(envelope []byte) string {
@@ -1329,6 +1343,46 @@ func cryptoJitter(interval time.Duration) time.Duration {
 		return 0 // Fallback: no jitter on entropy failure.
 	}
 	return time.Duration(n.Int64() - window)
+}
+
+// Sane bounds for server-pushed scanner parameters.  A hostile or
+// misconfigured server must not be able to drive the agent into a
+// pathological state: a too-small interval hammers the server, a
+// too-large one means the agent effectively never scans, and an
+// unbounded max_depth lets a deep/looping directory tree blow up
+// memory and CPU.  The agent always clamps into these ranges before
+// applying a polled value (scan_root is validated separately).
+const (
+	minScanIntervalSeconds = 60    // 1 minute  — floor against hammering
+	maxScanIntervalSeconds = 86400 // 24 hours  — ceiling against never-scanning
+	maxScannerDepth        = 64    // cap against resource blowup on deep trees
+)
+
+// clampScanIntervalSeconds bounds a server-supplied scan_interval (in
+// seconds) into [minScanIntervalSeconds, maxScanIntervalSeconds].  The
+// caller only invokes this for strictly-positive values, but the floor
+// also defends against any non-positive slipping through.
+func clampScanIntervalSeconds(secs int) int {
+	if secs < minScanIntervalSeconds {
+		return minScanIntervalSeconds
+	}
+	if secs > maxScanIntervalSeconds {
+		return maxScanIntervalSeconds
+	}
+	return secs
+}
+
+// clampMaxDepth bounds a server-supplied scanner max_depth into
+// [1, maxScannerDepth].  Depth must be at least 1 to scan anything at
+// all and is capped to keep filesystem walks bounded.
+func clampMaxDepth(depth int) int {
+	if depth < 1 {
+		return 1
+	}
+	if depth > maxScannerDepth {
+		return maxScannerDepth
+	}
+	return depth
 }
 
 // isScanRootDenied returns true if the given path is in the denylist of
