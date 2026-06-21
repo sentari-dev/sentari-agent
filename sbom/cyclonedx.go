@@ -141,6 +141,15 @@ func GenerateCycloneDX(result *scanner.ScanResult) ([]byte, error) {
 
 	components := make([]CycloneDXComponent, 0, len(result.Packages))
 
+	// CycloneDX requires every bom-ref to be unique within the BOM. The
+	// same package (identical purl) can legitimately appear in multiple
+	// environments on one device, which would otherwise collide. Track
+	// the base bom-refs we've emitted and disambiguate collisions with a
+	// "#<n>" suffix. The purl field itself is left untouched so the
+	// component's package identity (and the scoped-npm purl encoding)
+	// stays correct.
+	usedRefs := make(map[string]int, len(result.Packages))
+
 	for i, pkg := range result.Packages {
 		purl := purlFor(pkg)
 		// Stable bom-ref: prefer the purl (globally unique), else a
@@ -149,6 +158,23 @@ func GenerateCycloneDX(result *scanner.ScanResult) ([]byte, error) {
 		bomRef := purl
 		if bomRef == "" {
 			bomRef = fmt.Sprintf("comp-%d", i)
+		}
+		// Ensure uniqueness: on the first sighting keep the base ref; on
+		// each subsequent collision append "#1", "#2", ... The comp-<i>
+		// fallback is already index-unique, but a purl can repeat.
+		if n := usedRefs[bomRef]; n > 0 {
+			unique := fmt.Sprintf("%s#%d", bomRef, n)
+			// Guard against an (improbable) crafted collision between a
+			// suffixed ref and an existing base ref.
+			for usedRefs[unique] > 0 {
+				n++
+				unique = fmt.Sprintf("%s#%d", bomRef, n)
+			}
+			usedRefs[bomRef] = n + 1
+			usedRefs[unique] = 1
+			bomRef = unique
+		} else {
+			usedRefs[bomRef] = 1
 		}
 		comp := CycloneDXComponent{
 			Type:    "library",
