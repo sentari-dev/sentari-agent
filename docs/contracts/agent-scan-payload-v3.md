@@ -18,12 +18,15 @@ fields as empty arrays.
 ### `dep_edges: DepEdge[]`
 
 One entry per direct or transitive dependency edge in any project the
-agent discovered. Direct edges have `type='direct'` and `depth=0`.
-Transitive edges have `type='transitive'` and `depth>=1`. The
-`introduced_by_path` field is the full resolution path from root to
-leaf, **inclusive of both endpoints** — for the example below,
+agent discovered. `depth` is the number of nodes in
+`introduced_by_path` minus one — equivalently, the count of edges
+traversed from the root project down to the child. Direct edges
+(root → child) have `type='direct'`, a two-element path, and
+`depth=1`. Transitive edges have `type='transitive'` and `depth>=2`.
+The `introduced_by_path` field is the full resolution path from root
+to leaf, **inclusive of both endpoints** — for the example below,
 `["myapp", "express", "lodash"]` means: root project (`myapp`) →
-`express` → `lodash`.
+`express` → `lodash`, a transitive edge at `depth=2`.
 
 npm-specific edge types `peer`, `optional`, `dev`, and `test` (the
 latter rare; npm has no first-class `test` scope but the contract
