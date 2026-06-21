@@ -128,6 +128,24 @@ The Enterprise Edition connects to a Sentari server for centralized fleet manage
 2. **Enrollment token** -- A one-time token that authorizes new agents to register. Found in the Sentari dashboard under **Settings > General > Enrollment Token**.
 3. **Agent version** -- The version to install (e.g., `0.1.0`). Check the [Releases page](https://github.com/sentari-dev/sentari-agent/releases) for the latest version.
 
+**Optional (recommended for high-assurance / air-gap deployments):**
+- **CA fingerprint** -- The SHA-256 fingerprint of the server's TLS
+  certificate (hex, colon-separated). Pass it to the agent with
+  `--bootstrap-ca-fingerprint <sha256>` on first registration to pin trust
+  to the expected server certificate rather than anchoring it solely through
+  the OS trust store. This hardens the very first enrollment handshake
+  against a man-in-the-middle who controls a trusted CA. Obtain the
+  fingerprint from your Sentari administrator (it is shown in the dashboard
+  under **Settings > General**). Example:
+
+  ```bash
+  sentari-agent-enterprise \
+    --server-url https://sentari.yourcompany.com:8000 \
+    --enroll-token YOUR_TOKEN \
+    --bootstrap-ca-fingerprint AB:CD:EF:... \
+    --serve
+  ```
+
 ### Linux
 
 #### Quick Install

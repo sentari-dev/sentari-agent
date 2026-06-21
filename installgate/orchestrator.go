@@ -75,9 +75,10 @@ type ApplyOptions struct {
 }
 
 // ApplyResult collects per-ecosystem outcomes.  One field per
-// ecosystem the writer package supports; PR-3 has only Pip
-// populated, the rest are zero-value placeholders for the
-// follow-up writers.
+// ecosystem the writer package supports; every writer runs through
+// the single ``Apply`` path below and populates its field, so all
+// fields carry a real outcome (a zero-value field means that writer
+// soft-no-op'd because its target was absent on the host).
 //
 // Why a struct instead of a map[string]any: callers want typed
 // access ("did pip change?") for structured logging without
