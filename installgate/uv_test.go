@@ -279,3 +279,43 @@ func TestWriteUv_NilMapRejected(t *testing.T) {
 		t.Error("expected error on nil map")
 	}
 }
+
+// --- IG-CORR-S2-03: uv honours trusted-registry overrides -----------------
+
+// TestWriteUv_HonoursTrustedRegistry asserts the uv writer consumes a
+// customer-configured trusted-registry endpoint (not just Sentari-Proxy),
+// so a trusted-registry-only deployment still gates uv.  Before the fix the
+// writer read ProxyEndpoints directly and a trusted-registry-only policy
+// left uv un-gated.
+func TestWriteUv_HonoursTrustedRegistry(t *testing.T) {
+	dir := t.TempDir()
+	path := uvHomeOverride(t, dir)
+
+	const trusted = "https://nexus.acme.com/repository/pypi/"
+	m := &scanner.InstallGateMap{
+		Version: 1730901234,
+		Ecosystems: map[string]scanner.InstallGateEcosystemBlock{
+			"pypi": {Mode: "deny_list"},
+		},
+		// No Sentari-Proxy endpoint — only a trusted registry.
+		ProxyEndpoints: map[string]string{},
+		TrustedRegistries: map[string][]scanner.TrustedRegistry{
+			"pypi": {{URL: trusted}},
+		},
+	}
+
+	res, err := WriteUv(m, UvScopeUser, MarkerFields{Version: 1730901234, KeyID: "primary", Applied: fixedTime})
+	if err != nil {
+		t.Fatalf("WriteUv: %v", err)
+	}
+	if !res.Changed {
+		t.Fatal("trusted-registry-only policy must still write (gate) uv")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), trusted) {
+		t.Errorf("uv.toml must point at the trusted registry %q:\n%s", trusted, body)
+	}
+}

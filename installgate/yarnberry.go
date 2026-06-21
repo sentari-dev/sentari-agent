@@ -73,7 +73,10 @@ func WriteYarnBerry(m *scanner.InstallGateMap, scope YarnBerryScope, marker Mark
 		return res, fmt.Errorf("installgate.WriteYarnBerry: nil policy map")
 	}
 
-	endpoint := strings.TrimSpace(m.ProxyEndpoints["npm"])
+	// Honour a customer-configured trusted registry over Sentari-Proxy,
+	// same as the pip / npm / Maven / NuGet writers, so a trusted-
+	// registry-only deployment still gates yarn-berry.
+	endpoint, _ := m.PickRegistryEndpoint("npm")
 	if endpoint == "" {
 		managed, err := isSentariManaged(res.Path)
 		if err != nil {

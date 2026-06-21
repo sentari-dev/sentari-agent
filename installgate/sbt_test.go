@@ -191,3 +191,40 @@ func TestWriteSbt_NilMapRejected(t *testing.T) {
 		t.Error("expected error on nil map")
 	}
 }
+
+// --- IG-CORR-S2-03: sbt honours trusted-registry overrides ----------------
+
+// TestWriteSbt_HonoursTrustedRegistry asserts the sbt writer consumes a
+// customer-configured trusted-registry (maven) endpoint, so a trusted-
+// registry-only deployment still gates sbt.
+func TestWriteSbt_HonoursTrustedRegistry(t *testing.T) {
+	dir := t.TempDir()
+	path := sbtHomeOverride(t, dir)
+
+	const trusted = "https://nexus.acme.com/repository/maven/"
+	m := &scanner.InstallGateMap{
+		Version: 1730901234,
+		Ecosystems: map[string]scanner.InstallGateEcosystemBlock{
+			"maven": {Mode: "deny_list"},
+		},
+		ProxyEndpoints: map[string]string{},
+		TrustedRegistries: map[string][]scanner.TrustedRegistry{
+			"maven": {{URL: trusted}},
+		},
+	}
+
+	res, err := WriteSbt(m, SbtScopeUser, MarkerFields{Version: 1730901234, KeyID: "primary", Applied: fixedTime})
+	if err != nil {
+		t.Fatalf("WriteSbt: %v", err)
+	}
+	if !res.Changed {
+		t.Fatal("trusted-registry-only policy must still write (gate) sbt")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), trusted) {
+		t.Errorf("sbt repositories file must point at the trusted registry %q:\n%s", trusted, body)
+	}
+}

@@ -97,7 +97,10 @@ func WritePdm(m *scanner.InstallGateMap, scope PdmScope, marker MarkerFields) (W
 		return res, fmt.Errorf("installgate.WritePdm: nil policy map")
 	}
 
-	endpoint := strings.TrimSpace(m.ProxyEndpoints["pypi"])
+	// Honour a customer-configured trusted registry over Sentari-Proxy,
+	// same as the pip / npm / Maven / NuGet writers, so a trusted-
+	// registry-only deployment still gates pdm.
+	endpoint, _ := m.PickRegistryEndpoint("pypi")
 	if endpoint == "" {
 		managed, err := isSentariManaged(res.Path)
 		if err != nil {

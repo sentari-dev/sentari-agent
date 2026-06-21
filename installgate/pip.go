@@ -24,6 +24,7 @@ package installgate
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -142,7 +143,23 @@ type WritePipResult struct {
 	// outside the section).  The whole file is removed only when the
 	// preserved content is empty.
 	NetrcRemoved bool
+
+	// NetrcTeardownFailed is true iff the fail-open path attempted to
+	// strip / remove the Sentari-managed netrc section and that
+	// teardown failed.  pip.conf removal still succeeded (fail-open
+	// honours the operator's primary intent) but a credentialed netrc
+	// may remain on disk; the writer logs it and the orchestrator can
+	// surface it to the audit log.  False on the happy path and on
+	// every non-fail-open path.
+	NetrcTeardownFailed bool
 }
+
+// applyPipNetrcFn is the seam through which WritePip applies the netrc
+// companion.  It defaults to ``applyPipNetrc`` and exists as a package
+// var ONLY so tests can inject a failing teardown to exercise the
+// fail-open visibility path (a leftover credentialed netrc must never
+// be silently swallowed).  Production code never reassigns it.
+var applyPipNetrcFn = applyPipNetrc
 
 // WritePip applies the pip section of a verified policy-map to the
 // host.  Returns the resolved path + whether the file changed.
@@ -226,8 +243,23 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 		// ``removed=true`` (block dropped, file rewritten); we
 		// surface both flags so an audit-log consumer reading
 		// NetrcChanged still sees the rewrite — Copilot, PR #45.
-		if path, changed, dropped, nerr := applyPipNetrc(m, marker); nerr == nil {
-			res.NetrcPath = path
+		//
+		// A teardown failure here is NOT swallowed: a leftover
+		// Sentari-managed ``.netrc`` keeps credentials live on disk
+		// after the policy told us to revert, which is a credential-
+		// exposure concern.  pip.conf has already been removed (the
+		// operator's primary intent is honoured) so we keep the
+		// fail-open contract and do not turn this into a hard error,
+		// but the failure MUST be visible: we log it at the writer
+		// level and surface NetrcTeardownFailed on the result so the
+		// orchestrator can record it in the audit log.
+		path, changed, dropped, nerr := applyPipNetrcFn(m, marker)
+		res.NetrcPath = path
+		if nerr != nil {
+			res.NetrcTeardownFailed = true
+			log.Printf("[installgate] pip fail-open: netrc teardown failed for %s: %v "+
+				"(credentialed netrc may still be present on disk)", path, nerr)
+		} else {
 			res.NetrcChanged = changed
 			res.NetrcRemoved = dropped
 		}
@@ -327,11 +359,28 @@ func renderPipConf(endpoint string, extras []string, marker MarkerFields) ([]byt
 		return nil, fmt.Errorf("renderPipConf: derive host from endpoint: %w", err)
 	}
 
+	// ``trusted-host`` DISABLES pip's TLS certificate verification for
+	// the listed hosts — pip skips the cert chain AND the hostname
+	// check for any host on this line.  Emitting it for an HTTPS index
+	// is a silent security downgrade: a MITM with any cert (or none)
+	// can impersonate the credential-bearing mirror.  We therefore
+	// gate each host on the scheme of its endpoint and only ever trust
+	// a host reached over plaintext ``http://`` — where there is no TLS
+	// to verify in the first place, so ``trusted-host`` is pip's
+	// required opt-in to talk to a plaintext index rather than a
+	// downgrade.  The server only ever emits ``https://`` endpoints
+	// (``_validate_url`` rejects ``http``), so in practice this line is
+	// omitted entirely; the gate is defence-in-depth for a hand-edited
+	// or future plaintext-mirror deployment.
+	insecureHosts := []string{}
+	if isInsecureScheme(endpoint) {
+		insecureHosts = appendUniqueHost(insecureHosts, host)
+	}
+
 	// Validate each extra registry the same way as the primary so a
 	// stray bad URL surfaces before we write the file rather than at
-	// pip's first install attempt.  Pre-compute the trusted-host list
-	// so we can emit a single line covering every distinct host.
-	extraHosts := []string{host}
+	// pip's first install attempt.  Collect the plaintext extras' hosts
+	// for the single trusted-host line we may emit below.
 	cleaned := make([]string, 0, len(extras))
 	seen := map[string]struct{}{endpoint: {}}
 	for _, e := range extras {
@@ -351,7 +400,9 @@ func renderPipConf(endpoint string, extras []string, marker MarkerFields) ([]byt
 		}
 		seen[e] = struct{}{}
 		cleaned = append(cleaned, e)
-		extraHosts = appendUniqueHost(extraHosts, eh)
+		if isInsecureScheme(e) {
+			insecureHosts = appendUniqueHost(insecureHosts, eh)
+		}
 	}
 
 	var b strings.Builder
@@ -369,8 +420,22 @@ func renderPipConf(endpoint string, extras []string, marker MarkerFields) ([]byt
 		// saw it — Copilot flag.)
 		fmt.Fprintf(&b, "extra-index-url = %s\n", strings.Join(cleaned, " "))
 	}
-	fmt.Fprintf(&b, "trusted-host = %s\n", strings.Join(extraHosts, " "))
+	// Only emit the line at all when at least one plaintext host needs
+	// it — an HTTPS-only config (the common case) keeps full TLS
+	// verification with no ``trusted-host`` line present.
+	if len(insecureHosts) > 0 {
+		fmt.Fprintf(&b, "trusted-host = %s\n", strings.Join(insecureHosts, " "))
+	}
 	return []byte(b.String()), nil
+}
+
+// isInsecureScheme reports whether an endpoint URL is reached over
+// plaintext ``http://``.  Used to gate the pip ``trusted-host`` line —
+// see the comment in ``renderPipConf``.  Comparison is case-insensitive
+// on the scheme because URL schemes are case-insensitive (RFC 3986
+// §3.1) and a hand-edited ``HTTP://`` must not slip past the gate.
+func isInsecureScheme(endpoint string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(endpoint)), "http://")
 }
 
 func appendUniqueHost(hosts []string, h string) []string {
@@ -390,8 +455,13 @@ func appendUniqueHost(hosts []string, h string) []string {
 // alongside whatever configuration secret happens to be embedded.
 func hostOf(endpoint string) (string, error) {
 	rest := endpoint
+	// URL schemes are case-insensitive (RFC 3986 §3.1); strip the
+	// scheme regardless of case so a hand-edited ``HTTP://`` resolves
+	// the same bare host as ``http://`` (and matches isInsecureScheme,
+	// which is likewise case-insensitive).
+	lower := strings.ToLower(rest)
 	for _, scheme := range []string{"https://", "http://"} {
-		if strings.HasPrefix(rest, scheme) {
+		if strings.HasPrefix(lower, scheme) {
 			rest = rest[len(scheme):]
 			break
 		}
