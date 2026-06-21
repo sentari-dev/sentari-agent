@@ -26,6 +26,7 @@
 package audit
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -50,8 +51,17 @@ type AuditLog struct {
 // makes a writer wait (rather than immediately erroring SQLITE_BUSY) when the
 // db is momentarily locked, and the caller pins SetMaxOpenConns(1) so writes
 // are serialised within this process.
+//
+// _txlock=immediate makes every BeginTx start with BEGIN IMMEDIATE, taking the
+// database write lock at transaction start instead of lazily on first write.
+// This is the load-bearing cross-PROCESS serialisation for the hash chain: a
+// second agent process appending concurrently blocks (up to busy_timeout) on
+// the write lock until the first commits, then reads the updated chain head —
+// so two writers can never read the same prev_hash and fork the chain.  An
+// in-process mutex alone cannot do this; the DB-level lock is what spans
+// processes.
 func auditDSN(dbPath string) string {
-	return dbPath + "?_journal_mode=WAL&_pragma=busy_timeout(5000)"
+	return dbPath + "?_journal_mode=WAL&_txlock=immediate&_pragma=busy_timeout(5000)"
 }
 
 // NewAuditLog opens or creates an audit log database at the given path.
@@ -127,24 +137,55 @@ func initAuditSchema(db *sql.DB) error {
 }
 
 // Log appends an event to the audit log with hash chain integrity.
-// A mutex serialises writes so that the in-memory lastHash stays consistent
-// with what is persisted in SQLite.
+//
+// The read-of-the-current-head and the insert run inside a single BEGIN
+// IMMEDIATE transaction (see auditDSN's _txlock=immediate).  Taking the write
+// lock up front serialises appends across PROCESSES, not just goroutines: a
+// second agent process blocks on the write lock until the first commits, then
+// reads the freshly-committed head, so two writers can never both anchor on the
+// same prev_hash and fork the chain.  The in-process mutex below is kept so the
+// cached lastHash stays consistent for callers within this process, but the DB
+// lock is the cross-process guarantee.
+//
+// prev_hash is read from the database inside the transaction rather than from
+// the in-memory lastHash, because another process may have appended since this
+// instance was opened — trusting the stale in-memory value is exactly what
+// caused the fork.
 func (a *AuditLog) Log(eventType, detail string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	ctx := context.Background()
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin audit tx: %w", err)
+	}
+	defer tx.Rollback() // no-op after a successful Commit.
+
+	// Read the current chain head under the write lock.  Empty string when the
+	// log is empty (genesis).
+	var prevHash string
+	row := tx.QueryRowContext(ctx, "SELECT content_hash FROM audit_log ORDER BY id DESC LIMIT 1")
+	if err := row.Scan(&prevHash); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("read audit head: %w", err)
+	}
+
 	// Compute hash: SHA-256(event_type + detail + prev_hash + timestamp).
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	payload := eventType + detail + a.lastHash + now
+	payload := eventType + detail + prevHash + now
 	hash := sha256.Sum256([]byte(payload))
 	hashHex := hex.EncodeToString(hash[:])
 
-	_, err := a.db.Exec(
+	_, err = tx.ExecContext(ctx,
 		"INSERT INTO audit_log (event_type, detail, content_hash, prev_hash, created_at) VALUES (?, ?, ?, ?, ?)",
-		eventType, detail, hashHex, a.lastHash, now,
+		eventType, detail, hashHex, prevHash, now,
 	)
 	if err != nil {
 		return fmt.Errorf("insert audit log: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit audit log: %w", err)
 	}
 
 	a.lastHash = hashHex
