@@ -81,6 +81,13 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 	envs, discoveryErrors := r.discoverEnvironments(ctx)
 	result.Errors = append(result.Errors, discoveryErrors...)
 
+	// Surface cancellation that occurred during discovery: the walk bails
+	// on ctx.Done() (returning whatever it found so far), so a cancelled
+	// scan must report ctx.Err() rather than a silently-truncated result.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if len(envs) == 0 {
 		return result, nil
 	}
@@ -138,8 +145,38 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 	// discovery walking ``/`` would be prohibitively expensive
 	// on production hosts and most lockfiles live under user
 	// home + repo trees anyway.
+	//
+	// Context cancellation: the v2 worker pool above already honours
+	// ctx.Done(); the v3 enrichment phase must too, or a cancelled scan
+	// (operator Ctrl-C, supervisor timeout) keeps walking $HOME, ~/.m2,
+	// node_modules, etc. to completion. We:
+	//   1. skip enrichment entirely if ctx is already cancelled, and
+	//   2. run enrichment concurrently with a ctx watch so Run returns
+	//      ctx.Err() promptly on cancellation instead of blocking on a
+	//      long walk. The enrichment goroutine only mutates `result`,
+	//      which the caller discards when Run returns an error, so an
+	//      in-flight walk completing later is harmless.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	v3Roots := v3DiscoveryRoots(r.cfg.ScanRoot)
-	enrichWithV3(result, v3Roots)
+	enrichDone := make(chan struct{})
+	go func() {
+		enrichWithV3(result, v3Roots)
+		close(enrichDone)
+	}()
+	select {
+	case <-enrichDone:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	// Re-check after enrichment: a cancellation that landed just as
+	// enrichment finished must still surface as an error rather than a
+	// (now stale) successful result.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// macOS TCC warning: when running as root (launchd daemon) with a full
 	// system scan, TCC silently blocks access to ~/Documents, ~/Desktop,

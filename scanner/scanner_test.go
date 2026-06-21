@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -171,13 +172,52 @@ func TestScannerContextCancellation(t *testing.T) {
 
 	s := NewScanner(cfg)
 	result, err := s.Run(ctx)
-	if err != nil {
-		t.Fatalf("scan should not return error on cancelled context: %v", err)
+	// A cancelled scan must surface ctx.Err() rather than returning a
+	// silently-truncated "successful" result: discovery bails on
+	// ctx.Done(), and Run now reports the cancellation.
+	if err == nil {
+		t.Fatal("expected Run to surface ctx.Err() on a cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected nil result when Run returns a cancellation error, got: %+v", result)
+	}
+}
+
+// TestScannerContextCancellationSurfacedAfterDiscovery verifies that when
+// a scan DID discover environments (so the v3 enrichment phase would run),
+// a cancelled context is honoured: Run returns ctx.Err() instead of
+// walking $HOME / ~/.m2 / node_modules to completion and reporting success.
+func TestScannerContextCancellationSurfacedAfterDiscovery(t *testing.T) {
+	tmpDir := t.TempDir()
+	// A venv (pyvenv.cfg) is discoverable, so len(envs) > 0 and the scan
+	// proceeds past the empty-dir early return into the v3 enrichment
+	// phase — the path the finding is about.
+	venvDir := filepath.Join(tmpDir, "myenv")
+	if err := os.Mkdir(venvDir, 0o755); err != nil {
+		t.Fatalf("mkdir venv: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(venvDir, "pyvenv.cfg"), []byte("home = /usr/bin\nversion = 3.11.0\n"), 0o644); err != nil {
+		t.Fatalf("write pyvenv.cfg: %v", err)
 	}
 
-	// With a cancelled context, discovery should bail early.
-	if result == nil {
-		t.Fatal("expected non-nil result even on cancellation")
+	cfg := Config{ScanRoot: tmpDir, MaxDepth: 4, MaxWorkers: 2}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately.
+
+	s := NewScanner(cfg)
+	result, err := s.Run(ctx)
+	if err == nil {
+		t.Fatal("expected Run to surface ctx.Err() on a cancelled scan with discovered envs")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected nil result when Run returns a cancellation error, got: %+v", result)
 	}
 }
 

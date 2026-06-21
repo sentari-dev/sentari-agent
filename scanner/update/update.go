@@ -46,6 +46,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // maxManifestBytes caps the manifest envelope to 1 MiB.  The
@@ -116,6 +118,13 @@ type Client struct {
 	// Normally the agent data dir.  When empty, the freshness check is
 	// skipped — acceptable for ad-hoc CLI use but the apply path warns.
 	StateDir string
+
+	// applyMu serializes Apply within this process so two concurrent
+	// applies can't interleave the freshness-check → swap → high-water
+	// write sequence (a TOCTOU that could let a concurrent apply destroy
+	// the only rollback binary).  Cross-process serialization is layered
+	// on top via an OS-advisory lockfile in StateDir (see applyLock).
+	applyMu sync.Mutex
 }
 
 // Check fetches and verifies the manifest, returning a Plan that the
@@ -319,6 +328,27 @@ func (c *Client) Apply(plan *Plan, installPath, stagedDir string) error {
 	}
 	if plan.Platform.URL == "" || plan.Platform.SHA256 == "" {
 		return errors.New("apply called with empty platform manifest")
+	}
+
+	// Single-flight guard. Without it two concurrent applies can race the
+	// freshness-check → atomicReplace → high-water-write sequence: e.g. A
+	// moves dst→dst.prev, then B moves dst→dst.prev (clobbering A's
+	// rollback binary), leaving no recoverable previous binary. It also
+	// closes the freshness TOCTOU — the check and the high-water write
+	// must be atomic with respect to other applies, or two applies that
+	// both pass checkFreshness can each advance the marker out of order.
+	//
+	// The in-process mutex serializes goroutines in this agent; the
+	// advisory lockfile in StateDir serializes separate agent processes.
+	c.applyMu.Lock()
+	defer c.applyMu.Unlock()
+
+	if c.StateDir != "" {
+		release, err := acquireApplyLock(c.StateDir)
+		if err != nil {
+			return err
+		}
+		defer release()
 	}
 
 	// Windows cannot replace a running executable in place, and the
@@ -556,6 +586,72 @@ func copyFileSync(src, dst string, mode os.FileMode) error {
 		return fmt.Errorf("close dest: %w", err)
 	}
 	return nil
+}
+
+// applyLockFile is the advisory lockfile name under StateDir that
+// serializes Apply across separate agent processes.
+const applyLockFile = "update_apply.lock"
+
+// applyLockStale bounds how long a lockfile is honored before it is
+// treated as abandoned by a crashed process.  A self-update (download +
+// verify + swap + restart) completes in well under this; the generous
+// ceiling avoids wrongly stealing a lock from a slow-but-live apply
+// while still preventing a permanent deadlock after a crash.
+const applyLockStale = 30 * time.Minute
+
+// acquireApplyLock takes a cross-process advisory lock by atomically
+// creating applyLockFile in stateDir with O_CREATE|O_EXCL.  It is
+// non-blocking: if another live process holds the lock it returns an
+// error rather than racing it (concurrent self-updates must not
+// interleave).  A lockfile older than applyLockStale is treated as
+// abandoned (the holder crashed) and reclaimed.  The returned release
+// func removes the lockfile and must be deferred by the caller.
+func acquireApplyLock(stateDir string) (func(), error) {
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create state dir for apply lock: %w", err)
+	}
+	lockPath := filepath.Join(stateDir, applyLockFile)
+
+	tryCreate := func() (*os.File, error) {
+		return os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	}
+
+	f, err := tryCreate()
+	if err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("acquire apply lock: %w", err)
+		}
+		// Lock is held.  Reclaim only if it is provably stale, so a live
+		// apply is never stolen.
+		fi, statErr := os.Stat(lockPath)
+		if statErr != nil {
+			// Raced with a release; surface as contention rather than
+			// guessing.
+			return nil, errors.New("another self-update is in progress (apply lock held)")
+		}
+		if time.Since(fi.ModTime()) < applyLockStale {
+			return nil, errors.New("another self-update is in progress (apply lock held)")
+		}
+		// Stale: remove and retry exactly once.
+		if rmErr := os.Remove(lockPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("reclaim stale apply lock: %w", rmErr)
+		}
+		f, err = tryCreate()
+		if err != nil {
+			// Someone else won the reclaim race.
+			return nil, errors.New("another self-update is in progress (apply lock held)")
+		}
+	}
+	_ = f.Close()
+
+	released := false
+	return func() {
+		if released {
+			return
+		}
+		released = true
+		_ = os.Remove(lockPath)
+	}, nil
 }
 
 // Rollback swaps installPath with its .prev sibling and triggers a
