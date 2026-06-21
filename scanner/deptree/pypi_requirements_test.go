@@ -7,15 +7,17 @@ import (
 )
 
 // TestParseRequirementsTxt_PEP440Specifiers exercises every PEP 440
-// specifier the regex now accepts.  Pre-fix only "==" was matched; any
-// other operator silently dropped the line and the server-side drift
-// detector then flagged that dep as "removed" every single scan.
+// specifier the regex accepts.  Only "==" / "===" lines carry a
+// concrete pinned version in child_version; every other operator (or a
+// bare name) cannot be resolved to a concrete version from
+// requirements.txt alone, so child_version is the EMPTY STRING — never
+// a raw specifier.
 //
-// Post-fix all specifiers parse.  Only "==" / "===" lines emit
-// Resolved=true (a concrete pinned version we can correlate against);
-// every other operator emits Resolved=false with the raw specifier as
-// the version so operators still see the line and the drift detector
-// knows the dep is intentionally unpinned.
+// resolved stays true for all pypi edges: the v3 contract reserves
+// resolved=false exclusively for Maven BOM-imported deps, so the pypi
+// parser must not repurpose it to mean "unpinned".  An unpinned dep is
+// still a discovered, resolved edge — it just lacks a concrete version
+// the agent can pin from local files.
 func TestParseRequirementsTxt_PEP440Specifiers(t *testing.T) {
 	body := `# project requirements covering the PEP 440 zoo
 requests==2.31.0
@@ -54,19 +56,21 @@ psycopg2-binary>=2.9 ; python_version >= "3.8"
 		resolved bool
 	}
 	// Each case maps a PEP 440 spec to the expected (version, resolved)
-	// emission.  Pinned (== / ===) → resolved=true.  Every other operator
-	// → resolved=false with the raw specifier as the version string.
+	// emission.  Pinned (== / ===) → concrete version.  Every other
+	// operator (and bare names) → EMPTY version (no specifier stuffed in).
+	// resolved is always true — the contract reserves resolved=false for
+	// Maven BOM imports only.
 	cases := []want{
 		{"requests", "2.31.0", true},
-		{"urllib3", ">=1.26", false},
-		{"flask", ">=2.0", false},
-		{"django", "~=4.2.0", false},
-		{"boto3", "!=1.34.0", false},
-		{"typing-extensions", ">4.0", false},
-		{"six", "<2.0", false},
+		{"urllib3", "", true},
+		{"flask", "", true},
+		{"django", "", true},
+		{"boto3", "", true},
+		{"typing-extensions", "", true},
+		{"six", "", true},
 		{"mypkg", "1.0.0+local", true},
-		{"bare-name", "", false},
-		{"psycopg2-binary", ">=2.9", false},
+		{"bare-name", "", true},
+		{"psycopg2-binary", "", true},
 	}
 	for _, c := range cases {
 		e, ok := byChild[c.name]

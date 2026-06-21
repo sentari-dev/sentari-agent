@@ -37,9 +37,18 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 		return nil, fmt.Errorf("parse %s: %w", yarnLockPath, err)
 	}
 
-	// Build name->version map (using the resolved version per entry).
-	// Yarn keys can be like "lodash@^4.17.0" or "@types/node@^18.0.0".
-	// One package can have multiple keys with the same resolved version.
+	// Build a spec->version index keyed on the FULL yarn key
+	// ("lodash@^4.17.21", "@types/node@^18.0.0") so a package that
+	// appears at multiple versions resolves each dependency request to
+	// the correct concrete version instead of collapsing to one
+	// name-keyed node.  A single entry can carry several keys (multiple
+	// requested ranges resolving to the same version), so every key maps
+	// to that entry's resolved version.
+	specToVersion := map[string]string{}
+	// Fallback name->version for callers that only know a bare name
+	// (e.g. package.json directs whose declared range we still match
+	// against the full key below, but default to the last-seen version
+	// if no key matches).
 	nameToVersion := map[string]string{}
 	for _, e := range entries {
 		for _, k := range e.keys {
@@ -47,8 +56,23 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 			if name == "" {
 				continue
 			}
+			specToVersion[k] = e.version
 			nameToVersion[name] = e.version
 		}
+	}
+
+	// resolveSpec maps a (name, range) request to the concrete resolved
+	// version by looking up the exact yarn key "name@range".  Falls back
+	// to any version seen for that name when the precise key is absent
+	// (defensive: a malformed lockfile may omit the exact requested key).
+	resolveSpec := func(name, rng string) (string, bool) {
+		if v, ok := specToVersion[name+"@"+rng]; ok {
+			return v, true
+		}
+		if v, ok := nameToVersion[name]; ok {
+			return v, true
+		}
+		return "", false
 	}
 
 	// Load package.json (optional). Missing → all edges transitive.
@@ -79,61 +103,110 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 		rootName = "(unknown)"
 	}
 
-	// BFS from root to compute depth + introduced_by_path.
-	// Build an adjacency from each yarn entry's dependencies map.
-	depGraph := map[string]map[string]bool{}
+	// Node identity is (name, version) — a package that appears at two
+	// versions is two distinct nodes.  nodeID concatenates the two so the
+	// BFS, depth, and path bookkeeping never collapse them.
+	nodeID := func(name, version string) string { return name + "@" + version }
+
+	// Build adjacency over concrete (name, version) nodes.  Each yarn
+	// entry has ONE resolved version and a dependencies map of
+	// (childName → range); resolve each range to a concrete child version
+	// via the full yarn key so distinct versions stay distinct.
+	type node struct{ name, version string }
+	adjacency := map[string][]node{}
 	for _, e := range entries {
-		for _, k := range e.keys {
-			name := yarnSpecName(k)
-			if name == "" {
+		if len(e.keys) == 0 {
+			continue
+		}
+		parent := node{name: yarnSpecName(e.keys[0]), version: e.version}
+		if parent.name == "" {
+			continue
+		}
+		pid := nodeID(parent.name, parent.version)
+		for childName, childRange := range e.dependencies {
+			cv, ok := resolveSpec(childName, childRange)
+			if !ok {
 				continue
 			}
-			if _, ok := depGraph[name]; !ok {
-				depGraph[name] = map[string]bool{}
-			}
-			for childSpec := range e.dependencies {
-				childName := childSpec // dependencies map keys are bare names
-				depGraph[name][childName] = true
-			}
+			adjacency[pid] = append(adjacency[pid], node{name: childName, version: cv})
 		}
 	}
 
-	depthByName := map[string]int{rootName: 0}
-	pathByName := map[string][]string{rootName: {rootName}}
-	// Seed with root's directs + dev/peer/optional. All count for BFS distance.
+	// BFS from the root over concrete nodes to compute depth +
+	// introduced_by_path.  depthByNode / pathByNode are keyed on the
+	// (name@version) node id so two versions of one package get separate
+	// depths and paths.
+	depthByNode := map[string]int{nodeID(rootName, rootVersion): 0}
+	pathByNode := map[string][]string{nodeID(rootName, rootVersion): {rootName}}
 	type queueItem struct {
-		name  string
+		n     node
 		path  []string
 		depth int
 	}
 	queue := []queueItem{}
-	for child := range mergeMaps(directDeps, devDeps, peerDeps, optionalDeps) {
-		childPath := []string{rootName, child}
-		depthByName[child] = 1
-		pathByName[child] = childPath
-		queue = append(queue, queueItem{name: child, path: childPath, depth: 1})
+
+	// Resolve each root-declared dependency range to a concrete version.
+	rootChildren := map[string]string{} // childName -> resolved version (for dedup vs transitive)
+	seedRoot := func(name, rng string) (node, bool) {
+		v, ok := resolveSpec(name, rng)
+		if !ok {
+			return node{}, false
+		}
+		return node{name: name, version: v}, true
+	}
+	for name, rng := range mergeMaps(directDeps, devDeps, peerDeps, optionalDeps) {
+		ch, ok := seedRoot(name, rng)
+		if !ok {
+			continue
+		}
+		id := nodeID(ch.name, ch.version)
+		if _, seen := depthByNode[id]; seen {
+			continue
+		}
+		rootChildren[ch.name] = ch.version
+		childPath := []string{rootName, ch.name}
+		depthByNode[id] = 1
+		pathByNode[id] = childPath
+		queue = append(queue, queueItem{n: ch, path: childPath, depth: 1})
 	}
 	for len(queue) > 0 {
 		head := queue[0]
 		queue = queue[1:]
-		for child := range depGraph[head.name] {
-			if _, seen := depthByName[child]; seen {
+		for _, child := range adjacency[nodeID(head.n.name, head.n.version)] {
+			id := nodeID(child.name, child.version)
+			if _, seen := depthByNode[id]; seen {
 				continue
 			}
 			childPath := append([]string{}, head.path...)
-			childPath = append(childPath, child)
-			depthByName[child] = head.depth + 1
-			pathByName[child] = childPath
-			queue = append(queue, queueItem{name: child, path: childPath, depth: head.depth + 1})
+			childPath = append(childPath, child.name)
+			depthByNode[id] = head.depth + 1
+			pathByNode[id] = childPath
+			queue = append(queue, queueItem{n: child, path: childPath, depth: head.depth + 1})
 		}
+	}
+
+	// depthFor / pathFor look up a concrete node's BFS result, falling
+	// back to depth 1 / [root,name] for nodes the BFS did not reach (an
+	// orphan package not transitively reachable from the declared root).
+	depthFor := func(name, version string) int {
+		if d, ok := depthByNode[nodeID(name, version)]; ok {
+			return d
+		}
+		return 1
+	}
+	pathFor := func(name, version string) []string {
+		if p, ok := pathByNode[nodeID(name, version)]; ok {
+			return p
+		}
+		return nil
 	}
 
 	var edges []DepEdge
 
-	// Root edges, one per declared dep map.
+	// Root edges, one per declared dep map, at the resolved version.
 	addRoot := func(deps map[string]string, edgeType string) {
-		for name := range deps {
-			v, ok := nameToVersion[name]
+		for name, rng := range deps {
+			v, ok := resolveSpec(name, rng)
 			if !ok {
 				continue
 			}
@@ -145,8 +218,8 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 				Ecosystem:        "npm",
 				Type:             edgeType,
 				Scope:            "",
-				Depth:            depthByName[name],
-				IntroducedByPath: SafePath(pathByName[name], rootName, name),
+				Depth:            depthFor(name, v),
+				IntroducedByPath: SafePath(pathFor(name, v), rootName, name),
 				Resolved:         true,
 			})
 		}
@@ -156,32 +229,39 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 	addRoot(peerDeps, "peer")
 	addRoot(optionalDeps, "optional")
 
-	// Transitive edges: every entry's dependencies map, EXCLUDING edges
-	// already emitted from the root.
-	rootChildren := mergeMaps(directDeps, devDeps, peerDeps, optionalDeps)
+	// Transitive edges: every entry's dependencies map, resolved to
+	// concrete child versions, EXCLUDING edges already emitted from the
+	// root.  Keyed by (parent@version, child@version) so multi-version
+	// packages keep every distinct edge.
+	type edgeKey struct{ parent, child string }
+	emitted := map[edgeKey]bool{}
 	for _, e := range entries {
-		// Use canonical parent name = the first key's bare name.
 		if len(e.keys) == 0 {
 			continue
 		}
 		parentName := yarnSpecName(e.keys[0])
-		if parentName == "" {
-			continue
+		if parentName == "" || parentName == rootName {
+			continue // root deps already covered above
 		}
 		parentVersion := e.version
-		for childName := range e.dependencies {
-			if parentName == rootName {
-				continue // already covered by root section
-			}
-			if _, isRootDirect := rootChildren[childName]; isRootDirect && depthByName[childName] == 1 {
-				// child is already a direct of root with depth 1 — skip to
-				// avoid double-counting the same edge.
-				continue
-			}
-			childVersion, ok := nameToVersion[childName]
+		for childName, childRange := range e.dependencies {
+			childVersion, ok := resolveSpec(childName, childRange)
 			if !ok {
 				continue
 			}
+			// Skip an edge identical to a depth-1 root direct (same child
+			// AND same resolved version) to avoid double-counting.
+			if rv, isRoot := rootChildren[childName]; isRoot && rv == childVersion && depthFor(childName, childVersion) == 1 {
+				continue
+			}
+			ek := edgeKey{
+				parent: nodeID(parentName, parentVersion),
+				child:  nodeID(childName, childVersion),
+			}
+			if emitted[ek] {
+				continue
+			}
+			emitted[ek] = true
 			edges = append(edges, DepEdge{
 				ParentName:       parentName,
 				ParentVersion:    parentVersion,
@@ -190,19 +270,23 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 				Ecosystem:        "npm",
 				Type:             "transitive",
 				Scope:            "",
-				Depth:            depthByName[childName],
-				IntroducedByPath: SafePath(pathByName[childName], parentName, childName),
+				Depth:            depthFor(childName, childVersion),
+				IntroducedByPath: SafePath(pathFor(childName, childVersion), parentName, childName),
 				Resolved:         true,
 			})
 		}
 	}
 
-	// Sort for deterministic output.
+	// Sort for deterministic output: by parent, then child, then child
+	// version (so two versions of one child order stably).
 	sort.Slice(edges, func(i, j int) bool {
 		if edges[i].ParentName != edges[j].ParentName {
 			return edges[i].ParentName < edges[j].ParentName
 		}
-		return edges[i].ChildName < edges[j].ChildName
+		if edges[i].ChildName != edges[j].ChildName {
+			return edges[i].ChildName < edges[j].ChildName
+		}
+		return edges[i].ChildVersion < edges[j].ChildVersion
 	})
 	return edges, nil
 }

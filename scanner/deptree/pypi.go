@@ -224,12 +224,14 @@ var requirementsLineRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._\-]*(?:\[[
 // ParseRequirementsTxt reads a requirements.txt and emits direct edges
 // only. Hash pins (--hash=...) and includes (-r other.txt) are ignored.
 //
-// All PEP 440 specifiers are accepted: pinned (`==` / `===`) edges get
-// Resolved=true and a clean version string; range / compatible-release
-// edges (`>=`, `~=`, `!=`, `<`, ...) get Resolved=false and the raw
-// specifier as ChildVersion so the server-side drift detector knows
-// the dep is intentionally unpinned and doesn't trigger false alerts
-// every scan.
+// All PEP 440 specifiers are accepted. Pinned (`==` / `===`) edges
+// carry a concrete version in ChildVersion. Range / compatible-release
+// edges (`>=`, `~=`, `!=`, `<`, ...) and bare names cannot be resolved
+// to a concrete version from requirements.txt alone, so ChildVersion is
+// the empty string — the raw specifier is never stuffed into the
+// version field (it is not a version). Resolved stays true for every
+// pypi edge; the v3 contract reserves Resolved=false for Maven
+// BOM-imported deps only.
 //
 // Extras (`pkg[async]`) are stripped from the emitted name; environment
 // markers (`; python_version >= "3.8"`) are dropped from the line.
@@ -289,7 +291,13 @@ func ParseRequirementsTxt(path string) ([]DepEdge, error) {
 			emitName = emitName[:i]
 		}
 
-		isPinned := strings.HasPrefix(spec, "===") || (strings.HasPrefix(spec, "==") && !strings.HasPrefix(spec, "==="))
+		// child_version carries a concrete version ONLY when the line is
+		// pinned with "==" / "===".  Every other operator (>=, ~=, !=, <,
+		// ...) and bare names cannot be resolved to a concrete version
+		// from requirements.txt alone, so child_version is the empty
+		// string — never a raw specifier.  Stuffing ">=1.26" into a
+		// version field violates the v3 contract's child_version
+		// semantics (it is a version string, not a constraint).
 		var version string
 		switch {
 		case strings.HasPrefix(spec, "==="):
@@ -297,24 +305,24 @@ func ParseRequirementsTxt(path string) ([]DepEdge, error) {
 		case strings.HasPrefix(spec, "=="):
 			version = strings.TrimSpace(strings.TrimPrefix(spec, "=="))
 		default:
-			// Store the raw specifier (e.g. ">=1.26", "~=1.26.0") so
-			// operators can still see WHAT the line said even though the
-			// version is not concretely pinned.  Empty for bare-name
-			// lines ("django" with no operator).
-			version = spec
+			version = ""
 		}
 
 		edges = append(edges, DepEdge{
-			ParentName:       rootName,
-			ParentVersion:    rootVersion,
-			ChildName:        emitName,
-			ChildVersion:     version,
-			Ecosystem:        "pypi",
-			Type:             "direct",
-			Scope:            "",
-			Depth:            1,
+			ParentName:    rootName,
+			ParentVersion: rootVersion,
+			ChildName:     emitName,
+			ChildVersion:  version,
+			Ecosystem:     "pypi",
+			Type:          "direct",
+			Scope:         "",
+			Depth:         1,
 			IntroducedByPath: []string{rootName, emitName},
-			Resolved:         isPinned,
+			// resolved=false is reserved by the v3 contract for Maven
+			// BOM-imported deps; an unpinned pypi requirement is still a
+			// discovered, resolved edge that merely lacks a concrete
+			// pinned version, so resolved stays true.
+			Resolved: true,
 		})
 	}
 	if err := scanner.Err(); err != nil {
