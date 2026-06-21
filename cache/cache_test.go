@@ -105,3 +105,86 @@ func TestConcurrentEnqueueNoBusyError(t *testing.T) {
 		t.Fatalf("concurrent EnqueueScan errored (busy?): %v", err)
 	}
 }
+
+// TestWALJournalModeApplied verifies that WAL is actually in effect after
+// opening the cache.  The `_journal_mode=WAL` DSN parameter is silently
+// ignored by modernc.org/sqlite, so WAL must be applied via PRAGMA exec.
+func TestWALJournalModeApplied(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	c, err := NewCache(dbPath)
+	if err != nil {
+		t.Fatalf("NewCache: %v", err)
+	}
+	defer c.Close()
+
+	var mode string
+	if err := c.db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatalf("query journal_mode: %v", err)
+	}
+	if strings.ToLower(mode) != "wal" {
+		t.Fatalf("journal_mode: want %q, got %q", "wal", mode)
+	}
+}
+
+// TestDequeuePendingBatchCapsAndPreservesOrder verifies that the bounded
+// dequeue returns at most maxRows rows in FIFO (oldest-first) order.
+func TestDequeuePendingBatchCapsAndPreservesOrder(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	c, err := NewCache(dbPath)
+	if err != nil {
+		t.Fatalf("NewCache: %v", err)
+	}
+	defer c.Close()
+
+	base := time.Now().UTC()
+	const total = 20
+	for i := 0; i < total; i++ {
+		r := newScan("host")
+		r.ScannedAt = base.Add(time.Duration(i) * time.Second)
+		if err := c.EnqueueScan(r); err != nil {
+			t.Fatalf("EnqueueScan %d: %v", i, err)
+		}
+	}
+
+	const batch = 5
+	got, err := c.DequeuePendingBatch(batch)
+	if err != nil {
+		t.Fatalf("DequeuePendingBatch: %v", err)
+	}
+	if len(got) != batch {
+		t.Fatalf("batch size: want %d, got %d", batch, len(got))
+	}
+	// FIFO: the batch must be the oldest `batch` rows in ascending order.
+	for i := 0; i < batch; i++ {
+		want := base.Add(time.Duration(i) * time.Second)
+		if g := got[i].Result.ScannedAt.UTC(); !g.Equal(want) {
+			t.Fatalf("row %d scanned_at: want %v, got %v", i, want, g)
+		}
+	}
+}
+
+// TestDequeuePendingBatchNonPositiveReturnsAll verifies that a non-positive
+// cap dequeues the full pending backlog (unbounded), matching the legacy
+// DequeuePending contract.
+func TestDequeuePendingBatchNonPositiveReturnsAll(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	c, err := NewCache(dbPath)
+	if err != nil {
+		t.Fatalf("NewCache: %v", err)
+	}
+	defer c.Close()
+
+	const total = 7
+	for i := 0; i < total; i++ {
+		if err := c.EnqueueScan(newScan("host")); err != nil {
+			t.Fatalf("EnqueueScan %d: %v", i, err)
+		}
+	}
+	got, err := c.DequeuePendingBatch(0)
+	if err != nil {
+		t.Fatalf("DequeuePendingBatch(0): %v", err)
+	}
+	if len(got) != total {
+		t.Fatalf("unbounded dequeue: want %d, got %d", total, len(got))
+	}
+}
