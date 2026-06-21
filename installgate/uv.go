@@ -111,7 +111,12 @@ func WriteUv(m *scanner.InstallGateMap, scope UvScope, marker MarkerFields) (Wri
 		return res, fmt.Errorf("installgate.WriteUv: nil policy map")
 	}
 
-	endpoint := strings.TrimSpace(m.ProxyEndpoints["pypi"])
+	// Honour a customer-configured trusted registry over Sentari-Proxy,
+	// same as the pip / npm / Maven / NuGet writers.  PickRegistryEndpoint
+	// returns the first non-empty trusted-registry URL when one is
+	// configured and falls through to the Sentari-Proxy endpoint
+	// otherwise, so a trusted-registry-only deployment still gates uv.
+	endpoint, _ := m.PickRegistryEndpoint("pypi")
 	if endpoint == "" {
 		managed, err := isSentariManaged(res.Path)
 		if err != nil {

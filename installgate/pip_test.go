@@ -1,6 +1,9 @@
 package installgate
 
 import (
+	"bytes"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -104,12 +107,17 @@ func TestWritePip_FreshHostFreshConfig(t *testing.T) {
 		"# Managed by Sentari (version=1730901234, signed=primary, applied=2026-04-25T10:00:00Z)",
 		"[global]",
 		"index-url = https://proxy.example.test/pypi/simple/",
-		"trusted-host = proxy.example.test",
 	}
 	for _, s := range wantSubstrs {
 		if !strings.Contains(got, s) {
 			t.Errorf("rendered config missing %q\nfull body:\n%s", s, got)
 		}
+	}
+	// An HTTPS index keeps TLS verification ON: ``trusted-host`` (which
+	// disables pip's cert + hostname checks) must NOT be emitted for an
+	// https:// endpoint.
+	if strings.Contains(got, "trusted-host") {
+		t.Errorf("trusted-host must not be emitted for an https index (disables TLS verification)\nfull body:\n%s", got)
 	}
 }
 
@@ -370,8 +378,9 @@ func TestRenderPipConf_TrustedRegistryBecomesPrimaryIndexUrl(t *testing.T) {
 	if strings.Contains(out, "extra-index-url") {
 		t.Errorf("unexpected extra-index-url with single endpoint: %s", out)
 	}
-	if !strings.Contains(out, "trusted-host = nexus.acme.com") {
-		t.Errorf("trusted-host missing: %s", out)
+	// HTTPS trusted registry → no trusted-host (TLS verification stays on).
+	if strings.Contains(out, "trusted-host") {
+		t.Errorf("trusted-host must not be emitted for an https registry: %s", out)
 	}
 }
 
@@ -403,10 +412,10 @@ func TestRenderPipConf_ExtrasBecomeExtraIndexUrls(t *testing.T) {
 	if c := strings.Count(out, "extra-index-url ="); c != 1 {
 		t.Errorf("extra-index-url emitted %d times, want exactly 1 (configparser rejects duplicates)", c)
 	}
-	// trusted-host carries every distinct host on one line, in
-	// insertion order.
-	if !strings.Contains(out, "trusted-host = nexus.acme.com nexus-eu.acme.com sentari-proxy.example.com") {
-		t.Errorf("trusted-host should carry all three hosts: %s", out)
+	// All three endpoints are https, so none disable TLS verification:
+	// no trusted-host line at all.
+	if strings.Contains(out, "trusted-host") {
+		t.Errorf("trusted-host must not be emitted when every endpoint is https: %s", out)
 	}
 }
 
@@ -456,5 +465,143 @@ func TestRenderPipConf_DedupesIdenticalExtras(t *testing.T) {
 	// Primary must not duplicate as an extra either.
 	if c := strings.Count(out, "https://nexus.acme.com/repository/pypi/"); c != 1 {
 		t.Errorf("primary URL appeared %d times in output, want 1 (only on index-url)", c)
+	}
+}
+
+// --- IG-CORR-S2-01: trusted-host gated on http scheme ---------------------
+
+// TestRenderPipConf_HTTPSIndexOmitsTrustedHost asserts the core security
+// fix: an https:// index keeps pip's TLS certificate verification ON, so
+// no ``trusted-host`` line (which disables that verification) is emitted.
+func TestRenderPipConf_HTTPSIndexOmitsTrustedHost(t *testing.T) {
+	got, err := renderPipConf(
+		"https://nexus.acme.com/repository/pypi/",
+		nil,
+		MarkerFields{KeyID: "test", Applied: time.Unix(1717200000, 0).UTC(), Version: 1},
+	)
+	if err != nil {
+		t.Fatalf("renderPipConf: %v", err)
+	}
+	if strings.Contains(string(got), "trusted-host") {
+		t.Errorf("https index must NOT emit trusted-host (would disable TLS verification):\n%s", got)
+	}
+}
+
+// TestRenderPipConf_HTTPIndexEmitsTrustedHost asserts the complementary
+// case: a plaintext http:// index has no TLS to verify, so ``trusted-host``
+// is pip's required opt-in to talk to it and IS emitted for that host.
+func TestRenderPipConf_HTTPIndexEmitsTrustedHost(t *testing.T) {
+	got, err := renderPipConf(
+		"http://legacy-mirror.corp.local/pypi/simple/",
+		nil,
+		MarkerFields{KeyID: "test", Applied: time.Unix(1717200000, 0).UTC(), Version: 1},
+	)
+	if err != nil {
+		t.Fatalf("renderPipConf: %v", err)
+	}
+	out := string(got)
+	if !strings.Contains(out, "index-url = http://legacy-mirror.corp.local/pypi/simple/") {
+		t.Errorf("index-url missing: %s", out)
+	}
+	if !strings.Contains(out, "trusted-host = legacy-mirror.corp.local") {
+		t.Errorf("http index must emit trusted-host for its host: %s", out)
+	}
+}
+
+// TestRenderPipConf_MixedSchemesTrustsOnlyPlaintextHosts asserts that with
+// a mix of https and http endpoints, ONLY the plaintext hosts land on the
+// trusted-host line — the https hosts keep TLS verification on.
+func TestRenderPipConf_MixedSchemesTrustsOnlyPlaintextHosts(t *testing.T) {
+	got, err := renderPipConf(
+		"https://secure.acme.com/pypi/", // https primary: stays verified
+		[]string{
+			"http://legacy.acme.com/pypi/", // http extra: trusted-host
+			"https://eu.acme.com/pypi/",    // https extra: stays verified
+		},
+		MarkerFields{KeyID: "test", Applied: time.Unix(1717200000, 0).UTC(), Version: 1},
+	)
+	if err != nil {
+		t.Fatalf("renderPipConf: %v", err)
+	}
+	out := string(got)
+	if !strings.Contains(out, "trusted-host = legacy.acme.com") {
+		t.Errorf("plaintext host must be trusted: %s", out)
+	}
+	trustedLine := strings.SplitN(out, "trusted-host = ", 2)[1]
+	if strings.Contains(trustedLine, "secure.acme.com") {
+		t.Errorf("https primary host must NOT appear on trusted-host line: %s", out)
+	}
+	if strings.Contains(trustedLine, "eu.acme.com") {
+		t.Errorf("https extra host must NOT appear on trusted-host line: %s", out)
+	}
+}
+
+// TestRenderPipConf_HTTPSchemeIsCaseInsensitive guards the scheme gate
+// against a hand-edited ``HTTP://`` slipping past as if it were https.
+func TestRenderPipConf_HTTPSchemeIsCaseInsensitive(t *testing.T) {
+	got, err := renderPipConf(
+		"HTTP://legacy.corp.local/pypi/",
+		nil,
+		MarkerFields{KeyID: "test", Applied: time.Unix(1717200000, 0).UTC(), Version: 1},
+	)
+	if err != nil {
+		t.Fatalf("renderPipConf: %v", err)
+	}
+	if !strings.Contains(string(got), "trusted-host = legacy.corp.local") {
+		t.Errorf("uppercase HTTP scheme must still be treated as insecure: %s", got)
+	}
+}
+
+// --- IG-RES-S2-01: netrc teardown failure is surfaced, not swallowed ------
+
+// TestWritePip_FailOpenNetrcTeardownFailureSurfaced asserts that when the
+// fail-open path's netrc teardown fails, the failure is NOT silently
+// discarded: the result flags NetrcTeardownFailed and the writer logs the
+// failure (a leftover credentialed netrc is a security concern).
+func TestWritePip_FailOpenNetrcTeardownFailureSurfaced(t *testing.T) {
+	dir := t.TempDir()
+	path := userHomeOverride(t, dir)
+
+	// Pre-existing Sentari-managed pip.conf so the empty-endpoint path
+	// reaches the fail-open Remove + netrc teardown branch.
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("# Managed by Sentari (...)\n[global]\nindex-url=foo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject a failing teardown.  Restore the production seam after.
+	orig := applyPipNetrcFn
+	t.Cleanup(func() { applyPipNetrcFn = orig })
+	applyPipNetrcFn = func(_ *scanner.InstallGateMap, _ MarkerFields) (string, bool, bool, error) {
+		return filepath.Join(dir, ".netrc"), false, false,
+			fmt.Errorf("simulated netrc teardown failure")
+	}
+
+	// Capture the writer's log output to assert the failure is visible.
+	var logBuf bytes.Buffer
+	origOut := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(origOut) })
+
+	res, err := WritePip(makeMap(""), PipScopeUser, MarkerFields{KeyID: "primary", Applied: fixedTime})
+	if err != nil {
+		// Fail-open contract: pip.conf removal succeeded, so WritePip
+		// must NOT turn the netrc teardown failure into a hard error.
+		t.Fatalf("WritePip should stay fail-open, got err: %v", err)
+	}
+	if !res.Removed {
+		t.Error("pip.conf should still have been removed on the fail-open path")
+	}
+	if !res.NetrcTeardownFailed {
+		t.Error("NetrcTeardownFailed must be true when the teardown fails")
+	}
+	// Happy-path netrc flags must not be set on a failed teardown.
+	if res.NetrcChanged || res.NetrcRemoved {
+		t.Errorf("netrc change/remove flags must stay false on teardown failure: %+v", res)
+	}
+	if !strings.Contains(logBuf.String(), "netrc teardown failed") {
+		t.Errorf("teardown failure must be logged, got log: %q", logBuf.String())
 	}
 }

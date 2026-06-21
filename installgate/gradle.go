@@ -111,7 +111,10 @@ func WriteGradle(m *scanner.InstallGateMap, scope GradleScope, marker MarkerFiel
 		return res, fmt.Errorf("installgate.WriteGradle: nil policy map")
 	}
 
-	endpoint := strings.TrimSpace(m.ProxyEndpoints["maven"])
+	// Honour a customer-configured trusted registry over Sentari-Proxy,
+	// same as the pip / npm / Maven / NuGet writers, so a trusted-
+	// registry-only deployment still gates gradle.
+	endpoint, _ := m.PickRegistryEndpoint("maven")
 	if endpoint == "" {
 		// Fail-open: remove only Sentari-managed scripts (the
 		// marker is present in the file content); never delete

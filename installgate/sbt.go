@@ -80,7 +80,10 @@ func WriteSbt(m *scanner.InstallGateMap, scope SbtScope, marker MarkerFields) (W
 		return res, fmt.Errorf("installgate.WriteSbt: nil policy map")
 	}
 
-	endpoint := strings.TrimSpace(m.ProxyEndpoints["maven"])
+	// Honour a customer-configured trusted registry over Sentari-Proxy,
+	// same as the pip / npm / Maven / NuGet writers, so a trusted-
+	// registry-only deployment still gates sbt.
+	endpoint, _ := m.PickRegistryEndpoint("maven")
 	if endpoint == "" {
 		managed, err := isSentariManaged(res.Path)
 		if err != nil {

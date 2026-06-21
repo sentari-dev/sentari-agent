@@ -407,3 +407,41 @@ allprojects { repositories { } }
 		t.Error("slash-marker file not recognised as Sentari-managed")
 	}
 }
+
+// --- IG-CORR-S2-03: gradle honours trusted-registry overrides -------------
+
+// TestWriteGradle_HonoursTrustedRegistry asserts the gradle writer consumes
+// a customer-configured trusted-registry (maven) endpoint, so a trusted-
+// registry-only deployment still gates gradle (pre-fix it read
+// ProxyEndpoints["maven"] directly).
+func TestWriteGradle_HonoursTrustedRegistry(t *testing.T) {
+	dir := t.TempDir()
+	path := gradleHomeOverride(t, dir)
+
+	const trusted = "https://nexus.acme.com/repository/maven/"
+	m := &scanner.InstallGateMap{
+		Version: 1730901234,
+		Ecosystems: map[string]scanner.InstallGateEcosystemBlock{
+			"maven": {Mode: "deny_list"},
+		},
+		ProxyEndpoints: map[string]string{},
+		TrustedRegistries: map[string][]scanner.TrustedRegistry{
+			"maven": {{URL: trusted}},
+		},
+	}
+
+	res, err := WriteGradle(m, GradleScopeUser, MarkerFields{Version: 1730901234, KeyID: "primary", Applied: fixedTime})
+	if err != nil {
+		t.Fatalf("WriteGradle: %v", err)
+	}
+	if !res.Changed {
+		t.Fatal("trusted-registry-only policy must still write (gate) gradle")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), trusted) {
+		t.Errorf("gradle init script must point at the trusted registry %q:\n%s", trusted, body)
+	}
+}

@@ -199,3 +199,40 @@ func TestWriteYarnBerry_NilMapRejected(t *testing.T) {
 		t.Error("expected error on nil map")
 	}
 }
+
+// --- IG-CORR-S2-03: yarn-berry honours trusted-registry overrides ---------
+
+// TestWriteYarnBerry_HonoursTrustedRegistry asserts the yarn-berry writer
+// consumes a customer-configured trusted-registry (npm) endpoint, so a
+// trusted-registry-only deployment still gates yarn-berry.
+func TestWriteYarnBerry_HonoursTrustedRegistry(t *testing.T) {
+	dir := t.TempDir()
+	path := yarnBerryHomeOverride(t, dir)
+
+	const trusted = "https://nexus.acme.com/repository/npm/"
+	m := &scanner.InstallGateMap{
+		Version: 1730901234,
+		Ecosystems: map[string]scanner.InstallGateEcosystemBlock{
+			"npm": {Mode: "deny_list"},
+		},
+		ProxyEndpoints: map[string]string{},
+		TrustedRegistries: map[string][]scanner.TrustedRegistry{
+			"npm": {{URL: trusted}},
+		},
+	}
+
+	res, err := WriteYarnBerry(m, YarnBerryScopeUser, MarkerFields{Version: 1730901234, KeyID: "primary", Applied: fixedTime})
+	if err != nil {
+		t.Fatalf("WriteYarnBerry: %v", err)
+	}
+	if !res.Changed {
+		t.Fatal("trusted-registry-only policy must still write (gate) yarn-berry")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), trusted) {
+		t.Errorf(".yarnrc.yml must point at the trusted registry %q:\n%s", trusted, body)
+	}
+}
