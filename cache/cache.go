@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -38,12 +39,31 @@ type Cache struct {
 }
 
 // cacheDSN builds the modernc.org/sqlite connection string for the cache
-// database.  WAL keeps reads from blocking the single writer, busy_timeout
-// makes a writer wait (rather than immediately erroring SQLITE_BUSY) when the
-// db is momentarily locked, and the caller pins SetMaxOpenConns(1) so writes
-// are serialised within this process.
+// database.  busy_timeout makes a writer wait (rather than immediately
+// erroring SQLITE_BUSY) when the db is momentarily locked, and the caller
+// pins SetMaxOpenConns(1) so writes are serialised within this process.
+//
+// NOTE: modernc.org/sqlite does NOT honour a `_journal_mode=WAL` DSN
+// parameter — it is silently ignored.  WAL keeps reads from blocking the
+// single writer, so it is applied via `PRAGMA journal_mode=WAL` in
+// applyWAL after the connection is opened, and verified to have taken
+// effect.
 func cacheDSN(dbPath string) string {
-	return dbPath + "?_journal_mode=WAL&_pragma=busy_timeout(5000)"
+	return dbPath + "?_pragma=busy_timeout(5000)"
+}
+
+// applyWAL sets and verifies WAL journal mode.  PRAGMA journal_mode returns
+// the resulting mode, so we assert it actually switched to "wal" instead of
+// trusting the DSN (which modernc.org/sqlite ignores for journal_mode).
+func applyWAL(db *sql.DB) error {
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode=WAL").Scan(&mode); err != nil {
+		return fmt.Errorf("set WAL journal mode: %w", err)
+	}
+	if strings.ToLower(mode) != "wal" {
+		return fmt.Errorf("WAL journal mode not applied: got %q", mode)
+	}
+	return nil
 }
 
 // NewCache opens or creates a SQLite cache at the given path.
@@ -57,6 +77,14 @@ func NewCache(dbPath string) (*Cache, error) {
 	// busy_timeout(5000) means concurrent EnqueueScan calls queue on the
 	// Go-side connection pool instead of racing into SQLITE_BUSY.
 	db.SetMaxOpenConns(1)
+
+	// WAL must be applied via PRAGMA — the DSN parameter is ignored by
+	// modernc.org/sqlite.  Apply before schema init so the very first
+	// writes land in WAL mode.
+	if err := applyWAL(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enable WAL on cache db: %w", err)
+	}
 
 	if err := initSchema(db); err != nil {
 		db.Close()
@@ -146,12 +174,37 @@ type CachedScan struct {
 	Result  *scanner.ScanResult
 }
 
-// DequeuePending returns all scan results that have not yet been uploaded,
-// ordered by scan time (oldest first) for chronological drain.
+// defaultDequeueBatch bounds how many pending rows DequeuePending pulls into
+// memory in one call.  Without a bound, a durably-offline agent with a large
+// backlog would materialise the ENTIRE queue at once and risk OOM.  The drain
+// loop processes a batch, marks each row uploaded, and re-enters on the next
+// scan cycle, so a smaller batch only means more drain iterations — never
+// dropped or duplicated rows.  Sized below maxPendingScans so a full backlog
+// drains over a handful of cycles.
+const defaultDequeueBatch = 100
+
+// DequeuePending returns up to defaultDequeueBatch scan results that have not
+// yet been uploaded, ordered by scan time (oldest first) for chronological
+// drain.  It is a bounded convenience wrapper over DequeuePendingBatch so the
+// legacy call site cannot OOM on a large offline backlog.
 func (c *Cache) DequeuePending() ([]CachedScan, error) {
-	rows, err := c.db.Query(
-		"SELECT id, scan_json FROM scan_queue WHERE uploaded = 0 ORDER BY scanned_at ASC",
-	)
+	return c.DequeuePendingBatch(defaultDequeueBatch)
+}
+
+// DequeuePendingBatch returns at most maxRows scan results that have not yet
+// been uploaded, ordered by scan time (oldest first) for FIFO chronological
+// drain.  A non-positive maxRows dequeues the entire pending backlog
+// (unbounded) — use with care.  Rows are not removed; callers must call
+// MarkUploaded after a successful upload.
+func (c *Cache) DequeuePendingBatch(maxRows int) ([]CachedScan, error) {
+	query := "SELECT id, scan_json FROM scan_queue WHERE uploaded = 0 ORDER BY scanned_at ASC, id ASC"
+	var args []any
+	if maxRows > 0 {
+		query += " LIMIT ?"
+		args = append(args, maxRows)
+	}
+
+	rows, err := c.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
