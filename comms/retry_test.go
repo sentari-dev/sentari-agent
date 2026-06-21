@@ -121,7 +121,8 @@ func TestDoRequest_Honours429RetryAfter(t *testing.T) {
 
 	c := newTestClient(t, srv.URL)
 	// Force tiny base delay so only Retry-After can cause a ≥ 900 ms gap.
-	c.retry = &RetryConfig{MaxAttempts: 3, BaseDelay: 1 * time.Millisecond, MaxDelay: 5 * time.Millisecond}
+	// MaxDelay is generous (2 s) so the 1 s hint is honoured in full.
+	c.retry = &RetryConfig{MaxAttempts: 3, BaseDelay: 1 * time.Millisecond, MaxDelay: 2 * time.Second}
 	resp, err := c.doRequest(context.Background(), "probe",
 		func(ctx context.Context) (*http.Request, error) {
 			return http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/", nil)
@@ -133,6 +134,71 @@ func TestDoRequest_Honours429RetryAfter(t *testing.T) {
 	gap := secondAt.Sub(firstAt)
 	if gap < 900*time.Millisecond {
 		t.Fatalf("Retry-After: 1 not honoured — gap %v (expected ≥900ms)", gap)
+	}
+}
+
+func TestDoRequest_RetryAfterClampedToMaxDelay(t *testing.T) {
+	// A hostile/misconfigured server sends an enormous Retry-After.
+	// The agent must NOT honour it verbatim — it must clamp the wait to
+	// the configured MaxDelay so the server cannot stall a cycle.
+	var count int32
+	var firstAt, secondAt time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&count, 1)
+		now := time.Now()
+		if n == 1 {
+			firstAt = now
+			// 3600 s — would stall the agent for an hour if honoured.
+			w.Header().Set("Retry-After", "3600")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		secondAt = now
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	c.retry = &RetryConfig{MaxAttempts: 3, BaseDelay: 1 * time.Millisecond, MaxDelay: 30 * time.Millisecond}
+	resp, err := c.doRequest(context.Background(), "probe",
+		func(ctx context.Context) (*http.Request, error) {
+			return http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/", nil)
+		})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resp.Body.Close()
+	gap := secondAt.Sub(firstAt)
+	// Must be clamped to ~MaxDelay (30 ms), nowhere near 3600 s.  Allow
+	// generous slack for scheduling jitter but well under one second.
+	if gap > 500*time.Millisecond {
+		t.Fatalf("Retry-After: 3600 was not clamped to MaxDelay — gap %v (expected ≪500ms)", gap)
+	}
+}
+
+func TestClampWaitHint(t *testing.T) {
+	cfg := RetryConfig{MaxDelay: 60 * time.Second}
+	cases := []struct {
+		name string
+		hint time.Duration
+		want time.Duration
+	}{
+		{"absent hint passes through as zero", 0, 0},
+		{"negative hint passes through as zero", -5 * time.Second, 0},
+		{"within cap is honoured", 10 * time.Second, 10 * time.Second},
+		{"at cap is honoured", 60 * time.Second, 60 * time.Second},
+		{"over cap is clamped", 3600 * time.Second, 60 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clampWaitHint(tc.hint, cfg); got != tc.want {
+				t.Fatalf("clampWaitHint(%v) = %v, want %v", tc.hint, got, tc.want)
+			}
+		})
+	}
+	// Unbounded MaxDelay falls back to the package default ceiling.
+	if got := clampWaitHint(time.Hour, RetryConfig{MaxDelay: 0}); got != defaultRetryConfig.MaxDelay {
+		t.Fatalf("unbounded MaxDelay: got %v, want default %v", got, defaultRetryConfig.MaxDelay)
 	}
 }
 
