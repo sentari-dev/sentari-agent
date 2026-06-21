@@ -46,6 +46,98 @@ func TestConcurrentLogNoBusyError(t *testing.T) {
 	}
 }
 
+// TestConcurrentMultiInstanceChainStaysLinear simulates two separate agent
+// PROCESSES appending to the same audit database file at the same time.  Each
+// process is modelled by its own *AuditLog instance: a distinct *sql.DB
+// connection AND a distinct in-memory lastHash.  This is the case the in-process
+// mutex + SetMaxOpenConns(1) cannot protect against — two writers can read the
+// same head, both insert, and the hash chain forks permanently (two rows claim
+// the same predecessor).  The fix must serialise "read head + insert" at the DB
+// level so the chain stays linear regardless of how many processes append.
+func TestConcurrentMultiInstanceChainStaysLinear(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+
+	const instances = 4
+	const each = 30
+
+	logs := make([]*AuditLog, instances)
+	for i := range logs {
+		a, err := NewAuditLog(dbPath)
+		if err != nil {
+			t.Fatalf("NewAuditLog instance %d: %v", i, err)
+		}
+		logs[i] = a
+		defer a.Close()
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, instances*each)
+	for _, a := range logs {
+		wg.Add(1)
+		go func(a *AuditLog) {
+			defer wg.Done()
+			for i := 0; i < each; i++ {
+				if err := a.Log("multi.proc", "detail"); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}(a)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent multi-instance Log errored: %v", err)
+	}
+
+	// Read every row back in id order and assert the chain is strictly linear:
+	// each row's prev_hash equals the previous row's content_hash, and no two
+	// rows share the same prev_hash (a fork).
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query("SELECT id, content_hash, prev_hash FROM audit_log ORDER BY id ASC")
+	if err != nil {
+		t.Fatalf("query rows: %v", err)
+	}
+	defer rows.Close()
+
+	seenPrev := make(map[string]int)
+	expectedPrev := ""
+	count := 0
+	for rows.Next() {
+		var id int
+		var contentHash, prevHash string
+		if err := rows.Scan(&id, &contentHash, &prevHash); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if prevHash != expectedPrev {
+			t.Fatalf("chain forked at row %d: prev_hash=%q expected=%q", id, prevHash, expectedPrev)
+		}
+		if prior, dup := seenPrev[prevHash]; dup {
+			t.Fatalf("chain forked: rows %d and %d both claim prev_hash=%q", prior, id, prevHash)
+		}
+		seenPrev[prevHash] = id
+		expectedPrev = contentHash
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows iterate: %v", err)
+	}
+
+	if want := instances * each; count != want {
+		t.Fatalf("expected %d rows, got %d", want, count)
+	}
+
+	// And the canonical verifier must agree the chain is clean.
+	if err := logs[0].VerifyChain(); err != nil {
+		t.Fatalf("VerifyChain after concurrent multi-instance writes: %v", err)
+	}
+}
+
 func TestVerifyChainCleanWhenUntampered(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "audit.db")
 	a, err := NewAuditLog(dbPath)
