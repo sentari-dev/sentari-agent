@@ -99,9 +99,14 @@ Signal-type enum (agent subset):
 `unsigned`, `provenance_attested`, `yanked`.
 
 The JSON Schema enum additionally includes server-only values
-(`deprecated`, `maintainer_changed`, `typosquat_suspect`,
-`npm_malware_advisory`) that Celery enrichment tasks write to the
-same table. Agents MUST NOT emit these.
+(`deprecated`, `maintainer_changed`, `typosquat_suspect`, and the
+per-ecosystem GHSA-Malware variants `npm_malware_advisory`,
+`pypi_malware_advisory`, `maven_malware_advisory`,
+`nuget_malware_advisory`) that Celery enrichment tasks write to the
+same table. The GHSA Malware database is multi-ecosystem, so the
+enrichment path emits `<ecosystem>_malware_advisory` to keep the
+ecosystem label correct rather than mislabelling every hit as `npm_*`.
+Agents MUST NOT emit any of these.
 
 `source` is a free-form string. Agent-emitted signals should set it
 to the scanner module name (e.g. `npm-postinstall-scanner`,
