@@ -110,16 +110,19 @@ func resolveVersionRange(m2Dir, groupId, artifactId, rangeStr string) string {
 		if _, err := safeio.ReadFile(pomFile, 1); err == nil {
 			return exact
 		}
-		// Try without the safeio (just check existence via stat for the directory).
-		if info, err := os.Stat(gaDir); err == nil && info.IsDir() {
+		// Fall back to directory presence (no .pom yet fully downloaded).
+		// Use Lstat so a symlink version-directory does not masquerade as
+		// an installed artifact.
+		if info, err := os.Lstat(gaDir); err == nil && info.IsDir() {
 			return exact
 		}
 		return ""
 	}
 
-	// Glob installed versions.
+	// Glob installed versions.  Use safeio.ReadDir so a symlink directory
+	// in ~/.m2 cannot redirect enumeration to an arbitrary path.
 	gaDir := filepath.Join(m2Dir, strings.ReplaceAll(groupId, ".", string(filepath.Separator)), artifactId)
-	entries, err := os.ReadDir(gaDir)
+	entries, err := safeio.ReadDir(gaDir)
 	if err != nil {
 		return ""
 	}
@@ -599,7 +602,8 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 				version = resolved
 			}
 			// If still a range (resolveVersionRange returned ""), emit verbatim
-			// with Resolved=false — handled by isVersionRange check in emit.
+			// with Resolved=false — the edgeResolved flag is computed from the
+			// final (post-mediation) version via isVersionRange/isUnresolvedPlaceholder.
 		}
 
 		// Nearest-wins version mediation: the FIRST resolution of a GA

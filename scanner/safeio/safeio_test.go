@@ -146,6 +146,56 @@ func TestReadFile_DirectoryRejected(t *testing.T) {
 	}
 }
 
+// TestReadDir_HappyPath: a real directory must be listed and its
+// entries returned in name order.
+func TestReadDir_HappyPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "aaa"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "bbb"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := ReadDir(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	if entries[0].Name() != "aaa" || entries[1].Name() != "bbb" {
+		t.Errorf("unexpected entry names: %q %q", entries[0].Name(), entries[1].Name())
+	}
+}
+
+// TestReadDir_SymlinkDirRefused: a symlink to a directory must be
+// refused.  This is the key security property — an attacker cannot
+// install a version directory in ~/.m2 as a symlink pointing at
+// /etc or another sensitive path.
+func TestReadDir_SymlinkDirRefused(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation on Windows requires admin; covered by Lstat-based impl")
+	}
+	outer := t.TempDir()
+	realDir := filepath.Join(outer, "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(outer, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Skipf("symlink creation not permitted: %v", err)
+	}
+
+	entries, err := ReadDir(link)
+	if err == nil {
+		t.Fatalf("expected ErrSymlink, got %d entries", len(entries))
+	}
+	if !errors.Is(err, ErrSymlink) {
+		t.Errorf("expected ErrSymlink, got %v", err)
+	}
+}
+
 // TestOpen_SymlinkRefused: the streaming Open path shares the same
 // guarantee.  Dpkg status is read line-by-line via Open; it must
 // refuse a symlinked status file too.
