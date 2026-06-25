@@ -99,7 +99,9 @@ agent payload.
 
 Signal-type enum (agent subset):
 `postinstall_script`, `preinstall_script`, `install_script`,
-`unsigned`, `provenance_attested`, `yanked`.
+`unsigned`, `provenance_attested`, `yanked`,
+`maven_checksum_mismatch`, `maven_snapshot_in_release`,
+`maven_untrusted_repo`.
 
 The JSON Schema enum additionally includes server-only values
 (`deprecated`, `maintainer_changed`, `typosquat_suspect`, and the
