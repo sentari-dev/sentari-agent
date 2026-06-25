@@ -245,12 +245,12 @@ func (a *AuditLog) VerifyChain() error {
 
 // UnshippedEntries returns audit log entries not yet sent to the server.
 //
-// TODO(server-contract): reserved for the (not-yet-implemented) server-side
-// audit re-anchoring endpoint. Once the server exposes a re-anchoring API,
-// the serve loop will ship these entries and call MarkShipped on success so a
-// later host compromise cannot rewrite history the server already witnessed.
-// This is intentionally retained (not dead code) — see the package TRUST
-// MODEL doc for why off-host re-anchoring is the real tamper-evidence story.
+// The enterprise serve loop ships these to the server's re-anchoring endpoint
+// (POST /api/v1/agent/audit-log, contract agent-audit-ship-v1) via
+// comms.Client.ShipAudit and calls MarkShipped on success, so a later host
+// compromise cannot rewrite history the server already witnessed. See the
+// package TRUST MODEL doc for why off-host re-anchoring is the real
+// tamper-evidence story.
 func (a *AuditLog) UnshippedEntries() ([]map[string]string, error) {
 	rows, err := a.db.Query(
 		"SELECT id, event_type, detail, content_hash, prev_hash, created_at FROM audit_log WHERE shipped = 0 ORDER BY id ASC",
@@ -282,10 +282,10 @@ func (a *AuditLog) UnshippedEntries() ([]map[string]string, error) {
 
 // MarkShipped marks entries as sent to the server.
 //
-// TODO(server-contract): paired with UnshippedEntries — reserved for the
-// not-yet-implemented server-side audit re-anchoring endpoint. The `shipped`
-// column and the audit_no_update trigger's allowance for it exist for this
-// future path; do not remove.
+// Paired with UnshippedEntries: the serve loop calls this after a successful
+// ShipAudit batch so already-witnessed entries are not re-shipped. The
+// `shipped` column and the audit_no_update trigger's allowance for updating it
+// exist for this path; do not remove.
 func (a *AuditLog) MarkShipped(maxID int) error {
 	_, err := a.db.Exec("UPDATE audit_log SET shipped = 1 WHERE id <= ?", maxID)
 	return err

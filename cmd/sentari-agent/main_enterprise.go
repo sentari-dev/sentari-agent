@@ -848,6 +848,12 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 
 	logAudit(auditLog, "upload.success", fmt.Sprintf("packages=%d", len(result.Packages)))
 
+	// Off-host re-anchoring: ship the local append-only audit chain to the
+	// server so a later on-device compromise cannot silently rewrite history
+	// the server already witnessed (contract agent-audit-ship-v1). Best-effort
+	// — failures keep the entries queued for the next cycle and never abort it.
+	shipAuditLog(ctx, client, auditLog, result.DeviceID, log)
+
 	// Housekeeping: purge old uploaded entries even when no drain happened this
 	// cycle.  This covers the case where a previous cycle drained but the purge
 	// window hadn't elapsed yet.
@@ -1328,6 +1334,41 @@ func debounceThreshold(d *comms.InstallGateDisableDebouncer) int {
 func logAudit(a *audit.AuditLog, eventType, detail string) {
 	if err := a.Log(eventType, detail); err != nil {
 		fmt.Fprintf(os.Stderr, "WARNING: audit log write failed (%s): %v\n", eventType, err)
+	}
+}
+
+// shipAuditLog drains the agent's un-shipped local audit entries to the
+// server's re-anchoring endpoint in server-capped batches, marking each
+// successful batch as shipped. Best-effort: on the first transport/auth
+// failure it stops, leaving the remaining entries queued for the next cycle.
+func shipAuditLog(ctx context.Context, client *comms.Client, auditLog *audit.AuditLog, deviceID string, log *slog.Logger) {
+	if deviceID == "" {
+		return
+	}
+	entries, err := auditLog.UnshippedEntries()
+	if err != nil {
+		log.Warn("audit ship: failed to read unshipped entries", slog.String("err", err.Error()))
+		return
+	}
+	shipped := 0
+	for start := 0; start < len(entries); start += comms.AuditShipMaxBatch {
+		end := start + comms.AuditShipMaxBatch
+		if end > len(entries) {
+			end = len(entries)
+		}
+		maxID, shipErr := client.ShipAudit(ctx, deviceID, entries[start:end])
+		if shipErr != nil {
+			log.Warn("audit ship failed", slog.String("err", shipErr.Error()))
+			break
+		}
+		if markErr := auditLog.MarkShipped(maxID); markErr != nil {
+			log.Warn("audit ship: failed to mark entries shipped", slog.String("err", markErr.Error()))
+			break
+		}
+		shipped += end - start
+	}
+	if shipped > 0 {
+		log.Info("audit log re-anchored to server", slog.Int("entries", shipped))
 	}
 }
 

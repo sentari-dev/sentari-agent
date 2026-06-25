@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -841,8 +842,8 @@ func LoadLicenseMapTrust(certDir string) (*LicenseMapTrust, error) {
 const installGateTrustFile = "install_gate_trust.json"
 
 // InstallGateTrust is the persisted shape of the trusted install-
-// gate signing key learned during /register.  ``KeyID`` identifies
-// which pinned entry envelopes set; ``PubKeyB64`` is the raw 32-byte
+// gate signing key learned during /register.  “KeyID“ identifies
+// which pinned entry envelopes set; “PubKeyB64“ is the raw 32-byte
 // ed25519 public key, base64-encoded.
 type InstallGateTrust struct {
 	KeyID     string `json:"key_id"`
@@ -850,7 +851,7 @@ type InstallGateTrust struct {
 }
 
 // SaveInstallGateTrust persists the install-gate pubkey returned by
-// /register to ``certDir/install_gate_trust.json``.  Empty fields are
+// /register to “certDir/install_gate_trust.json“.  Empty fields are
 // silently no-op'd so a server that has not provisioned an install-
 // gate key (e.g. older deployments) does not blank out an existing
 // trust file with zeroes.
@@ -905,8 +906,8 @@ func LoadInstallGateTrust(certDir string) (*InstallGateTrust, error) {
 const vulnMapTrustFile = "vuln_map_trust.json"
 
 // VulnMapTrust is the persisted shape of the trusted vuln-map signing
-// key learned during /register.  ``KeyID`` identifies which pinned
-// entry envelopes set; ``PubKeyB64`` is the raw 32-byte ed25519
+// key learned during /register.  “KeyID“ identifies which pinned
+// entry envelopes set; “PubKeyB64“ is the raw 32-byte ed25519
 // public key, base64-encoded.  Same wire shape as the license-map
 // and install-gate trust records — kept identical so a future
 // rotation/refresh tool can read all three by name.
@@ -916,7 +917,7 @@ type VulnMapTrust struct {
 }
 
 // SaveVulnMapTrust persists the vuln-map pubkey returned by /register
-// to ``certDir/vuln_map_trust.json``.  Empty fields are silently
+// to “certDir/vuln_map_trust.json“.  Empty fields are silently
 // no-op'd so a server that has not provisioned a vuln-map signing
 // key (older deployments, or air-gap operators who haven't imported
 // an NVD bundle yet) does not blank out an existing trust file
@@ -1021,6 +1022,91 @@ func (c *Client) UploadScan(ctx context.Context, result *scanner.ScanResult) err
 	return nil
 }
 
+// AuditShipMaxBatch is the server-enforced cap on entries per audit-ship
+// request (docs/contracts/agent-audit-ship-v1.json, "maxItems": 10000).
+const AuditShipMaxBatch = 10000
+
+type auditShipEntry struct {
+	EntryID     int    `json:"entry_id"`
+	EventType   string `json:"event_type"`
+	Detail      string `json:"detail"`
+	ContentHash string `json:"content_hash"`
+	PrevHash    string `json:"prev_hash"`
+	CreatedAt   string `json:"created_at"`
+}
+
+type auditShipRequest struct {
+	DeviceID string           `json:"device_id"`
+	Entries  []auditShipEntry `json:"entries"`
+}
+
+// ShipAudit ships a batch of the agent's local append-only audit entries to the
+// server's re-anchoring endpoint (POST /api/v1/agent/audit-log, contract
+// agent-audit-ship-v1). “entries“ are the raw rows from
+// audit.AuditLog.UnshippedEntries(); the server independently re-verifies the
+// SHA-256 hash chain and stores them as append-only forensic evidence — the
+// real tamper-evidence story for a device that may itself be compromised.
+//
+// Returns the highest entry_id accepted so the caller can MarkShipped(maxID).
+// The server always answers 202 (even on a detected chain anomaly — the
+// evidence is preserved and an alert raised server-side), so any non-202 is a
+// transport/auth failure and the entries stay unshipped for the next cycle. A
+// batch larger than AuditShipMaxBatch is truncated to the cap; the caller loops
+// to drain the remainder.
+func (c *Client) ShipAudit(ctx context.Context, deviceID string, entries []map[string]string) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	if len(entries) > AuditShipMaxBatch {
+		entries = entries[:AuditShipMaxBatch]
+	}
+
+	payload := auditShipRequest{DeviceID: deviceID, Entries: make([]auditShipEntry, 0, len(entries))}
+	maxID := 0
+	for _, e := range entries {
+		id, err := strconv.Atoi(e["id"])
+		if err != nil {
+			return 0, fmt.Errorf("audit ship: bad entry id %q: %w", e["id"], err)
+		}
+		if id > maxID {
+			maxID = id
+		}
+		payload.Entries = append(payload.Entries, auditShipEntry{
+			EntryID:     id,
+			EventType:   e["event_type"],
+			Detail:      e["detail"],
+			ContentHash: e["content_hash"],
+			PrevHash:    e["prev_hash"],
+			CreatedAt:   e["created_at"],
+		})
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, fmt.Errorf("marshal audit ship payload: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "ship_audit", func(ctx context.Context) (*http.Request, error) {
+		r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.serverURL+"/api/v1/agent/audit-log", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		r.Header.Set("Content-Type", "application/json")
+		return r, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+		return 0, fmt.Errorf("audit ship failed (HTTP %d): %s", resp.StatusCode, truncateBytes(respBody, maxErrorBodyLog))
+	}
+
+	return maxID, nil
+}
+
 // PollConfig fetches the latest agent configuration from the server.
 func (c *Client) PollConfig(ctx context.Context) (*AgentConfig, error) {
 	resp, err := c.doRequest(ctx, "poll_config", func(ctx context.Context) (*http.Request, error) {
@@ -1090,11 +1176,11 @@ func (c *Client) FetchLicenseMap(ctx context.Context, currentVersion int) (*scan
 // the server.  The response is a signed envelope; this function reads
 // the raw bytes, verifies the ed25519 signature against the pinned
 // install-gate public key, and returns the verified
-// ``InstallGateMap`` plus the raw envelope bytes so the caller can
+// “InstallGateMap“ plus the raw envelope bytes so the caller can
 // persist them for offline re-use.
 //
-// Returns ``(nil, nil, nil)`` when the server's version is not newer
-// than ``currentVersion`` — no update needed, no error.  Mirrors the
+// Returns “(nil, nil, nil)“ when the server's version is not newer
+// than “currentVersion“ — no update needed, no error.  Mirrors the
 // license-map fetch contract.
 func (c *Client) FetchInstallGateMap(ctx context.Context, currentVersion int) (*scanner.InstallGateMap, []byte, error) {
 	resp, err := c.doRequest(ctx, "fetch_install_gate", func(ctx context.Context) (*http.Request, error) {
