@@ -61,6 +61,7 @@ type EnvType = string
 const (
 	EnvPip       EnvType = "pip"
 	EnvVenv      EnvType = "venv"
+	EnvUv        EnvType = "uv"
 	EnvConda     EnvType = "conda"
 	EnvPoetry    EnvType = "poetry"
 	EnvPipenv    EnvType = "pipenv"

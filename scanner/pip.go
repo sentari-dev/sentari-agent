@@ -86,11 +86,36 @@ func (venvScanner) Match(dirPath, base string) MatchResult {
 func (venvScanner) Scan(_ context.Context, env Environment) ([]PackageRecord, []ScanError) {
 	pkgs, errs := scanPipEnvironment(env.Path)
 	// scanPipEnvironment tags every record as EnvPip; override to EnvVenv
-	// so the server distinguishes global pip from venv-scoped packages.
+	// (or EnvUv for uv-managed venvs) so the server distinguishes global pip
+	// from venv-scoped packages and emits the right remediation command — a
+	// plain ``pip install`` into a uv project is reverted by ``uv sync``.
+	envType := EnvVenv
+	if isUvVenv(filepath.Join(env.Path, "pyvenv.cfg")) {
+		envType = EnvUv
+	}
 	for i := range pkgs {
-		pkgs[i].EnvType = EnvVenv
+		pkgs[i].EnvType = envType
 	}
 	return pkgs, errs
+}
+
+// isUvVenv reports whether a venv's pyvenv.cfg was written by uv.  uv records
+// its own version in the venv config as a ``uv = X.Y.Z`` line; CPython's
+// venv/virtualenv never write that key.  Read via safeio (symlink-refusing,
+// size-capped) for the same reason the rest of the scanner does.
+func isUvVenv(pyvenvCfgPath string) bool {
+	data, err := safeio.ReadFile(pyvenvCfgPath, maxPyvenvCfgSize)
+	if err != nil {
+		return false
+	}
+	s := bufio.NewScanner(bytes.NewReader(data))
+	for s.Scan() {
+		key, _, found := strings.Cut(s.Text(), "=")
+		if found && strings.TrimSpace(key) == "uv" {
+			return true
+		}
+	}
+	return false
 }
 
 func init() {
