@@ -229,6 +229,53 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 			managedVersions[ga] = iv
 		}
 	}
+	// Flatten import-scoped BOM entries from local cache.
+	// BOM imports have lower priority than explicit managedVersions from the
+	// root POM (Maven spec: direct declarations override BOM declarations).
+	// We populate BOM-managed versions first so explicit entries override below.
+	for _, d := range root.DependencyManagement.Dependencies {
+		if !strings.EqualFold(d.Scope, "import") {
+			continue
+		}
+		bomVersion := interpolate(d.Version)
+		if bomVersion == "" {
+			continue
+		}
+		bomPomPath := mavenPomLocation(m2Dir, d.GroupID, d.ArtifactID, bomVersion)
+		bomRaw, err := safeio.ReadFile(bomPomPath, maxPomBytes)
+		if err != nil {
+			// BOM not in local cache — leave any deps that rely on it unresolved.
+			continue
+		}
+		var bomPom mavenPom
+		if err := xml.Unmarshal(bomRaw, &bomPom); err != nil {
+			continue
+		}
+		// Resolve BOM's own properties so its managed version strings
+		// can reference ${...} (e.g., Spring BOM uses ${spring-framework.version}).
+		bomProps := map[string]string{}
+		for k, v := range bomPom.Properties.entries {
+			bomProps[k] = v
+		}
+		bomVersion2 := bomPom.Version
+		bomInterpolate := func(v string) string {
+			return interpolateProps(v, bomVersion2, bomProps)
+		}
+		for _, bd := range bomPom.DependencyManagement.Dependencies {
+			if strings.EqualFold(bd.Scope, "import") {
+				// Nested BOM import — out of scope for this pass; leave unresolved.
+				continue
+			}
+			ga := mavenGA{groupId: bd.GroupID, artifactId: bd.ArtifactID}
+			// Only set if not already managed (BOM entries are lower priority).
+			if _, alreadySet := managedVersions[ga]; !alreadySet {
+				if v := bomInterpolate(bd.Version); v != "" {
+					managedVersions[ga] = v
+				}
+			}
+		}
+	}
+	// Apply root POM's explicit managedVersions last so they override BOM entries.
 	for _, d := range root.DependencyManagement.Dependencies {
 		if strings.EqualFold(d.Scope, "import") {
 			continue
