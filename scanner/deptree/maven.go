@@ -52,6 +52,14 @@ type pendingDep struct {
 	fromReactorModule bool
 }
 
+// isUnresolvedPlaceholder reports whether v still contains a ${...}
+// expression that was not resolved by interpolateProps — indicating that
+// the edge's version is not locally known and the edge should be flagged
+// Resolved=false.
+func isUnresolvedPlaceholder(v string) bool {
+	return strings.Contains(v, "${") && strings.Contains(v, "}")
+}
+
 // interpolateProps resolves ${...} placeholders in v against props and
 // ${project.version} → projectVersion.  Iterates up to 10 times to handle
 // chained substitutions (e.g., ${x} where x=${y} where y=1.0). If a
@@ -359,11 +367,15 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 			if head.parent == rootGA || head.fromReactorModule {
 				edgeType = "direct"
 			}
+			// A version that still contains a ${...} placeholder could not
+			// be resolved locally — emit the verbatim string and mark the
+			// edge unresolved so the server can complete it fleet-wide.
+			edgeResolved := !isUnresolvedPlaceholder(version)
 			emit(
 				parentName, head.parentVer,
 				coord, version,
 				head.dep.Scope, edgeType,
-				len(edgePath)-1, edgePath, true,
+				len(edgePath)-1, edgePath, edgeResolved,
 			)
 		}
 
