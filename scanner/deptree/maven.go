@@ -324,6 +324,34 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 	// root identifier.
 	rootCoord := mavenCoord(rootGA)
 
+	// Merge contributions from activeByDefault profiles.
+	// Only <activeByDefault>true</activeByDefault> profiles are honoured —
+	// OS/JDK/property activation conditions are out of scope for the local
+	// resolution pass; the server can apply them with full context.
+	for _, profile := range root.Profiles {
+		if !strings.EqualFold(strings.TrimSpace(profile.Activation.ActiveByDefault), "true") {
+			continue
+		}
+		// Merge profile <properties> into effectiveProps (profile wins over root
+		// for the same key — consistent with Maven spec's profile override rules).
+		for k, v := range profile.Properties.entries {
+			effectiveProps[k] = v
+		}
+		// Merge profile <dependencyManagement> non-import entries into
+		// managedVersions, but only if not already set (root explicit wins).
+		for _, d := range profile.DependencyManagement.Dependencies {
+			if strings.EqualFold(d.Scope, "import") {
+				continue
+			}
+			ga := mavenGA{groupId: d.GroupID, artifactId: d.ArtifactID}
+			if _, alreadySet := managedVersions[ga]; !alreadySet {
+				if v := interpolate(d.Version); v != "" {
+					managedVersions[ga] = v
+				}
+			}
+		}
+	}
+
 	// Direct deps from <dependencies> block (NOT <dependencyManagement>).
 	queue := []pendingDep{}
 	for _, d := range root.Dependencies {
@@ -333,6 +361,21 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 			parentPath: []string{rootCoord},
 			dep:        d,
 		})
+	}
+
+	// Add dependencies from activeByDefault profiles to the BFS queue.
+	for _, profile := range root.Profiles {
+		if !strings.EqualFold(strings.TrimSpace(profile.Activation.ActiveByDefault), "true") {
+			continue
+		}
+		for _, d := range profile.Dependencies {
+			queue = append(queue, pendingDep{
+				parent:     rootGA,
+				parentVer:  rootVersion,
+				parentPath: []string{rootCoord},
+				dep:        d,
+			})
+		}
 	}
 
 	// Walk reactor child modules (depth-bounded).  Each child's
