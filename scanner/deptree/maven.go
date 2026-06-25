@@ -13,6 +13,7 @@ package deptree
 import (
 	"encoding/xml"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -58,6 +59,178 @@ type pendingDep struct {
 // Resolved=false.
 func isUnresolvedPlaceholder(v string) bool {
 	return strings.Contains(v, "${") && strings.Contains(v, "}")
+}
+
+// isVersionRange reports whether v is a Maven version range expression.
+// Maven ranges start with '[' (inclusive) or '(' (exclusive).
+func isVersionRange(v string) bool {
+	return strings.HasPrefix(v, "[") || strings.HasPrefix(v, "(")
+}
+
+// resolveVersionRange attempts to resolve a Maven version range string to a
+// concrete installed version found in the local ~/.m2 cache.
+//
+// Strategy:
+//  1. Glob the GA directory (m2Dir/groupPath/artifactId) for installed
+//     version sub-directories.
+//  2. Filter to versions that satisfy the range (simple numeric comparison
+//     for the common cases; the full Maven range solver is out of scope).
+//  3. Return the highest satisfying version if found, empty string otherwise.
+//
+// Out-of-scope: version qualifiers (alpha/beta/RC), multi-range expressions
+// ([1.0,1.5),(2.0,)), and version ranges in managed/BOM entries that come
+// from a parent chain. These edge cases fall back to the verbatim range
+// (Resolved=false) and are completed server-side.
+func resolveVersionRange(m2Dir, groupId, artifactId, rangeStr string) string {
+	// Parse the range to extract bounds.
+	// Supported: [low,high)  [low,high]  (low,high)  [exact]
+	s := strings.TrimSpace(rangeStr)
+	if s == "" {
+		return ""
+	}
+
+	// Determine inclusivity of bounds.
+	lowInclusive := s[0] == '['
+	highInclusive := len(s) > 0 && s[len(s)-1] == ']'
+	inner := s[1 : len(s)-1]
+
+	var low, high string
+	if idx := strings.Index(inner, ","); idx >= 0 {
+		low = strings.TrimSpace(inner[:idx])
+		high = strings.TrimSpace(inner[idx+1:])
+	} else {
+		// [exact] form — exact version required.
+		exact := strings.TrimSpace(inner)
+		if exact == "" {
+			return ""
+		}
+		// Return exact if installed.
+		gaDir := filepath.Join(m2Dir, strings.ReplaceAll(groupId, ".", string(filepath.Separator)), artifactId, exact)
+		pomFile := filepath.Join(gaDir, fmt.Sprintf("%s-%s.pom", artifactId, exact))
+		if _, err := safeio.ReadFile(pomFile, 1); err == nil {
+			return exact
+		}
+		// Try without the safeio (just check existence via stat for the directory).
+		if info, err := os.Stat(gaDir); err == nil && info.IsDir() {
+			return exact
+		}
+		return ""
+	}
+
+	// Glob installed versions.
+	gaDir := filepath.Join(m2Dir, strings.ReplaceAll(groupId, ".", string(filepath.Separator)), artifactId)
+	entries, err := os.ReadDir(gaDir)
+	if err != nil {
+		return ""
+	}
+
+	var candidates []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		v := e.Name()
+		if mavenVersionInRange(v, low, high, lowInclusive, highInclusive) {
+			candidates = append(candidates, v)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	// Pick highest satisfying version.
+	sort.Slice(candidates, func(i, j int) bool {
+		return mavenVersionLess(candidates[i], candidates[j])
+	})
+	return candidates[len(candidates)-1]
+}
+
+// mavenVersionInRange reports whether version v satisfies the range
+// [low,high) / [low,high] / (low,high) / (low,high].
+// Uses simple numeric-segment comparison — sufficient for the installed-
+// artifact lookup use case (we're not implementing a full Maven range solver).
+func mavenVersionInRange(v, low, high string, lowInc, highInc bool) bool {
+	if low != "" {
+		cmpLow := mavenVersionCompare(v, low)
+		if lowInc && cmpLow < 0 {
+			return false
+		}
+		if !lowInc && cmpLow <= 0 {
+			return false
+		}
+	}
+	if high != "" {
+		cmpHigh := mavenVersionCompare(v, high)
+		if highInc && cmpHigh > 0 {
+			return false
+		}
+		if !highInc && cmpHigh >= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// mavenVersionLess reports whether a < b using numeric segment comparison.
+func mavenVersionLess(a, b string) bool {
+	return mavenVersionCompare(a, b) < 0
+}
+
+// mavenVersionCompare compares two version strings numerically by dot-separated
+// segments.  Returns negative/zero/positive like strings.Compare.
+// This handles the 99% case (pure numeric versions like 1.4.0, 6.1.4, 3.2.0).
+// Qualifiers (alpha/beta/RC) and mixed strings fall back to lexicographic order.
+func mavenVersionCompare(a, b string) int {
+	partsA := strings.Split(strings.SplitN(a, "-", 2)[0], ".")
+	partsB := strings.Split(strings.SplitN(b, "-", 2)[0], ".")
+	n := len(partsA)
+	if len(partsB) > n {
+		n = len(partsB)
+	}
+	for i := 0; i < n; i++ {
+		var pa, pb string
+		if i < len(partsA) {
+			pa = partsA[i]
+		}
+		if i < len(partsB) {
+			pb = partsB[i]
+		}
+		// Try numeric comparison first.
+		var ia, ib int
+		na := parseUint(pa)
+		nb := parseUint(pb)
+		if na >= 0 && nb >= 0 {
+			ia, ib = na, nb
+		} else {
+			// Fall back to lexicographic for qualifier segments.
+			c := strings.Compare(pa, pb)
+			if c != 0 {
+				return c
+			}
+			continue
+		}
+		if ia != ib {
+			if ia < ib {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// parseUint parses a non-negative integer string; returns -1 on failure.
+func parseUint(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return -1
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
 }
 
 // interpolateProps resolves ${...} placeholders in v against props and
@@ -417,6 +590,17 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 				version = mv
 			}
 		}
+		// Attempt to resolve version-range syntax ([1.0,2.0), [1.5], etc.)
+		// against artifacts already present in the local cache.  If a
+		// satisfying version is found, use it; otherwise keep the range
+		// string verbatim and mark the edge unresolved.
+		if isVersionRange(version) {
+			if resolved := resolveVersionRange(m2Dir, ga.groupId, ga.artifactId, version); resolved != "" {
+				version = resolved
+			}
+			// If still a range (resolveVersionRange returned ""), emit verbatim
+			// with Resolved=false — handled by isVersionRange check in emit.
+		}
 
 		// Nearest-wins version mediation: the FIRST resolution of a GA
 		// fixes its version, depth, and path; later occurrences reuse it.
@@ -457,10 +641,10 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 			if head.parent == rootGA || head.fromReactorModule {
 				edgeType = "direct"
 			}
-			// A version that still contains a ${...} placeholder could not
-			// be resolved locally — emit the verbatim string and mark the
-			// edge unresolved so the server can complete it fleet-wide.
-			edgeResolved := !isUnresolvedPlaceholder(version)
+			// A version that still contains a ${...} placeholder or a version-range
+			// syntax could not be resolved locally — emit the verbatim string and
+			// mark the edge unresolved so the server can complete it fleet-wide.
+			edgeResolved := !isUnresolvedPlaceholder(version) && !isVersionRange(version)
 			emit(
 				parentName, head.parentVer,
 				coord, version,
