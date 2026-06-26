@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/sentari-dev/sentari-agent/audit"
 	"github.com/sentari-dev/sentari-agent/cache"
 	"github.com/sentari-dev/sentari-agent/common/logging"
+	"github.com/sentari-dev/sentari-agent/common/secureperm"
 	"github.com/sentari-dev/sentari-agent/comms"
 	"github.com/sentari-dev/sentari-agent/config"
 	"github.com/sentari-dev/sentari-agent/installgate"
@@ -40,12 +42,24 @@ import (
 	_ "github.com/sentari-dev/sentari-agent/scanner/nuget"
 )
 
-const (
-	defaultDataDir     = "/var/lib/sentari"
-	defaultAuditDBPath = "/var/lib/sentari/audit.db"
-	defaultCacheDBPath = "/var/lib/sentari/cache.db"
-	defaultCertDir     = "/var/lib/sentari/certs"
-)
+// defaultDataDir is the agent's state directory (audit DB, scan cache,
+// device certificates).  Platform-aware: %ProgramData%\Sentari on Windows,
+// /var/lib/sentari on POSIX.  Operators override with --data-dir.
+var defaultDataDir = platformDefaultDataDir()
+
+// platformDefaultDataDir returns the OS-appropriate default state directory.
+// On Windows the POSIX /var/lib path is meaningless (it would resolve to
+// \var\lib\sentari on the current drive); %ProgramData% is the conventional
+// machine-wide, service-writable location.
+func platformDefaultDataDir() string {
+	if runtime.GOOS == "windows" {
+		if pd := os.Getenv("ProgramData"); pd != "" {
+			return filepath.Join(pd, "Sentari")
+		}
+		return `C:\ProgramData\Sentari`
+	}
+	return "/var/lib/sentari"
+}
 
 func main() {
 	// Mode flags.  --scan mirrors the community build: run a
@@ -72,7 +86,7 @@ func main() {
 	enrollTokenFlag := flag.String("enroll-token", "", "Enrollment token for first-time registration")
 	enrollTokenFileFlag := flag.String("enroll-token-file", "", "Path to file containing enrollment token (avoids /proc/cmdline exposure)")
 	sbomOutFlag := flag.String("sbom-out", "", "Write CycloneDX SBOM to this file path after each scan (optional)")
-	dataDirFlag := flag.String("data-dir", "", "Override data directory (default: /var/lib/sentari)")
+	dataDirFlag := flag.String("data-dir", "", "Override data directory (default: /var/lib/sentari on POSIX, %ProgramData%\\Sentari on Windows)")
 	bootstrapCAFP := flag.String("bootstrap-ca-fingerprint", "", "SHA-256 fingerprint of server TLS certificate for bootstrap pinning (hex, colon-separated)")
 	excludeNetworkPathsFlag := flag.Bool(
 		"exclude-network-paths",
@@ -227,8 +241,8 @@ func main() {
 	if *dataDirFlag != "" {
 		dataDir = *dataDirFlag
 	}
-	auditDBPath := dataDir + "/audit.db"
-	cacheDBPath := dataDir + "/cache.db"
+	auditDBPath := filepath.Join(dataDir, "audit.db")
+	cacheDBPath := filepath.Join(dataDir, "cache.db")
 
 	// Colocate the persisted macOS device-id file with the agent data dir so
 	// it lives alongside the cache/audit DBs rather than a separate default
@@ -237,6 +251,14 @@ func main() {
 
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not create %s: %v\n", dataDir, err)
+	}
+	// Lock the data dir down to the service account.  On Windows this strips
+	// the default inherited "Users" read access (mode bits are ignored there)
+	// so the device private key and audit DB beneath it are not world-readable;
+	// the restrictive ACE is inheritable, covering the cert subdir written
+	// later during registration.  On POSIX it re-asserts 0700.
+	if err := secureperm.HardenDir(dataDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not restrict permissions on %s: %v\n", dataDir, err)
 	}
 
 	auditLog, err := audit.NewAuditLog(auditDBPath)
@@ -256,18 +278,18 @@ func main() {
 	hostname, _ := os.Hostname()
 
 	// Determine cert paths (prefer config, fall back to data-dir/certs).
-	certDir := dataDir + "/certs"
+	certDir := filepath.Join(dataDir, "certs")
 	certFile := agentCfg.Server.CertFile
 	keyFile := agentCfg.Server.KeyFile
 	caFile := agentCfg.Server.CACertFile
 	if certFile == "" {
-		certFile = certDir + "/device.crt"
+		certFile = filepath.Join(certDir, "device.crt")
 	}
 	if keyFile == "" {
-		keyFile = certDir + "/device.key"
+		keyFile = filepath.Join(certDir, "device.key")
 	}
 	if caFile == "" {
-		caFile = certDir + "/ca.crt"
+		caFile = filepath.Join(certDir, "ca.crt")
 	}
 
 	// The mTLS client loads its material from certFile/keyFile/caFile above.
@@ -1431,6 +1453,35 @@ func clampMaxDepth(depth int) int {
 // a compromised server from directing the agent to exfiltrate filesystem
 // layout information via scan errors.
 func isScanRootDenied(cleaned string) bool {
+	return scanRootDeniedForOS(cleaned, runtime.GOOS)
+}
+
+// scanRootDeniedForOS is the OS-parameterised core of isScanRootDenied,
+// split out so both the POSIX and Windows branches are unit-testable on any
+// build host.
+func scanRootDeniedForOS(cleaned, goos string) bool {
+	if goos == "windows" {
+		// Windows system trees.  Both the candidate and the denied prefixes
+		// are folded to lowercase forward-slash form before comparison: NTFS
+		// is case-insensitive, and the path may arrive with either separator
+		// (the scanner now normalises payload paths to '/', but an operator
+		// config or flag may still use '\').
+		norm := func(s string) string { return strings.ToLower(strings.ReplaceAll(s, `\`, "/")) }
+		denied := []string{
+			`C:\Windows`,
+			`C:\Program Files`,
+			`C:\Program Files (x86)`,
+			`C:\ProgramData`,
+		}
+		lc := norm(cleaned)
+		for _, prefix := range denied {
+			lp := norm(prefix)
+			if lc == lp || strings.HasPrefix(lc, lp+"/") {
+				return true
+			}
+		}
+		return false
+	}
 	denied := []string{"/etc", "/root", "/home", "/proc", "/sys", "/var/log", "/dev", "/run"}
 	for _, prefix := range denied {
 		if cleaned == prefix || strings.HasPrefix(cleaned, prefix+"/") {

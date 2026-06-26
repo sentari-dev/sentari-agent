@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/common/logging"
+	"github.com/sentari-dev/sentari-agent/common/secureperm"
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
@@ -604,6 +605,12 @@ func SaveCertificatesAtomicAt(p CertFilePaths, caCert, deviceCert, deviceKey []b
 			cleanup()
 			return fmt.Errorf("create dir for %s: %w", files[i].path, err)
 		}
+		// Restrict the parent directory before writing into it.  On Windows
+		// this strips the inherited "Users" read grant and makes the ACE
+		// inheritable so the cert/key files below land with restricted
+		// permissions; on POSIX it re-asserts 0700.  Best-effort: the data
+		// dir is also hardened at startup, so a miss here is not fatal.
+		_ = secureperm.HardenDir(dir)
 		tmp := files[i].path + ".tmp"
 		files[i].tmpPath = tmp
 		if err := writeAndSync(tmp, files[i].data, files[i].mode); err != nil {
@@ -620,6 +627,9 @@ func SaveCertificatesAtomicAt(p CertFilePaths, caCert, deviceCert, deviceKey []b
 			return fmt.Errorf("rename %s: %w", files[i].path, err)
 		}
 		files[i].tmpPath = ""
+		// Explicitly restrict the private key and cert bundle on the final
+		// path too — defence in depth against a non-inheriting parent ACL.
+		_ = secureperm.HardenFile(files[i].path)
 	}
 
 	return nil

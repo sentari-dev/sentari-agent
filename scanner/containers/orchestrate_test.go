@@ -149,7 +149,7 @@ func TestScanAndAppend_CapEnforced(t *testing.T) {
 // TestTrimRootPrefix: small but load-bearing — records emitted
 // from the materialised root need their InstallPath / Environment
 // rewritten to hide the temp-dir prefix, otherwise the dashboard
-// shows ``/tmp/sentari-container-abc123/...`` paths and operators
+// shows “/tmp/sentari-container-abc123/...“ paths and operators
 // can't correlate to the real in-container location.
 func TestTrimRootPrefix(t *testing.T) {
 	cases := []struct{ in, root, want string }{
@@ -157,6 +157,13 @@ func TestTrimRootPrefix(t *testing.T) {
 		{"/tmp/sentari-container-xyz", "/tmp/sentari-container-xyz", "/"},
 		{"/elsewhere", "/tmp/sentari-container-xyz", "/elsewhere"},
 		{"", "/tmp/sentari-container-xyz", ""},
+		// Windows host: the sub-Runner's path is already forward-slash
+		// normalised (Runner.Run → NormalizePaths) while the materialised
+		// root is a raw backslash temp dir.  Both must be folded to '/' for
+		// the prefix to match, otherwise the temp dir leaks into the path.
+		{`C:/Users/r/AppData/Local/Temp/sc-xyz/usr/lib/python3.12/requests`, `C:\Users\r\AppData\Local\Temp\sc-xyz`, "/usr/lib/python3.12/requests"},
+		// Belt-and-braces: both sides still backslash.
+		{`C:\Temp\sc-xyz\usr\bin`, `C:\Temp\sc-xyz`, "/usr/bin"},
 	}
 	for _, c := range cases {
 		got := trimRootPrefix(c.in, c.root)

@@ -56,7 +56,6 @@ type scanJobResult struct {
 	errors   []ScanError
 }
 
-
 // Run performs a full scan of the device. It walks the filesystem from
 // ScanRoot up to MaxDepth, discovers Python environments, and dispatches
 // environment-specific parsers via a bounded worker pool.
@@ -89,6 +88,7 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 	}
 
 	if len(envs) == 0 {
+		NormalizePaths(result)
 		return result, nil
 	}
 
@@ -205,6 +205,10 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 		}
 	}
 
+	// Canonicalise every path field to forward slashes before the result
+	// leaves the scanner — Windows hosts otherwise ship backslash paths that
+	// fragment package-location grouping across a mixed-OS fleet.
+	NormalizePaths(result)
 	return result, nil
 }
 
@@ -624,14 +628,23 @@ func isVenvDangling(venvPath, pyvenvCfgPath string) string {
 // startup is still wiring config.
 var (
 	deviceIDDataDirMu sync.RWMutex
-	deviceIDDataDir   = defaultDeviceIDDataDir
+	deviceIDDataDir   = defaultDeviceIDDataDir()
 )
 
 // defaultDeviceIDDataDir is the fixed last-resort location for the
 // persisted device-id file when the cmd entrypoint has not configured
-// one.  Mirrors cmd/sentari-agent's defaultDataDir; kept as a constant
-// here (rather than imported) to avoid a scanner -> cmd dependency.
-const defaultDeviceIDDataDir = "/var/lib/sentari"
+// one.  Mirrors cmd/sentari-agent's platformDefaultDataDir (kept here
+// rather than imported to avoid a scanner -> cmd dependency): %ProgramData%
+// \Sentari on Windows, /var/lib/sentari on POSIX.
+func defaultDeviceIDDataDir() string {
+	if runtime.GOOS == "windows" {
+		if pd := os.Getenv("ProgramData"); pd != "" {
+			return filepath.Join(pd, "Sentari")
+		}
+		return `C:\ProgramData\Sentari`
+	}
+	return "/var/lib/sentari"
+}
 
 // SetDeviceIDDataDir configures where the persisted-UUID device-id file
 // is stored.  Additive: callers that never invoke it keep the previous
