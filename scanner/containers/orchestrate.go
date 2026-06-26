@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
@@ -28,7 +29,7 @@ const (
 //     the merged rootfs to a temp dir, runs a sub-Runner against
 //     it with the baseCfg's scanner settings (minus ScanRoot,
 //     which is overridden to the temp dir), and merges the
-//     resulting records back into ``result`` after decorating
+//     resulting records back into “result“ after decorating
 //     them with ContainerImageID / ContainerID / etc.
 //  4. Each target's sub-scan runs under a per-container context
 //     deadline so a single bad image can't stall the whole phase.
@@ -36,7 +37,7 @@ const (
 //     already used in Runner.scanEnvironment.
 //
 // When ctx is cancelled the loop exits early; partial results
-// already merged into ``result`` are preserved.  ScanErrors are
+// already merged into “result“ are preserved.  ScanErrors are
 // appended (never fatal) — the host scan is already done.
 //
 // Caller is responsible for setting baseCfg.ScanContainers; this
@@ -45,6 +46,10 @@ func ScanAndAppend(ctx context.Context, baseCfg scanner.Config, result *scanner.
 	if result == nil {
 		return
 	}
+	// Container records are appended after the host scan's own
+	// normalisation pass, so canonicalise their paths too (idempotent —
+	// the merged-rootfs walker already emits forward slashes).
+	defer scanner.NormalizePaths(result)
 	s := NewScanner(Config{})
 	targets, derrs := s.DiscoverTargets(ctx)
 	result.Errors = append(result.Errors, derrs...)
@@ -96,7 +101,7 @@ func ScanAndAppend(ctx context.Context, baseCfg scanner.Config, result *scanner.
 }
 
 // scanOneTarget runs the sub-scan for a single ContainerTarget,
-// safely appending its results to the parent ``result``.  Wrapped
+// safely appending its results to the parent “result“.  Wrapped
 // so a panic or timeout on one target never aborts the loop.
 func scanOneTarget(
 	ctx context.Context,
@@ -211,8 +216,17 @@ func trimRootPrefix(path, root string) string {
 	if path == "" || root == "" {
 		return path
 	}
-	if len(path) >= len(root) && path[:len(root)] == root {
-		trimmed := path[len(root):]
+	// Compare in forward-slash space.  The sub-Runner's paths are now
+	// separator-normalised (Runner.Run → NormalizePaths), while `root` is a
+	// raw host temp dir that still carries native separators — on Windows the
+	// two would otherwise never prefix-match and the temp dir would leak into
+	// the reported in-container path.  Folding both sides to `/` also yields
+	// the desired in-container path shape (`/usr/bin`), since a container's
+	// own filesystem is always `/`-rooted regardless of the extracting host.
+	p := strings.ReplaceAll(path, `\`, "/")
+	r := strings.ReplaceAll(root, `\`, "/")
+	if len(p) >= len(r) && p[:len(r)] == r {
+		trimmed := p[len(r):]
 		if len(trimmed) > 0 && trimmed[0] == '/' {
 			return trimmed
 		}

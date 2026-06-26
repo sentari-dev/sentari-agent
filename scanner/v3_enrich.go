@@ -472,8 +472,21 @@ func jdkCandidateRoots() []string {
 		)
 	}
 	if runtime.GOOS == "windows" {
-		if pf := os.Getenv("ProgramFiles"); pf != "" {
-			candidates = append(candidates, filepath.Join(pf, "Java"))
+		for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)"} {
+			pf := os.Getenv(env)
+			if pf == "" {
+				continue
+			}
+			// Each vendor drops one subdir per JDK version under these
+			// parents; the runtimeversions detector reads the `release`
+			// file inside each.
+			candidates = append(candidates,
+				filepath.Join(pf, "Java"),
+				filepath.Join(pf, "Eclipse Adoptium"),
+				filepath.Join(pf, "Zulu"),
+				filepath.Join(pf, "Microsoft"), // Microsoft Build of OpenJDK
+				filepath.Join(pf, "Amazon Corretto"),
+			)
 		}
 	}
 	return existingDirs(candidates)
@@ -537,6 +550,16 @@ func systemPythonCandidateRoots() []string {
 		if local := os.Getenv("LOCALAPPDATA"); local != "" {
 			candidates = append(candidates, filepath.Join(local, "Programs", "Python"))
 		}
+		// Chocolatey (and older all-users python.org installers) drop the
+		// interpreter at ``C:\Python<XY>\`` — a "Python"-prefixed dir the
+		// detector reads directly, same as the ProgramFiles siblings above.
+		if matches, _ := filepath.Glob(`C:\Python*`); len(matches) > 0 {
+			candidates = append(candidates, matches...)
+		}
+		// NOTE: Microsoft Store Python (install-from-Store on Win 11) lives
+		// under %LOCALAPPDATA%\Packages\PythonSoftwareFoundation.* behind an
+		// app-execution alias; its non-standard layout needs a dedicated
+		// detector branch and remains a known coverage gap.
 	}
 	return existingDirs(candidates)
 }
@@ -562,11 +585,58 @@ func nodeCandidateBinaries() []string {
 		}
 	}
 	if runtime.GOOS == "windows" {
-		if pf := os.Getenv("ProgramFiles"); pf != "" {
-			candidates = append(candidates, filepath.Join(pf, "nodejs", "node.exe"))
-		}
+		candidates = append(candidates, windowsNodeCandidateBinaries()...)
 	}
 	return existingFiles(candidates)
+}
+
+// windowsNodeCandidateBinaries enumerates the concrete node.exe paths the
+// common Windows install methods produce.  The MSI installer is the most
+// frequent, but version managers (nvm-windows, fnm), Scoop and Chocolatey
+// are widespread on developer machines and were previously invisible to the
+// runtime detector — leaving Windows Node EOL coverage silently incomplete.
+// existingFiles() filters the list down to what actually exists, so listing
+// speculative paths here is free on hosts that don't use a given manager.
+func windowsNodeCandidateBinaries() []string {
+	var out []string
+	// MSI / per-machine installs.
+	for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)"} {
+		if pf := os.Getenv(env); pf != "" {
+			out = append(out, filepath.Join(pf, "nodejs", "node.exe"))
+		}
+	}
+	// nvm-windows: %APPDATA%\nvm\vX.Y.Z\node.exe (one dir per installed version).
+	if appdata := os.Getenv("APPDATA"); appdata != "" {
+		if m, _ := filepath.Glob(filepath.Join(appdata, "nvm", "v*", "node.exe")); len(m) > 0 {
+			out = append(out, m...)
+		}
+	}
+	// fnm: %FNM_DIR% (or %LOCALAPPDATA%\fnm) / node-versions / <ver> / installation / node.exe.
+	fnmDir := os.Getenv("FNM_DIR")
+	if fnmDir == "" {
+		if local := os.Getenv("LOCALAPPDATA"); local != "" {
+			fnmDir = filepath.Join(local, "fnm")
+		}
+	}
+	if fnmDir != "" {
+		if m, _ := filepath.Glob(filepath.Join(fnmDir, "node-versions", "*", "installation", "node.exe")); len(m) > 0 {
+			out = append(out, m...)
+		}
+	}
+	// Scoop per-user app shims.
+	if home, err := os.UserHomeDir(); err == nil {
+		out = append(out,
+			filepath.Join(home, "scoop", "apps", "nodejs", "current", "node.exe"),
+			filepath.Join(home, "scoop", "apps", "nodejs-lts", "current", "node.exe"),
+		)
+	}
+	// Chocolatey shim directory.
+	choco := os.Getenv("ChocolateyInstall")
+	if choco == "" {
+		choco = `C:\ProgramData\chocolatey`
+	}
+	out = append(out, filepath.Join(choco, "bin", "node.exe"))
+	return out
 }
 
 // existingDirs filters paths down to those that exist and are dirs.

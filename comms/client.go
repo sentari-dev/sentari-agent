@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/common/logging"
+	"github.com/sentari-dev/sentari-agent/common/secureperm"
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
@@ -603,6 +604,12 @@ func SaveCertificatesAtomicAt(p CertFilePaths, caCert, deviceCert, deviceKey []b
 			cleanup()
 			return fmt.Errorf("create dir for %s: %w", files[i].path, err)
 		}
+		// Restrict the parent directory before writing into it.  On Windows
+		// this strips the inherited "Users" read grant and makes the ACE
+		// inheritable so the cert/key files below land with restricted
+		// permissions; on POSIX it re-asserts 0700.  Best-effort: the data
+		// dir is also hardened at startup, so a miss here is not fatal.
+		_ = secureperm.HardenDir(dir)
 		tmp := files[i].path + ".tmp"
 		files[i].tmpPath = tmp
 		if err := writeAndSync(tmp, files[i].data, files[i].mode); err != nil {
@@ -619,6 +626,9 @@ func SaveCertificatesAtomicAt(p CertFilePaths, caCert, deviceCert, deviceKey []b
 			return fmt.Errorf("rename %s: %w", files[i].path, err)
 		}
 		files[i].tmpPath = ""
+		// Explicitly restrict the private key and cert bundle on the final
+		// path too — defence in depth against a non-inheriting parent ACL.
+		_ = secureperm.HardenFile(files[i].path)
 	}
 
 	return nil
@@ -841,8 +851,8 @@ func LoadLicenseMapTrust(certDir string) (*LicenseMapTrust, error) {
 const installGateTrustFile = "install_gate_trust.json"
 
 // InstallGateTrust is the persisted shape of the trusted install-
-// gate signing key learned during /register.  ``KeyID`` identifies
-// which pinned entry envelopes set; ``PubKeyB64`` is the raw 32-byte
+// gate signing key learned during /register.  “KeyID“ identifies
+// which pinned entry envelopes set; “PubKeyB64“ is the raw 32-byte
 // ed25519 public key, base64-encoded.
 type InstallGateTrust struct {
 	KeyID     string `json:"key_id"`
@@ -850,7 +860,7 @@ type InstallGateTrust struct {
 }
 
 // SaveInstallGateTrust persists the install-gate pubkey returned by
-// /register to ``certDir/install_gate_trust.json``.  Empty fields are
+// /register to “certDir/install_gate_trust.json“.  Empty fields are
 // silently no-op'd so a server that has not provisioned an install-
 // gate key (e.g. older deployments) does not blank out an existing
 // trust file with zeroes.
@@ -905,8 +915,8 @@ func LoadInstallGateTrust(certDir string) (*InstallGateTrust, error) {
 const vulnMapTrustFile = "vuln_map_trust.json"
 
 // VulnMapTrust is the persisted shape of the trusted vuln-map signing
-// key learned during /register.  ``KeyID`` identifies which pinned
-// entry envelopes set; ``PubKeyB64`` is the raw 32-byte ed25519
+// key learned during /register.  “KeyID“ identifies which pinned
+// entry envelopes set; “PubKeyB64“ is the raw 32-byte ed25519
 // public key, base64-encoded.  Same wire shape as the license-map
 // and install-gate trust records — kept identical so a future
 // rotation/refresh tool can read all three by name.
@@ -916,7 +926,7 @@ type VulnMapTrust struct {
 }
 
 // SaveVulnMapTrust persists the vuln-map pubkey returned by /register
-// to ``certDir/vuln_map_trust.json``.  Empty fields are silently
+// to “certDir/vuln_map_trust.json“.  Empty fields are silently
 // no-op'd so a server that has not provisioned a vuln-map signing
 // key (older deployments, or air-gap operators who haven't imported
 // an NVD bundle yet) does not blank out an existing trust file
@@ -1090,11 +1100,11 @@ func (c *Client) FetchLicenseMap(ctx context.Context, currentVersion int) (*scan
 // the server.  The response is a signed envelope; this function reads
 // the raw bytes, verifies the ed25519 signature against the pinned
 // install-gate public key, and returns the verified
-// ``InstallGateMap`` plus the raw envelope bytes so the caller can
+// “InstallGateMap“ plus the raw envelope bytes so the caller can
 // persist them for offline re-use.
 //
-// Returns ``(nil, nil, nil)`` when the server's version is not newer
-// than ``currentVersion`` — no update needed, no error.  Mirrors the
+// Returns “(nil, nil, nil)“ when the server's version is not newer
+// than “currentVersion“ — no update needed, no error.  Mirrors the
 // license-map fetch contract.
 func (c *Client) FetchInstallGateMap(ctx context.Context, currentVersion int) (*scanner.InstallGateMap, []byte, error) {
 	resp, err := c.doRequest(ctx, "fetch_install_gate", func(ctx context.Context) (*http.Request, error) {
