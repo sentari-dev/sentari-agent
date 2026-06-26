@@ -129,8 +129,9 @@ func FuzzParseRPMHeader(f *testing.F) {
 	f.Add(append([]byte{0x8e, 0xad, 0xe8, 0x01}, make([]byte, 128)...))
 
 	f.Fuzz(func(t *testing.T, blob []byte) {
-		version, license := parseRPMHeader(blob)
+		version, license, source := parseRPMHeader(blob)
 		_ = version
 		_ = license
+		_ = source
 	})
 }

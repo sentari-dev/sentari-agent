@@ -71,11 +71,26 @@ const (
 
 // PackageRecord represents a single installed Python package discovered on
 // the device. Optional fields use omitempty to reduce JSON noise.
+// OsRelease is the subset of /etc/os-release the server needs to derive a
+// release-keyed distro CVE partition. ID is the distro id (debian, ubuntu,
+// rocky, rhel, …); VersionID is the release (12, 22.04, 9.3). Both may be
+// empty if the file was partially populated.
+type OsRelease struct {
+	ID        string `json:"id"`
+	VersionID string `json:"version_id"`
+}
+
 type PackageRecord struct {
-	Name               string `json:"name"`
-	Version            string `json:"version"`
-	InstallPath        string `json:"install_path,omitempty"`
-	EnvType            string `json:"env_type"`
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	InstallPath string `json:"install_path,omitempty"`
+	EnvType     string `json:"env_type"`
+	// SourcePackage is the source package name for OS packages (dpkg
+	// "Source:" / rpm SOURCERPM). Debian/RPM CVE advisories key on the
+	// source package (openssl) while the installed binary is libssl3, so
+	// the server matches on this hint. Emitted only for system_deb /
+	// system_rpm; omitted otherwise (apt/yum CVE-correctness slice).
+	SourcePackage      string `json:"source_package,omitempty"`
 	InterpreterVersion string `json:"interpreter_version,omitempty"`
 	InstallerUser      string `json:"installer_user,omitempty"`
 	InstallDate        string `json:"install_date,omitempty"`
@@ -115,6 +130,12 @@ type ScanResult struct {
 	Packages     []PackageRecord `json:"packages"`
 	Errors       []ScanError     `json:"errors"`
 	AgentVersion string          `json:"agent_version"`
+	// OsRelease carries the host's distro identity from /etc/os-release
+	// (apt/yum CVE-correctness slice). The server derives a release-keyed
+	// CVE partition (debian:12) for OS packages from it. Omitted on
+	// non-Linux hosts or when /etc/os-release is unreadable; the server
+	// then falls back to a release-less sentinel. Scan-only.
+	OsRelease *OsRelease `json:"os_release,omitempty"`
 	// ContainerTargets lists every container/image the container
 	// discoverer enumerated this scan cycle.  Informational: agents
 	// may have ScanContainers disabled yet still surface "which
@@ -207,4 +228,3 @@ type Config struct {
 	// 0 = use default (60s).
 	PerContainerTimeout time.Duration
 }
-
