@@ -161,13 +161,14 @@ func scanRpmViaDatabase() ([]PackageRecord, []ScanError) {
 		if err := rows.Scan(&name, &blob); err != nil {
 			continue
 		}
-		version, license := parseRPMHeader(blob)
+		version, license, source := parseRPMHeader(blob)
 		if version == "" {
 			version = "unknown"
 		}
 		pkg := PackageRecord{
-			Name:    name,
-			Version: version,
+			Name:          name,
+			Version:       version,
+			SourcePackage: source,
 		}
 		if license != "" {
 			pkg.LicenseRaw = license

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sentari-dev/sentari-agent/scanner/osrelease"
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
@@ -74,6 +75,13 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 		Packages:     make([]PackageRecord, 0, 256),
 		Errors:       make([]ScanError, 0),
 		AgentVersion: Version,
+	}
+
+	// Distro identity for release-keyed CVE correlation of OS packages
+	// (apt/yum slice). Best-effort: absent on non-Linux / unreadable file,
+	// in which case the server falls back to a release-less sentinel.
+	if osr, ok := osrelease.Detect(); ok {
+		result.OsRelease = &OsRelease{ID: osr.ID, VersionID: osr.VersionID}
 	}
 
 	// Phase 1: discover all Python environments on the filesystem.

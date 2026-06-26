@@ -193,3 +193,30 @@ unconditionally.
 - New agents talking to old servers (rollback scenario) → server logs
   warnings about unknown fields but accepts the payload (Pydantic
   models use `extra='ignore'`).
+
+## Base-payload additions (apt/yum CVE-correctness slice)
+
+Two **optional** fields were added to the base scan payload (the
+device + `packages[]` shape defined by the Go structs `scanner/types.go`
+and the Pydantic models `server/api/v1/agent.py` — there is no JSON
+Schema file for the base payload; this v3 schema covers only the five
+additive arrays above). Both are additive and backward-compatible, so
+the payload version stays **v3** (header `X-Sentari-Payload-Version: 3`).
+
+- **`os_release`** — top-level object `{"id": string, "version_id": string}`,
+  from the host's `/etc/os-release`. The server derives a release-keyed
+  distro CVE partition (`debian:12`, `rocky:9`) for `system_deb` /
+  `system_rpm` packages from it. **Omitted** on non-Linux hosts or when
+  `/etc/os-release` is unreadable; a missing key, `null`, or empty
+  `version_id` are all treated identically as "release unknown", and the
+  server falls back to a release-less sentinel partition (no false PyPI
+  correlation). Scan-only — NOT part of the registration contract.
+- **`source_package`** — optional string on each `packages[]` record
+  (`system_deb` / `system_rpm` only). dpkg `Source:` / rpm `SOURCERPM`
+  source name, so the server can match a binary like `libssl3` against a
+  source-keyed advisory (`openssl`). Absent, `null`, or `""` all mean
+  "no source".
+
+Both degrade gracefully both directions: an old agent omits them
+(server → sentinel partition); a new agent talking to an old server has
+them dropped by Pydantic `extra='ignore'`.

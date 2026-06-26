@@ -129,6 +129,15 @@ func scanDebianViaStatusFile() ([]PackageRecord, []ScanError) {
 			currentPkg.Name = strings.TrimSpace(strings.TrimPrefix(line, "Package: "))
 		} else if strings.HasPrefix(line, "Version: ") {
 			currentPkg.Version = strings.TrimSpace(strings.TrimPrefix(line, "Version: "))
+		} else if strings.HasPrefix(line, "Source: ") {
+			// dpkg "Source:" is "<name>" or "<name> (<version>)"; keep just
+			// the source package name so the server can match a binary like
+			// libssl3 against a source-keyed advisory (openssl).
+			src := strings.TrimSpace(strings.TrimPrefix(line, "Source: "))
+			if idx := strings.IndexByte(src, '('); idx >= 0 {
+				src = strings.TrimSpace(src[:idx])
+			}
+			currentPkg.SourcePackage = src
 		}
 	}
 
