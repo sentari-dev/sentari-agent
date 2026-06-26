@@ -70,6 +70,20 @@ func TestSnapshotInRelease_emitsSignal(t *testing.T) {
 	if s.Ecosystem != "maven" {
 		t.Errorf("wrong ecosystem: %q", s.Ecosystem)
 	}
+	// Assert Raw fields.
+	if s.Raw == nil {
+		t.Fatal("Raw map is nil")
+	}
+	if pomPath, ok := s.Raw["pom_path"].(string); !ok || pomPath == "" {
+		t.Errorf("Raw[pom_path] missing or empty: %v", s.Raw["pom_path"])
+	}
+	snapshotDep, ok := s.Raw["snapshot_dep"].(string)
+	if !ok || snapshotDep == "" {
+		t.Errorf("Raw[snapshot_dep] missing or empty: %v", s.Raw["snapshot_dep"])
+	}
+	if snapshotDep != "2.0-SNAPSHOT" {
+		t.Errorf("Raw[snapshot_dep] = %q, want 2.0-SNAPSHOT", snapshotDep)
+	}
 }
 
 // TestSnapshotInRelease_allReleaseNoSignal verifies that a non-SNAPSHOT

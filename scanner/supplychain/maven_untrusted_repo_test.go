@@ -55,6 +55,20 @@ func TestUntrustedRepo_emitsSignal(t *testing.T) {
 	if s.Ecosystem != "maven" {
 		t.Errorf("wrong ecosystem: %q", s.Ecosystem)
 	}
+	// Assert Raw fields.
+	if s.Raw == nil {
+		t.Fatal("Raw map is nil")
+	}
+	if repoFile, ok := s.Raw["repo_file"].(string); !ok || repoFile == "" {
+		t.Errorf("Raw[repo_file] missing or empty: %v", s.Raw["repo_file"])
+	}
+	untrustedURL, ok := s.Raw["untrusted_url"].(string)
+	if !ok || untrustedURL == "" {
+		t.Errorf("Raw[untrusted_url] missing or empty: %v", s.Raw["untrusted_url"])
+	}
+	if untrustedURL != "https://evil.example/maven" {
+		t.Errorf("Raw[untrusted_url] = %q, want https://evil.example/maven", untrustedURL)
+	}
 }
 
 // TestUntrustedRepo_centralTrusted verifies that a _remote.repositories

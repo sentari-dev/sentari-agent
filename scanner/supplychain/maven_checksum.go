@@ -62,16 +62,11 @@ func DetectChecksumMismatches(m2Dir string) ([]deptree.SupplyChainSignal, error)
 		}
 
 		sha1Path := path + ".sha1"
-		// If there is no .sha1 sidecar we cannot verify — skip without signal.
-		if _, statErr := os.Stat(sha1Path); statErr != nil {
-			return nil
-		}
-
-		// Read the expected checksum from the sidecar file.
+		// Attempt to read the .sha1 sidecar directly via safeio.
+		// Missing sidecar and unreadable cases both collapse to skip — no signal.
 		sha1Bytes, readErr := safeio.ReadFile(sha1Path, maxSHA1FileBytes)
 		if readErr != nil {
-			// Unreadable sidecar — skip; treat as "no reference".
-			return nil
+			return nil // no sidecar, or unreadable — skip
 		}
 		expected := strings.TrimSpace(strings.ToLower(string(sha1Bytes)))
 

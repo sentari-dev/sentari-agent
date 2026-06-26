@@ -46,6 +46,27 @@ func TestChecksumMismatch_mismatchEmitsSignal(t *testing.T) {
 	if s.Ecosystem != "maven" {
 		t.Errorf("wrong ecosystem: %q", s.Ecosystem)
 	}
+	// Assert Raw fields.
+	if s.Raw == nil {
+		t.Fatal("Raw map is nil")
+	}
+	if jarPath, ok := s.Raw["jar_path"].(string); !ok || jarPath == "" {
+		t.Errorf("Raw[jar_path] missing or empty: %v", s.Raw["jar_path"])
+	}
+	expectedRaw, ok := s.Raw["expected"].(string)
+	if !ok || expectedRaw == "" {
+		t.Errorf("Raw[expected] missing or empty: %v", s.Raw["expected"])
+	}
+	if expectedRaw != "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" {
+		t.Errorf("Raw[expected] = %q, want deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", expectedRaw)
+	}
+	computedRaw, ok := s.Raw["computed"].(string)
+	if !ok || computedRaw == "" {
+		t.Errorf("Raw[computed] missing or empty: %v", s.Raw["computed"])
+	}
+	if computedRaw == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" {
+		t.Errorf("Raw[computed] should differ from the wrong sha1 we wrote")
+	}
 }
 
 // TestChecksumMismatch_matchingChecksumNoSignal verifies that a jar whose

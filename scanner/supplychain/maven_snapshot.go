@@ -87,8 +87,7 @@ func DetectSnapshotInRelease(m2Dir string) ([]deptree.SupplyChainSignal, error) 
 
 		// Check if any dependency version ends in -SNAPSHOT.
 		for _, dep := range pom.Dependencies.Dep {
-			if strings.HasSuffix(dep.Version, "-SNAPSHOT") ||
-				strings.HasSuffix(dep.Version, "SNAPSHOT") {
+			if strings.HasSuffix(dep.Version, "-SNAPSHOT") {
 				signals = append(signals, deptree.SupplyChainSignal{
 					PackageName:    name,
 					PackageVersion: version,
