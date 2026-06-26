@@ -105,6 +105,112 @@ func TestPropertyInterp(t *testing.T) {
 	}
 }
 
+// TestTransitivePropertyInterp verifies that transitive dependencies (deps of
+// deps, reached via the ~/.m2 recursion) have their ${...} placeholders
+// resolved against the FULL property map of the transitive POM — not just
+// ${project.version}.
+//
+// Graph under test:
+//
+//	root (1.0) → direct-dep (2.0) → transitive-lib (${lib.version})
+//
+// transitive-lib's POM declares <properties><lib.version>3.5</lib.version></properties>
+// so the resolved version must be 3.5, not the verbatim placeholder.
+func TestTransitivePropertyInterp(t *testing.T) {
+	dir := t.TempDir()
+	m2 := filepath.Join(dir, ".m2", "repository")
+
+	// ── direct-dep POM (com.example:direct-dep:2.0) ──────────────────────
+	// depends on com.example:transitive-lib with version ${lib.version},
+	// resolved from its own <properties>.
+	directDepDir := filepath.Join(m2, "com", "example", "direct-dep", "2.0")
+	if err := os.MkdirAll(directDepDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	directDepPom := `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example</groupId>
+    <artifactId>direct-dep</artifactId>
+    <version>2.0</version>
+    <properties>
+        <lib.version>3.5</lib.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>transitive-lib</artifactId>
+            <version>${lib.version}</version>
+        </dependency>
+    </dependencies>
+</project>`
+	if err := os.WriteFile(filepath.Join(directDepDir, "direct-dep-2.0.pom"), []byte(directDepPom), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// ── transitive-lib POM (com.example:transitive-lib:3.5) ──────────────
+	transitiveLibDir := filepath.Join(m2, "com", "example", "transitive-lib", "3.5")
+	if err := os.MkdirAll(transitiveLibDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	transitiveLibPom := `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example</groupId>
+    <artifactId>transitive-lib</artifactId>
+    <version>3.5</version>
+</project>`
+	if err := os.WriteFile(filepath.Join(transitiveLibDir, "transitive-lib-3.5.pom"), []byte(transitiveLibPom), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// ── root POM ──────────────────────────────────────────────────────────
+	rootDir := filepath.Join(dir, "root")
+	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootPom := `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example</groupId>
+    <artifactId>root</artifactId>
+    <version>1.0</version>
+    <dependencies>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>direct-dep</artifactId>
+            <version>2.0</version>
+        </dependency>
+    </dependencies>
+</project>`
+	if err := os.WriteFile(filepath.Join(rootDir, "pom.xml"), []byte(rootPom), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	edges, err := ParseMavenPom(filepath.Join(rootDir, "pom.xml"), m2)
+	if err != nil {
+		t.Fatalf("ParseMavenPom failed: %v", err)
+	}
+
+	// Build lookup by child name.
+	byChild := map[string]DepEdge{}
+	for _, e := range edges {
+		byChild[e.ChildName] = e
+	}
+
+	// The transitive dep must resolve to 3.5 — NOT "${lib.version}".
+	transEdge, ok := byChild["com.example:transitive-lib"]
+	if !ok {
+		t.Fatalf("expected transitive edge for com.example:transitive-lib; all edges=%+v", edges)
+	}
+	if transEdge.ChildVersion != "3.5" {
+		t.Errorf("transitive-lib version=%q; want 3.5 (resolved from ${lib.version} in direct-dep's <properties>)", transEdge.ChildVersion)
+	}
+	if !transEdge.Resolved {
+		t.Errorf("transitive-lib edge should be Resolved=true; got false (version=%q)", transEdge.ChildVersion)
+	}
+}
+
 // TestPropertyInterp_projectVersion verifies that ${project.version} still
 // resolves to the root POM's own version (regression guard for the
 // pre-existing behaviour).

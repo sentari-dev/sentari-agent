@@ -676,11 +676,19 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 		if err := xml.Unmarshal(childRaw, &child); err != nil {
 			continue
 		}
+		// Build the child's effective property map: parent-chain props
+		// (closest ancestor wins) then child's own <properties> on top,
+		// mirroring the logic used by the top-level ParseMavenPom path.
+		// This ensures transitive deps that use ${some.prop} resolve
+		// against the full set of properties the child POM declares or
+		// inherits — not just the literal ${project.version} alias.
+		childInheritedProps, _ := resolveParentChain(child, m2Dir)
+		childEffectiveProps := childInheritedProps
+		for k, val := range child.Properties.entries {
+			childEffectiveProps[k] = val
+		}
 		childInterpolate := func(v string) string {
-			if v == "${project.version}" {
-				return version
-			}
-			return v
+			return interpolateProps(v, version, childEffectiveProps)
 		}
 		for _, gd := range child.Dependencies {
 			// Skip test/provided scope by default — these aren't part of
