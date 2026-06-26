@@ -99,7 +99,9 @@ agent payload.
 
 Signal-type enum (agent subset):
 `postinstall_script`, `preinstall_script`, `install_script`,
-`unsigned`, `provenance_attested`, `yanked`.
+`unsigned`, `provenance_attested`, `yanked`,
+`maven_checksum_mismatch`, `maven_snapshot_in_release`,
+`maven_untrusted_repo`.
 
 The JSON Schema enum additionally includes server-only values
 (`deprecated`, `maintainer_changed`, `typosquat_suspect`, and the
@@ -110,6 +112,12 @@ same table. The GHSA Malware database is multi-ecosystem, so the
 enrichment path emits `<ecosystem>_malware_advisory` to keep the
 ecosystem label correct rather than mislabelling every hit as `npm_*`.
 Agents MUST NOT emit any of these.
+
+The three Maven-specific agent signals (`maven_checksum_mismatch`,
+`maven_snapshot_in_release`, `maven_untrusted_repo`) are emitted by
+the agent's JVM scanner when it detects a checksum verification failure,
+SNAPSHOT artifacts in a release environment, or packages fetched from
+non-central / untrusted repositories. They are NOT server-only.
 
 `source` is a free-form string. Agent-emitted signals should set it
 to the scanner module name (e.g. `npm-postinstall-scanner`,

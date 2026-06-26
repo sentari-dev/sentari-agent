@@ -337,6 +337,27 @@ func enrichWithV3(result *ScanResult, roots []string) {
 							result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
 						}
 					})
+					safeCall("supplychain.DetectChecksumMismatches", func() {
+						if signals, err := supplychain.DetectChecksumMismatches(m2); err != nil {
+							slog.Warn("v3 maven checksum mismatch detection failed", "m2", m2, "err", err.Error())
+						} else {
+							result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
+						}
+					})
+					safeCall("supplychain.DetectSnapshotInRelease", func() {
+						if signals, err := supplychain.DetectSnapshotInRelease(m2); err != nil {
+							slog.Warn("v3 maven snapshot-in-release detection failed", "m2", m2, "err", err.Error())
+						} else {
+							result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
+						}
+					})
+					safeCall("supplychain.DetectUntrustedRepos", func() {
+						if signals, err := supplychain.DetectUntrustedRepos(m2); err != nil {
+							slog.Warn("v3 maven untrusted-repo detection failed", "m2", m2, "err", err.Error())
+						} else {
+							result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
+						}
+					})
 					safeCall("licenses.ExtractMaven", func() {
 						if evidence, err := licenses.ExtractMaven(m2); err != nil {
 							slog.Warn("v3 maven license extraction failed", "m2", m2, "err", err.Error())
