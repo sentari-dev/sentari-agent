@@ -2,18 +2,18 @@
 //
 // Best-effort 90% dep-tree resolver for Maven projects. Reads pom.xml
 // for the project's directs, then walks ~/.m2/repository to recurse
-// transitively. Out-of-scope (Phase 4):
-//   - BOM imports via <dependencyManagement> with <scope>import</scope>;
-//     these are emitted with Resolved=false.
-//   - <parent> POM resolution and property interpolation beyond simple
-//     ${project.version} → root version.
-//   - Profiles, activation conditions.
-//   - Version range resolution.
+// transitively. Out-of-scope:
+//   - non-activeByDefault profile activation (OS/JDK/property conditions)
+//   - a full Maven version-range solver (range strings kept verbatim when
+//     no matching artifact found on disk)
+//   - online POM fetch (server side completes unresolved refs via
+//     maven_pom_metadata cache)
 package deptree
 
 import (
 	"encoding/xml"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -32,6 +32,11 @@ const maxPomBytes = 1 << 20 // 1 MiB
 // still terminating on malice.
 const maxReactorDepth = 8
 
+// maxParentChainDepth bounds <parent> chain traversal.  Legitimate Maven
+// parent hierarchies rarely exceed 3 levels; a depth cap of 8 matches
+// the reactor cap and guards against circular parent declarations.
+const maxParentChainDepth = 8
+
 // pendingDep is a BFS queue item shared between ParseMavenPom (the BFS
 // driver) and collectReactorModules (the <modules> walker that feeds
 // the queue with each child module's <dependencies>).
@@ -46,6 +51,299 @@ type pendingDep struct {
 	parentPath        []string
 	dep               mavenDep
 	fromReactorModule bool
+}
+
+// isUnresolvedPlaceholder reports whether v still contains a ${...}
+// expression that was not resolved by interpolateProps — indicating that
+// the edge's version is not locally known and the edge should be flagged
+// Resolved=false.
+func isUnresolvedPlaceholder(v string) bool {
+	return strings.Contains(v, "${") && strings.Contains(v, "}")
+}
+
+// isVersionRange reports whether v is a Maven version range expression.
+// Maven ranges start with '[' (inclusive) or '(' (exclusive).
+func isVersionRange(v string) bool {
+	return strings.HasPrefix(v, "[") || strings.HasPrefix(v, "(")
+}
+
+// resolveVersionRange attempts to resolve a Maven version range string to a
+// concrete installed version found in the local ~/.m2 cache.
+//
+// Strategy:
+//  1. Glob the GA directory (m2Dir/groupPath/artifactId) for installed
+//     version sub-directories.
+//  2. Filter to versions that satisfy the range (simple numeric comparison
+//     for the common cases; the full Maven range solver is out of scope).
+//  3. Return the highest satisfying version if found, empty string otherwise.
+//
+// Out-of-scope: version qualifiers (alpha/beta/RC), multi-range expressions
+// ([1.0,1.5),(2.0,)), and version ranges in managed/BOM entries that come
+// from a parent chain. These edge cases fall back to the verbatim range
+// (Resolved=false) and are completed server-side.
+func resolveVersionRange(m2Dir, groupId, artifactId, rangeStr string) string {
+	// Parse the range to extract bounds.
+	// Supported: [low,high)  [low,high]  (low,high)  [exact]
+	s := strings.TrimSpace(rangeStr)
+	if s == "" {
+		return ""
+	}
+
+	// Determine inclusivity of bounds.
+	lowInclusive := s[0] == '['
+	highInclusive := len(s) > 0 && s[len(s)-1] == ']'
+	inner := s[1 : len(s)-1]
+
+	var low, high string
+	if idx := strings.Index(inner, ","); idx >= 0 {
+		low = strings.TrimSpace(inner[:idx])
+		high = strings.TrimSpace(inner[idx+1:])
+	} else {
+		// [exact] form — exact version required.
+		exact := strings.TrimSpace(inner)
+		if exact == "" {
+			return ""
+		}
+		// Return exact if installed.
+		gaDir := filepath.Join(m2Dir, strings.ReplaceAll(groupId, ".", string(filepath.Separator)), artifactId, exact)
+		pomFile := filepath.Join(gaDir, fmt.Sprintf("%s-%s.pom", artifactId, exact))
+		if _, err := safeio.ReadFile(pomFile, 1); err == nil {
+			return exact
+		}
+		// Fall back to directory presence (no .pom yet fully downloaded).
+		// Use Lstat so a symlink version-directory does not masquerade as
+		// an installed artifact.
+		if info, err := os.Lstat(gaDir); err == nil && info.IsDir() {
+			return exact
+		}
+		return ""
+	}
+
+	// Glob installed versions.  Use safeio.ReadDir so a symlink directory
+	// in ~/.m2 cannot redirect enumeration to an arbitrary path.
+	gaDir := filepath.Join(m2Dir, strings.ReplaceAll(groupId, ".", string(filepath.Separator)), artifactId)
+	entries, err := safeio.ReadDir(gaDir)
+	if err != nil {
+		return ""
+	}
+
+	var candidates []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		v := e.Name()
+		if mavenVersionInRange(v, low, high, lowInclusive, highInclusive) {
+			candidates = append(candidates, v)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	// Pick highest satisfying version.
+	sort.Slice(candidates, func(i, j int) bool {
+		return mavenVersionLess(candidates[i], candidates[j])
+	})
+	return candidates[len(candidates)-1]
+}
+
+// mavenVersionInRange reports whether version v satisfies the range
+// [low,high) / [low,high] / (low,high) / (low,high].
+// Uses simple numeric-segment comparison — sufficient for the installed-
+// artifact lookup use case (we're not implementing a full Maven range solver).
+func mavenVersionInRange(v, low, high string, lowInc, highInc bool) bool {
+	if low != "" {
+		cmpLow := mavenVersionCompare(v, low)
+		if lowInc && cmpLow < 0 {
+			return false
+		}
+		if !lowInc && cmpLow <= 0 {
+			return false
+		}
+	}
+	if high != "" {
+		cmpHigh := mavenVersionCompare(v, high)
+		if highInc && cmpHigh > 0 {
+			return false
+		}
+		if !highInc && cmpHigh >= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// mavenVersionLess reports whether a < b using numeric segment comparison.
+func mavenVersionLess(a, b string) bool {
+	return mavenVersionCompare(a, b) < 0
+}
+
+// mavenVersionCompare compares two version strings numerically by dot-separated
+// segments.  Returns negative/zero/positive like strings.Compare.
+// This handles the 99% case (pure numeric versions like 1.4.0, 6.1.4, 3.2.0).
+// Qualifiers (alpha/beta/RC) and mixed strings fall back to lexicographic order.
+func mavenVersionCompare(a, b string) int {
+	partsA := strings.Split(strings.SplitN(a, "-", 2)[0], ".")
+	partsB := strings.Split(strings.SplitN(b, "-", 2)[0], ".")
+	n := len(partsA)
+	if len(partsB) > n {
+		n = len(partsB)
+	}
+	for i := 0; i < n; i++ {
+		var pa, pb string
+		if i < len(partsA) {
+			pa = partsA[i]
+		}
+		if i < len(partsB) {
+			pb = partsB[i]
+		}
+		// Try numeric comparison first.
+		var ia, ib int
+		na := parseUint(pa)
+		nb := parseUint(pb)
+		if na >= 0 && nb >= 0 {
+			ia, ib = na, nb
+		} else {
+			// Fall back to lexicographic for qualifier segments.
+			c := strings.Compare(pa, pb)
+			if c != 0 {
+				return c
+			}
+			continue
+		}
+		if ia != ib {
+			if ia < ib {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// parseUint parses a non-negative integer string; returns -1 on failure.
+func parseUint(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return -1
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+// interpolateProps resolves ${...} placeholders in v against props and
+// ${project.version} → projectVersion.  Iterates up to 10 times to handle
+// chained substitutions (e.g., ${x} where x=${y} where y=1.0). If a
+// placeholder remains after the iteration cap it is returned verbatim — the
+// caller is responsible for flagging the edge as unresolved.
+func interpolateProps(v, projectVersion string, props map[string]string) string {
+	const maxIter = 10
+	for i := 0; i < maxIter; i++ {
+		start := strings.Index(v, "${")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(v[start:], "}")
+		if end == -1 {
+			break
+		}
+		key := v[start+2 : start+end]
+		var replacement string
+		if key == "project.version" || key == "version" {
+			replacement = projectVersion
+		} else if val, ok := props[key]; ok {
+			replacement = val
+		} else {
+			// Unknown placeholder — return verbatim to signal unresolved.
+			break
+		}
+		v = v[:start] + replacement + v[start+end+1:]
+	}
+	return v
+}
+
+// resolveParentChain walks the <parent> chain starting from pom up to
+// maxParentChainDepth levels.  It returns merged property and managed-version
+// maps: child values take precedence over parent values (child overrides
+// parent), and the parent chain is applied from closest to furthest ancestor.
+//
+// Parent POMs are resolved from ~/.m2 via their GAV coordinate.
+// If a parent POM is absent from the local cache the chain terminates
+// at that point — the agent never fetches from the network.
+func resolveParentChain(pom mavenPom, m2Dir string) (props map[string]string, managed map[mavenGA]string) {
+	props = map[string]string{}
+	managed = map[mavenGA]string{}
+
+	// Walk the parent chain up to maxParentChainDepth.  We accumulate
+	// ancestor data into temporary slices (closest-first) then merge in
+	// reverse (furthest-first) so child overrides parent.
+	type ancestorData struct {
+		props   map[string]string
+		managed map[mavenGA]string
+	}
+	var ancestors []ancestorData
+
+	cur := pom
+	seen := map[string]bool{}
+	for depth := 0; depth < maxParentChainDepth; depth++ {
+		p := cur.Parent
+		if p.GroupID == "" || p.ArtifactID == "" || p.Version == "" {
+			break
+		}
+		coord := p.GroupID + ":" + p.ArtifactID + ":" + p.Version
+		if seen[coord] {
+			break // cycle guard
+		}
+		seen[coord] = true
+
+		pomPath := mavenPomLocation(m2Dir, p.GroupID, p.ArtifactID, p.Version)
+		raw, err := safeio.ReadFile(pomPath, maxPomBytes)
+		if err != nil {
+			// Parent not in local cache — chain terminates here.
+			break
+		}
+		var parentPom mavenPom
+		if err := xml.Unmarshal(raw, &parentPom); err != nil {
+			break
+		}
+
+		// Collect this ancestor's properties.
+		aProps := map[string]string{}
+		for k, v := range parentPom.Properties.entries {
+			aProps[k] = v
+		}
+		// Collect this ancestor's managed versions (non-import only).
+		aManaged := map[mavenGA]string{}
+		for _, d := range parentPom.DependencyManagement.Dependencies {
+			if strings.EqualFold(d.Scope, "import") {
+				continue
+			}
+			ga := mavenGA{groupId: d.GroupID, artifactId: d.ArtifactID}
+			if d.Version != "" {
+				aManaged[ga] = d.Version
+			}
+		}
+		ancestors = append(ancestors, ancestorData{props: aProps, managed: aManaged})
+
+		// Continue up the chain.
+		cur = parentPom
+	}
+
+	// Merge furthest-first so closest ancestor wins.
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		for k, v := range ancestors[i].props {
+			props[k] = v
+		}
+		for ga, v := range ancestors[i].managed {
+			managed[ga] = v
+		}
+	}
+	return props, managed
 }
 
 // ParseMavenPom reads a pom.xml + recurses through ~/.m2 to emit dep
@@ -74,12 +372,23 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 	rootGA := mavenGA{groupId: root.GroupID, artifactId: root.ArtifactID}
 	rootVersion := root.Version
 
-	// Interpolate ${project.version} → rootVersion in declared deps.
+	// Resolve the <parent> chain to inherit properties and managed versions.
+	// Child overrides parent: we start with inherited values then apply the
+	// child's own declarations on top.
+	inheritedProps, inheritedManaged := resolveParentChain(root, m2Dir)
+
+	// Merge root's own <properties> on top of inherited ones.
+	// Build the effective property map: inherited (parent chain) then child.
+	effectiveProps := inheritedProps
+	for k, v := range root.Properties.entries {
+		effectiveProps[k] = v
+	}
+
+	// interpolate resolves ${...} placeholders against the effective property
+	// map plus ${project.version} → rootVersion.  Unresolvable placeholders
+	// are returned verbatim (handled by the caller as unresolved).
 	interpolate := func(v string) string {
-		if v == "${project.version}" {
-			return rootVersion
-		}
-		return v
+		return interpolateProps(v, rootVersion, effectiveProps)
 	}
 
 	// Managed versions from <dependencyManagement> (excluding BOM
@@ -87,7 +396,62 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 	// A <dependencies> entry that omits <version> inherits its version
 	// from here — without this lookup such managed-version deps resolve
 	// to an empty version and get silently dropped by the BFS.
+	//
+	// Start from inherited managed versions (parent chain), then overlay
+	// child's own declarations (child wins on conflict).
 	managedVersions := map[mavenGA]string{}
+	for ga, v := range inheritedManaged {
+		if iv := interpolate(v); iv != "" {
+			managedVersions[ga] = iv
+		}
+	}
+	// Flatten import-scoped BOM entries from local cache.
+	// BOM imports have lower priority than explicit managedVersions from the
+	// root POM (Maven spec: direct declarations override BOM declarations).
+	// We populate BOM-managed versions first so explicit entries override below.
+	for _, d := range root.DependencyManagement.Dependencies {
+		if !strings.EqualFold(d.Scope, "import") {
+			continue
+		}
+		bomVersion := interpolate(d.Version)
+		if bomVersion == "" {
+			continue
+		}
+		bomPomPath := mavenPomLocation(m2Dir, d.GroupID, d.ArtifactID, bomVersion)
+		bomRaw, err := safeio.ReadFile(bomPomPath, maxPomBytes)
+		if err != nil {
+			// BOM not in local cache — leave any deps that rely on it unresolved.
+			continue
+		}
+		var bomPom mavenPom
+		if err := xml.Unmarshal(bomRaw, &bomPom); err != nil {
+			continue
+		}
+		// Resolve BOM's own properties so its managed version strings
+		// can reference ${...} (e.g., Spring BOM uses ${spring-framework.version}).
+		bomProps := map[string]string{}
+		for k, v := range bomPom.Properties.entries {
+			bomProps[k] = v
+		}
+		bomVersion2 := bomPom.Version
+		bomInterpolate := func(v string) string {
+			return interpolateProps(v, bomVersion2, bomProps)
+		}
+		for _, bd := range bomPom.DependencyManagement.Dependencies {
+			if strings.EqualFold(bd.Scope, "import") {
+				// Nested BOM import — out of scope for this pass; leave unresolved.
+				continue
+			}
+			ga := mavenGA{groupId: bd.GroupID, artifactId: bd.ArtifactID}
+			// Only set if not already managed (BOM entries are lower priority).
+			if _, alreadySet := managedVersions[ga]; !alreadySet {
+				if v := bomInterpolate(bd.Version); v != "" {
+					managedVersions[ga] = v
+				}
+			}
+		}
+	}
+	// Apply root POM's explicit managedVersions last so they override BOM entries.
 	for _, d := range root.DependencyManagement.Dependencies {
 		if strings.EqualFold(d.Scope, "import") {
 			continue
@@ -136,6 +500,34 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 	// root identifier.
 	rootCoord := mavenCoord(rootGA)
 
+	// Merge contributions from activeByDefault profiles.
+	// Only <activeByDefault>true</activeByDefault> profiles are honoured —
+	// OS/JDK/property activation conditions are out of scope for the local
+	// resolution pass; the server can apply them with full context.
+	for _, profile := range root.Profiles {
+		if !strings.EqualFold(strings.TrimSpace(profile.Activation.ActiveByDefault), "true") {
+			continue
+		}
+		// Merge profile <properties> into effectiveProps (profile wins over root
+		// for the same key — consistent with Maven spec's profile override rules).
+		for k, v := range profile.Properties.entries {
+			effectiveProps[k] = v
+		}
+		// Merge profile <dependencyManagement> non-import entries into
+		// managedVersions, but only if not already set (root explicit wins).
+		for _, d := range profile.DependencyManagement.Dependencies {
+			if strings.EqualFold(d.Scope, "import") {
+				continue
+			}
+			ga := mavenGA{groupId: d.GroupID, artifactId: d.ArtifactID}
+			if _, alreadySet := managedVersions[ga]; !alreadySet {
+				if v := interpolate(d.Version); v != "" {
+					managedVersions[ga] = v
+				}
+			}
+		}
+	}
+
 	// Direct deps from <dependencies> block (NOT <dependencyManagement>).
 	queue := []pendingDep{}
 	for _, d := range root.Dependencies {
@@ -145,6 +537,21 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 			parentPath: []string{rootCoord},
 			dep:        d,
 		})
+	}
+
+	// Add dependencies from activeByDefault profiles to the BFS queue.
+	for _, profile := range root.Profiles {
+		if !strings.EqualFold(strings.TrimSpace(profile.Activation.ActiveByDefault), "true") {
+			continue
+		}
+		for _, d := range profile.Dependencies {
+			queue = append(queue, pendingDep{
+				parent:     rootGA,
+				parentVer:  rootVersion,
+				parentPath: []string{rootCoord},
+				dep:        d,
+			})
+		}
 	}
 
 	// Walk reactor child modules (depth-bounded).  Each child's
@@ -186,6 +593,18 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 				version = mv
 			}
 		}
+		// Attempt to resolve version-range syntax ([1.0,2.0), [1.5], etc.)
+		// against artifacts already present in the local cache.  If a
+		// satisfying version is found, use it; otherwise keep the range
+		// string verbatim and mark the edge unresolved.
+		if isVersionRange(version) {
+			if resolved := resolveVersionRange(m2Dir, ga.groupId, ga.artifactId, version); resolved != "" {
+				version = resolved
+			}
+			// If still a range (resolveVersionRange returned ""), emit verbatim
+			// with Resolved=false — the edgeResolved flag is computed from the
+			// final (post-mediation) version via isVersionRange/isUnresolvedPlaceholder.
+		}
 
 		// Nearest-wins version mediation: the FIRST resolution of a GA
 		// fixes its version, depth, and path; later occurrences reuse it.
@@ -226,11 +645,15 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 			if head.parent == rootGA || head.fromReactorModule {
 				edgeType = "direct"
 			}
+			// A version that still contains a ${...} placeholder or a version-range
+			// syntax could not be resolved locally — emit the verbatim string and
+			// mark the edge unresolved so the server can complete it fleet-wide.
+			edgeResolved := !isUnresolvedPlaceholder(version) && !isVersionRange(version)
 			emit(
 				parentName, head.parentVer,
 				coord, version,
 				head.dep.Scope, edgeType,
-				len(edgePath)-1, edgePath, true,
+				len(edgePath)-1, edgePath, edgeResolved,
 			)
 		}
 
@@ -253,11 +676,19 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 		if err := xml.Unmarshal(childRaw, &child); err != nil {
 			continue
 		}
+		// Build the child's effective property map: parent-chain props
+		// (closest ancestor wins) then child's own <properties> on top,
+		// mirroring the logic used by the top-level ParseMavenPom path.
+		// This ensures transitive deps that use ${some.prop} resolve
+		// against the full set of properties the child POM declares or
+		// inherits — not just the literal ${project.version} alias.
+		childInheritedProps, _ := resolveParentChain(child, m2Dir)
+		childEffectiveProps := childInheritedProps
+		for k, val := range child.Properties.entries {
+			childEffectiveProps[k] = val
+		}
 		childInterpolate := func(v string) string {
-			if v == "${project.version}" {
-				return version
-			}
-			return v
+			return interpolateProps(v, version, childEffectiveProps)
 		}
 		for _, gd := range child.Dependencies {
 			// Skip test/provided scope by default — these aren't part of
@@ -395,9 +826,66 @@ type mavenPom struct {
 	GroupID              string              `xml:"groupId"`
 	ArtifactID           string              `xml:"artifactId"`
 	Version              string              `xml:"version"`
+	Parent               mavenParentRef      `xml:"parent"`
+	Properties           mavenProperties     `xml:"properties"`
 	Modules              []string            `xml:"modules>module"`
 	Dependencies         []mavenDep          `xml:"dependencies>dependency"`
 	DependencyManagement mavenDependencyMgmt `xml:"dependencyManagement"`
+	Profiles             []mavenProfile      `xml:"profiles>profile"`
+}
+
+// mavenParentRef is the <parent> block that may appear in a POM to declare
+// its parent artifact.  relativePath is optional; when absent Maven
+// defaults to "../pom.xml" but the agent resolves from ~/.m2 first.
+type mavenParentRef struct {
+	GroupID      string `xml:"groupId"`
+	ArtifactID   string `xml:"artifactId"`
+	Version      string `xml:"version"`
+	RelativePath string `xml:"relativePath"`
+}
+
+// mavenProperties holds the raw key-value pairs from <properties>.
+// Because property keys are arbitrary element names, we decode them
+// as a slice of xml.Token via a custom UnmarshalXML.
+type mavenProperties struct {
+	entries map[string]string
+}
+
+func (p *mavenProperties) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	p.entries = map[string]string{}
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			var val string
+			if err := d.DecodeElement(&val, &t); err != nil {
+				return err
+			}
+			p.entries[t.Name.Local] = val
+		case xml.EndElement:
+			return nil
+		}
+	}
+}
+
+// mavenProfile is an abbreviated <profile> sufficient for activeByDefault
+// activation detection and merging of deps / dependencyManagement /
+// properties declared inside the profile.
+type mavenProfile struct {
+	Activation           mavenProfileActivation `xml:"activation"`
+	Properties           mavenProperties        `xml:"properties"`
+	Dependencies         []mavenDep             `xml:"dependencies>dependency"`
+	DependencyManagement mavenDependencyMgmt    `xml:"dependencyManagement"`
+}
+
+// mavenProfileActivation captures the <activation> block.  Only
+// <activeByDefault> is used for now — OS/JDK/property conditions are
+// out of scope.
+type mavenProfileActivation struct {
+	ActiveByDefault string `xml:"activeByDefault"`
 }
 
 type mavenDependencyMgmt struct {

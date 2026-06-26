@@ -112,6 +112,31 @@ func ReadFile(path string, maxSize int64) ([]byte, error) {
 	return data, nil
 }
 
+// ReadDir reads the named directory, refusing to follow a symbolic
+// link at the leaf.  It is the directory-listing analogue of ReadFile:
+// a malicious package could install a version directory in ~/.m2 as a
+// symlink pointing at an arbitrary path; following it with os.ReadDir
+// would enumerate that target instead.
+//
+// ReadDir Lstat-checks the path before listing.  If path is a symlink,
+// returns (nil, ErrSymlink).  If path is not a directory, returns
+// (nil, ErrNotRegular) so callers can distinguish "absent" from
+// "wrong type".  On success the entries are sorted by name (matching
+// the os.ReadDir contract).
+func ReadDir(path string) ([]os.DirEntry, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: %s", ErrSymlink, path)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%w: %s is not a directory", ErrNotRegular, path)
+	}
+	return os.ReadDir(path)
+}
+
 // Open opens path for reading, refusing to follow a symbolic link at
 // the leaf.  The returned file MUST be closed by the caller.  Prefer
 // ReadFile when the whole file fits in a bounded buffer; Open is for
