@@ -158,9 +158,10 @@ ingests these rows directly — see `services/license_ingest.py`.
 
 ### `installed_runtimes: InstalledRuntime[]`
 
-Per-device language-runtime detections. Phase 4 covers `python`, `node`,
-and `jdk`. Other runtimes (e.g. `dotnet`) are reserved for future
-phases and the schema enum lists only the 3 Phase-4 names.
+Per-device runtime detections. Covers language runtimes (`python`, `node`,
+`jdk`) and JVM application servers (`wildfly`, `jboss-eap`, `tomcat`,
+`jetty`, `payara`, and presence-only `weblogic`/`websphere`). Other
+runtimes are reserved for future phases.
 
 ```json
 {
@@ -180,6 +181,12 @@ phases and the schema enum lists only the 3 Phase-4 names.
 | node    | `20.10.0`       | `20`   | Major version only. |
 | jdk     | `17.0.5+8`      | `17`   | Major version only. |
 | jdk     | `1.8.0_392`     | `8`    | Legacy `1.X` → `X`. |
+| wildfly   | `40.0.1.Final`  | `40`   | Leading major. |
+| jboss-eap | `7.4.0.GA`      | `7.4`  | Major.minor. |
+| tomcat    | `10.1.18`       | `10`   | Leading major. |
+| jetty     | `12.0.5`        | `12.0` | Major.minor. |
+| payara    | `6.2024.5`      | `6`    | Leading major. |
+| weblogic / websphere | `unknown` | `unknown` | Presence-only; no public EOL feed. |
 
 Server re-derives `cycle` independently and logs a warning when the
 agent's value disagrees, but always uses the server-derived value.

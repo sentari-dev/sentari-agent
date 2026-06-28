@@ -71,7 +71,7 @@
       "type": "object",
       "required": ["name", "version", "cycle", "install_path"],
       "properties": {
-        "name": { "type": "string", "enum": ["python", "node", "jdk"] },
+        "name": { "type": "string", "enum": ["python", "node", "jdk", "wildfly", "jboss-eap", "tomcat", "jetty", "payara", "weblogic", "websphere"] },
         "version": { "type": "string" },
         "cycle": { "type": "string" },
         "distro": { "type": ["string", "null"] },
