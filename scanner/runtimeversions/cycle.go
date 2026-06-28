@@ -3,10 +3,12 @@ package runtimeversions
 import "regexp"
 
 var (
-	pythonRe    = regexp.MustCompile(`^(\d+)\.(\d+)`)
-	nodeRe      = regexp.MustCompile(`^(\d+)`)
-	jdkLegacyRe = regexp.MustCompile(`^1\.(\d+)`)
-	jdkModernRe = regexp.MustCompile(`^(\d+)`)
+	pythonRe        = regexp.MustCompile(`^(\d+)\.(\d+)`)
+	nodeRe          = regexp.MustCompile(`^(\d+)`)
+	jdkLegacyRe     = regexp.MustCompile(`^1\.(\d+)`)
+	jdkModernRe     = regexp.MustCompile(`^(\d+)`)
+	_MAJOR_RE       = regexp.MustCompile(`^(\d+)\b`)
+	_MAJOR_MINOR_RE = regexp.MustCompile(`^(\d+)\.(\d+)\b`)
 )
 
 // CycleFor returns the EOL cycle for a (runtime, version) tuple, or
@@ -29,6 +31,16 @@ func CycleFor(runtime, version string) string {
 		if m := jdkModernRe.FindStringSubmatch(version); m != nil {
 			return m[1]
 		}
+	case "wildfly", "tomcat", "payara":
+		if m := _MAJOR_RE.FindStringSubmatch(version); m != nil {
+			return m[1]
+		}
+		return "unknown"
+	case "jboss-eap", "jetty":
+		if m := _MAJOR_MINOR_RE.FindStringSubmatch(version); m != nil {
+			return m[1] + "." + m[2]
+		}
+		return "unknown"
 	}
 	return "unknown"
 }
