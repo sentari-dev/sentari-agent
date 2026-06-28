@@ -80,9 +80,15 @@ func classify(dir string) (InstalledRuntime, bool) {
 		ver := jarImplementationVersion(filepath.Join(dir, "lib/catalina.jar"))
 		return mk("tomcat", ver, "Apache", dir), true
 
-	case isFile(filepath.Join(dir, "VERSION.txt")) &&
-		strings.HasPrefix(strings.ToLower(readText(filepath.Join(dir, "VERSION.txt"))), "jetty-"):
+	case isFile(filepath.Join(dir, "start.jar")) ||
+		isFile(filepath.Join(dir, "etc/jetty.xml")) ||
+		isFile(filepath.Join(dir, "etc/jetty-http.xml")) ||
+		(isFile(filepath.Join(dir, "VERSION.txt")) &&
+			strings.HasPrefix(strings.ToLower(readText(filepath.Join(dir, "VERSION.txt"))), "jetty-")):
 		ver := parseVersionToken(readText(filepath.Join(dir, "VERSION.txt")))
+		if ver == "" {
+			ver = jettyVersionFromLib(dir)
+		}
 		return mk("jetty", ver, "Eclipse", dir), true
 
 	case isFile(filepath.Join(dir, "glassfish/config/branding/glassfish-version.properties")):
@@ -133,6 +139,21 @@ func readText(path string) string {
 func isFile(path string) bool {
 	st, err := os.Lstat(path)
 	return err == nil && st.Mode().IsRegular()
+}
+
+// jettyVersionFromLib extracts the version from lib/jetty-server-<ver>.jar
+// when VERSION.txt is absent (modern jetty-home distributions don't always
+// ship it). Returns "" if no such jar is found. Reads the filename only —
+// no file contents — so no version-file parsing is needed.
+func jettyVersionFromLib(dir string) string {
+	matches, err := filepath.Glob(filepath.Join(dir, "lib", "jetty-server-*.jar"))
+	if err != nil || len(matches) == 0 {
+		return ""
+	}
+	base := filepath.Base(matches[0])
+	base = strings.TrimPrefix(base, "jetty-server-")
+	base = strings.TrimSuffix(base, ".jar")
+	return base
 }
 
 // jarImplementationVersion reads META-INF/MANIFEST.MF Implementation-Version

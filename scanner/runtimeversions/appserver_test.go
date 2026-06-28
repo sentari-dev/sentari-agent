@@ -70,6 +70,20 @@ func TestDetectAllAppServers_Jetty(t *testing.T) {
 	}
 }
 
+func TestDetectAllAppServers_JettyNoVersionTxt(t *testing.T) {
+	parent := t.TempDir()
+	home := filepath.Join(parent, "jetty-home-12.0.5")
+	writeTree(t, home, map[string]string{
+		"start.jar":                   "PK\x03\x04",
+		"lib/jetty-server-12.0.5.jar": "PK\x03\x04",
+		"etc/jetty.xml":               "<Configure/>",
+	})
+	got := DetectAllAppServers([]string{parent})
+	if len(got) != 1 || got[0].Name != "jetty" || got[0].Version != "12.0.5" || got[0].Cycle != "12.0" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 func TestDetectAllAppServers_VersionUnknownStillEmitted(t *testing.T) {
 	parent := t.TempDir()
 	home := filepath.Join(parent, "wildfly-broken")
