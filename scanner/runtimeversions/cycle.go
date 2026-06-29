@@ -3,17 +3,27 @@ package runtimeversions
 import "regexp"
 
 var (
-	pythonRe        = regexp.MustCompile(`^(\d+)\.(\d+)`)
-	nodeRe          = regexp.MustCompile(`^(\d+)`)
-	jdkLegacyRe     = regexp.MustCompile(`^1\.(\d+)`)
-	jdkModernRe     = regexp.MustCompile(`^(\d+)`)
-	_MAJOR_RE       = regexp.MustCompile(`^(\d+)\b`)
-	_MAJOR_MINOR_RE = regexp.MustCompile(`^(\d+)\.(\d+)\b`)
+	pythonRe     = regexp.MustCompile(`^(\d+)\.(\d+)`)
+	nodeRe       = regexp.MustCompile(`^(\d+)`)
+	jdkLegacyRe  = regexp.MustCompile(`^1\.(\d+)`)
+	jdkModernRe  = regexp.MustCompile(`^(\d+)`)
+	majorRe      = regexp.MustCompile(`^(\d+)\b`)
+	majorMinorRe = regexp.MustCompile(`^(\d+)\.(\d+)\b`)
 )
 
-// CycleFor returns the EOL cycle for a (runtime, version) tuple, or
-// "unknown" on parse failure. Same regex as the server's
-// server/services/runtime_eol_cycle.py — both sides MUST agree.
+// appServers is the set of JVM application-server runtime names. Their cycle is
+// derived best-effort here; the server resolves the authoritative cohort against
+// the synced endoflife.date feed (its granularity is inconsistent per product,
+// so a fixed regex cannot derive it — see runtime_eol_cycle.py resolve_feed_cycle).
+var appServers = map[string]bool{
+	"wildfly": true, "jboss-eap": true, "tomcat": true,
+	"jetty": true, "payara": true, "weblogic": true, "websphere": true,
+}
+
+// CycleFor returns the EOL cycle for a (runtime, version) tuple, or "unknown" on
+// parse failure. Language-runtime derivation matches the server's
+// server/services/runtime_eol_cycle.py exactly. App-server derivation is a
+// best-effort fallback (major.minor, then major) the server may override.
 func CycleFor(runtime, version string) string {
 	switch runtime {
 	case "python":
@@ -31,16 +41,15 @@ func CycleFor(runtime, version string) string {
 		if m := jdkModernRe.FindStringSubmatch(version); m != nil {
 			return m[1]
 		}
-	case "wildfly", "tomcat", "payara":
-		if m := _MAJOR_RE.FindStringSubmatch(version); m != nil {
-			return m[1]
+	default:
+		if appServers[runtime] {
+			if m := majorMinorRe.FindStringSubmatch(version); m != nil {
+				return m[1] + "." + m[2]
+			}
+			if m := majorRe.FindStringSubmatch(version); m != nil {
+				return m[1]
+			}
 		}
-		return "unknown"
-	case "jboss-eap", "jetty":
-		if m := _MAJOR_MINOR_RE.FindStringSubmatch(version); m != nil {
-			return m[1] + "." + m[2]
-		}
-		return "unknown"
 	}
 	return "unknown"
 }

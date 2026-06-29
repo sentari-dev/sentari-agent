@@ -17,7 +17,7 @@ func TestAppServerMarkers_WildFlyStable(t *testing.T) {
 		"modules/.keep":     "",
 	})
 	got := DetectAllAppServers([]string{parent})
-	if len(got) != 1 || got[0].Name != "wildfly" || got[0].Cycle != "31" {
+	if len(got) != 1 || got[0].Name != "wildfly" || got[0].Cycle != "31.0" {
 		t.Fatalf("WildFly marker/version drift: %+v", got)
 	}
 }

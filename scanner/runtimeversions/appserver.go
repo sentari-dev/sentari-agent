@@ -21,7 +21,7 @@ var _versionTokenRE = regexp.MustCompile(`(\d+\.\d+[\w.]*)`)
 // install (not a parent), so it is classified directly.
 var _envHomeVars = []string{
 	"WILDFLY_HOME", "JBOSS_HOME", "EAP_HOME",
-	"CATALINA_HOME", "CATALINA_BASE", "JETTY_HOME", "WL_HOME",
+	"CATALINA_HOME", "CATALINA_BASE", "JETTY_HOME", "WL_HOME", "WAS_HOME",
 }
 
 // DetectAllAppServers walks each parent one level deep, classifies every
@@ -94,6 +94,20 @@ func classify(dir string) (InstalledRuntime, bool) {
 	case isFile(filepath.Join(dir, "glassfish/config/branding/glassfish-version.properties")):
 		ver := parseVersionToken(readText(filepath.Join(dir, "glassfish/config/branding/glassfish-version.properties")))
 		return mk("payara", ver, "Payara", dir), true
+
+	// WebLogic / WebSphere — presence-only (no public EOL feed). Markers mirror
+	// the jvm package's discovery. Version is best-effort: WebLogic exposes it in
+	// the weblogic.jar manifest; WebSphere needs versionInfo (a binary), which we
+	// won't run, so it stays "unknown" (presence still recorded).
+	case isFile(filepath.Join(dir, "server/lib/weblogic.jar")) ||
+		isFile(filepath.Join(dir, "server/bin/startWebLogic.sh")) ||
+		isFile(filepath.Join(dir, "server/bin/startWebLogic.cmd")):
+		ver := jarImplementationVersion(filepath.Join(dir, "server/lib/weblogic.jar"))
+		return mk("weblogic", ver, "Oracle", dir), true
+
+	case isFile(filepath.Join(dir, "bin/versionInfo.sh")) ||
+		isFile(filepath.Join(dir, "bin/versionInfo.bat")):
+		return mk("websphere", "", "IBM", dir), true
 	}
 	return InstalledRuntime{}, false
 }

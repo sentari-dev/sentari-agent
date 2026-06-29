@@ -22,7 +22,7 @@ func TestEnrichWithV3_DetectsAppServer(t *testing.T) {
 
 	found := false
 	for _, r := range res.InstalledRuntimes {
-		if r.Name == "tomcat" && r.Version == "10.1.18" && r.Cycle == "10" {
+		if r.Name == "tomcat" && r.Version == "10.1.18" && r.Cycle == "10.1" {
 			found = true
 		}
 	}
