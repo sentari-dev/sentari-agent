@@ -181,12 +181,18 @@ runtimes are reserved for future phases.
 | node    | `20.10.0`       | `20`   | Major version only. |
 | jdk     | `17.0.5+8`      | `17`   | Major version only. |
 | jdk     | `1.8.0_392`     | `8`    | Legacy `1.X` → `X`. |
-| wildfly   | `40.0.1.Final`  | `40`   | Leading major. |
-| jboss-eap | `7.4.0.GA`      | `7.4`  | Major.minor. |
-| tomcat    | `10.1.18`       | `10`   | Leading major. |
-| jetty     | `12.0.5`        | `12.0` | Major.minor. |
-| payara    | `6.2024.5`      | `6`    | Leading major. |
-| weblogic / websphere | `unknown` | `unknown` | Presence-only; no public EOL feed. |
+| wildfly   | `40.0.1.Final`  | `40.0`   | Major.minor, then major.¹ |
+| jboss-eap | `7.4.0.GA`      | `7.4`    | Major.minor, then major.¹ |
+| tomcat    | `10.1.18`       | `10.1`   | Major.minor, then major.¹ |
+| jetty     | `12.0.5`        | `12.0`   | Major.minor, then major.¹ |
+| payara    | `6.2024.5`      | `6.2024` | Major.minor, then major.¹ |
+| weblogic / websphere | `14.1.1.0` / `unknown` | `14.1` / `unknown`¹ | Presence-only; no public EOL feed. |
+
+¹ For application servers the agent-derived `cycle` is **advisory**.
+endoflife.date cohort granularity is inconsistent per product (Tomcat `10.1`
+but also `7`; JBoss EAP `7` but also `4.3`; Jetty `12.0` but also `11`), so the
+server resolves the authoritative cohort against the synced feed by
+longest-dotted-prefix at ingest (`runtime_eol_cycle.resolve_feed_cycle`).
 
 Server re-derives `cycle` independently and logs a warning when the
 agent's value disagrees, but always uses the server-derived value.
