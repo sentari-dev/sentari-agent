@@ -435,6 +435,16 @@ func enrichWithV3(result *ScanResult, roots []string) {
 			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllNodes(paths)...)
 		}
 	})
+
+	// --- application servers (WildFly/EAP, Tomcat, Jetty, Payara, …) ---
+	// Detected for runtime-EOL correlation. Env-var homes are read inside
+	// the detector, so this fires even when no well-known parent exists.
+	safeCall("runtimeversions.AppServers", func() {
+		result.InstalledRuntimes = append(
+			result.InstalledRuntimes,
+			runtimeversions.DetectAllAppServers(appServerCandidateRoots())...,
+		)
+	})
 }
 
 // candidateSitePackages returns plausible site-packages dirs under
@@ -509,6 +519,23 @@ func jdkCandidateRoots() []string {
 				filepath.Join(pf, "Amazon Corretto"),
 			)
 		}
+	}
+	return existingDirs(candidates)
+}
+
+// appServerCandidateRoots returns the well-known parent directories under
+// which JVM application servers are installed (one install per child dir).
+// Mirrors the parents used by the jvm package's discovery so version-EOL
+// detection and package scanning agree on where servers live.
+func appServerCandidateRoots() []string {
+	var candidates []string
+	switch runtime.GOOS {
+	case "darwin":
+		candidates = []string{"/opt", "/usr/local/opt"}
+	case "windows":
+		candidates = []string{`C:\Program Files`, `C:\wildfly`, `C:\jboss`}
+	default: // linux and friends
+		candidates = []string{"/opt", "/usr/share"}
 	}
 	return existingDirs(candidates)
 }
