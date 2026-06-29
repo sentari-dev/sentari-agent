@@ -1,0 +1,19 @@
+# Binaries (at repo root only — don't match cmd/sentari-agent/ directory)
+/sentari-agent
+/sentari-agent-enterprise
+/sentari-agent.exe
+/sentari-agent-enterprise.exe
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Internal design docs — kept local, not published.
+docs/adr/

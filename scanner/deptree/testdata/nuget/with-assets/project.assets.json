@@ -1,0 +1,31 @@
+{
+  "version": 3,
+  "targets": {
+    "net6.0": {
+      "Newtonsoft.Json/13.0.3": {
+        "type": "package",
+        "dependencies": {
+          "Microsoft.CSharp": "4.7.0"
+        }
+      },
+      "Microsoft.CSharp/4.7.0": {
+        "type": "package"
+      }
+    }
+  },
+  "project": {
+    "version": "1.0.0",
+    "restore": {
+      "projectName": "MyNetApp"
+    },
+    "frameworks": {
+      "net6.0": {
+        "dependencies": {
+          "Newtonsoft.Json": {
+            "version": "[13.0.3, )"
+          }
+        }
+      }
+    }
+  }
+}

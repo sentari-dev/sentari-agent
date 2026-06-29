@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example.reactor</groupId>
+    <artifactId>my-reactor</artifactId>
+    <version>2.0.0</version>
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>api</module>
+        <module>core</module>
+        <module>missing</module>
+    </modules>
+
+    <!--
+        No top-level <dependencies> on purpose — this is a classic Spring
+        Boot / Quarkus reactor layout.  Pre-fix the walker emitted zero
+        edges for this shape.  Post-fix it must walk api/ and core/ and
+        emit their direct deps as depth-1 edges.  The "missing" module
+        is intentionally absent on disk; the walker must skip it
+        silently without erroring.
+    -->
+</project>

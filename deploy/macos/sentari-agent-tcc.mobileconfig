@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Sentari Agent — TCC Configuration Profile (Full Disk Access)
+
+  This profile grants Full Disk Access to the Sentari agent binary so it
+  can scan Python environments in TCC-protected directories (Documents,
+  Desktop, Downloads) when running as a launchd system daemon.
+
+  Without this profile, macOS silently blocks the agent from reading
+  files under ~/Documents, ~/Desktop, and ~/Downloads — the scanner
+  sees these directories as empty and misses all Python virtualenvs
+  inside project folders.
+
+  Deployment options:
+    1. Jamf Pro:  Computers → Configuration Profiles → Upload → choose this file
+    2. Intune:    Devices → macOS → Configuration profiles → Create → Upload .mobileconfig
+    3. Kandji:    Library → Profiles → Add Profile → Upload
+    4. Manual:    sudo profiles install -path sentari-agent-tcc.mobileconfig
+
+  Note: this profile uses StaticCode = true with the binary path because
+  the agent is not code-signed with an Apple Developer ID. The path
+  /usr/local/bin/sentari-agent must match the installer's INSTALL_DIR.
+  If you install the binary elsewhere, update the path below.
+
+  To remove: sudo profiles remove -identifier dev.sentari.agent.tcc
+-->
+<plist version="1.0">
+<dict>
+    <!-- Profile metadata -->
+    <key>PayloadDisplayName</key>
+    <string>Sentari Agent — Full Disk Access</string>
+    <key>PayloadDescription</key>
+    <string>Grants the Sentari agent access to TCC-protected directories (Documents, Desktop, Downloads) so it can discover Python environments in user project folders.</string>
+    <key>PayloadIdentifier</key>
+    <string>dev.sentari.agent.tcc</string>
+    <key>PayloadOrganization</key>
+    <string>Sentari</string>
+    <key>PayloadScope</key>
+    <string>System</string>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadUUID</key>
+    <string>A1B2C3D4-E5F6-7890-ABCD-EF1234567890</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>PayloadDisplayName</key>
+            <string>Privacy Preferences Policy Control</string>
+            <key>PayloadIdentifier</key>
+            <string>dev.sentari.agent.tcc.pppc</string>
+            <key>PayloadType</key>
+            <string>com.apple.TCC.configuration-profile-policy</string>
+            <key>PayloadUUID</key>
+            <string>B2C3D4E5-F6A7-8901-BCDE-F12345678901</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+
+            <key>Services</key>
+            <dict>
+                <!-- SystemPolicyAllFiles = Full Disk Access -->
+                <key>SystemPolicyAllFiles</key>
+                <array>
+                    <dict>
+                        <!-- Path-based identification (unsigned binary) -->
+                        <key>Identifier</key>
+                        <string>/usr/local/bin/sentari-agent</string>
+                        <key>IdentifierType</key>
+                        <string>path</string>
+                        <key>StaticCode</key>
+                        <true/>
+                        <key>Allowed</key>
+                        <true/>
+                        <key>Comment</key>
+                        <string>Allow Sentari agent to scan Python environments in TCC-protected user directories</string>
+                    </dict>
+                </array>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

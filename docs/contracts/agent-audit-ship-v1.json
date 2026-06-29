@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sentari.dev/contracts/agent-audit-ship-v1.json",
+  "title": "Sentari agent audit-log ship payload v1",
+  "description": "Request body for POST /api/v1/agent/audit-log. The agent ships batches of its local append-only SHA-256 hash-chained audit entries for independent server-side re-verification. Mirrors AgentAuditShipRequest / AgentAuditEntryPayload in server/services/agent_audit_ingest.py byte-for-byte; keep this file and the .md doc in sync across the server and sentari-agent repos.",
+  "type": "object",
+  "required": ["device_id", "entries"],
+  "additionalProperties": false,
+  "properties": {
+    "device_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "UUID of the registered device. When mTLS is enforced it MUST equal the device bound to the client certificate (server returns 403 on mismatch)."
+    },
+    "entries": {
+      "type": "array",
+      "maxItems": 10000,
+      "description": "Audit entries for this shipment. An empty array is a valid 202 no-op. Server sorts by entry_id before verifying.",
+      "items": { "$ref": "#/definitions/AgentAuditEntry" }
+    }
+  },
+  "definitions": {
+    "AgentAuditEntry": {
+      "type": "object",
+      "required": ["entry_id", "event_type", "detail", "content_hash", "prev_hash", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "entry_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Agent-local row id; monotonic, used with device_id to dedupe re-ships."
+        },
+        "event_type": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Event category (e.g. 'scan_started'). Part of the hash input."
+        },
+        "detail": {
+          "type": "string",
+          "description": "Free-text detail. Part of the hash input."
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256(event_type + detail + prev_hash + created_at), lowercase hex. Server recomputes and must match."
+        },
+        "prev_hash": {
+          "type": "string",
+          "pattern": "^([a-f0-9]{64}|)$",
+          "description": "Previous entry's content_hash; empty string for the genesis entry."
+        },
+        "created_at": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "EXACT RFC3339Nano string the agent fed into the hash. Stored verbatim; any reformatting breaks server-side hash verification."
+        }
+      }
+    }
+  }
+}
