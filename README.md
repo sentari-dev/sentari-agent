@@ -10,14 +10,14 @@ Download the binary and scan locally. Results are saved as JSON or CSV.
 
 ```bash
 # Linux / macOS
-curl -LO https://github.com/sentari-dev/sentari-agent/releases/download/v0.1.0/sentari-agent-oss-linux-amd64
+curl -LO https://github.com/sentari-dev/sentari-agent/releases/download/v1.0.0/sentari-agent-oss-linux-amd64
 chmod +x sentari-agent-oss-linux-amd64
 ./sentari-agent-oss-linux-amd64 --scan --output scan-result.json
 ```
 
 ```powershell
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/sentari-dev/sentari-agent/releases/download/v0.1.0/sentari-agent-oss-windows-amd64.exe -OutFile sentari-agent.exe
+Invoke-WebRequest -Uri https://github.com/sentari-dev/sentari-agent/releases/download/v1.0.0/sentari-agent-oss-windows-amd64.exe -OutFile sentari-agent.exe
 .\sentari-agent.exe --scan --output scan-result.json
 ```
 
@@ -28,13 +28,13 @@ Installs as a background service, registers with your Sentari server, and upload
 ```bash
 # Linux
 curl -fsSL https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.sh | \
-  sudo bash -s -- --version 0.1.0 --server-url https://sentari.example.com:8000 --enroll-token YOUR_TOKEN
+  sudo bash -s -- --version 1.0.0 --server-url https://sentari.example.com:8000 --enroll-token YOUR_TOKEN
 ```
 
 ```powershell
 # Windows (PowerShell as Administrator)
 irm https://raw.githubusercontent.com/sentari-dev/sentari-agent/main/install.ps1 -OutFile install.ps1
-.\install.ps1 -Version 0.1.0 -ServerURL https://sentari.example.com:8000 -EnrollToken YOUR_TOKEN
+.\install.ps1 -Version 1.0.0 -ServerURL https://sentari.example.com:8000 -EnrollToken YOUR_TOKEN
 ```
 
 See [docs/INSTALLATION.md](docs/INSTALLATION.md) for the full guide including edition comparison, fleet deployment (Ansible, GPO/SCCM), air-gapped install, and service management.
