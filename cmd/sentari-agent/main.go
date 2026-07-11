@@ -34,9 +34,9 @@ func main() {
 	//
 	// Output format default note: when writing to stdout we want a
 	// human-friendly summary by default (developer-first); when
-	// writing to a file (``--output``) we default to JSON because
+	// writing to a file (`--output`) we default to JSON because
 	// the most common use case is piping into a script or SIEM.
-	// Either default can be overridden with ``--format``.
+	// Either default can be overridden with `--format`.
 	scanFlag := flag.Bool("scan", false, "Run a scan of every supported ecosystem on this host")
 	outputFlag := flag.String("output", "", "Output file path (default: stdout)")
 	formatFlag := flag.String("format", "",

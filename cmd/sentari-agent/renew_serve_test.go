@@ -165,7 +165,7 @@ func TestMaybeRenew_WithinWindowRenews(t *testing.T) {
 		t.Fatalf("expected a rebuilt client after successful renewal")
 	}
 	// On-disk cert must now be the renewed (far-future) one.
-	na, err := comms.DeviceCertNotAfter(dir)
+	na, err := comms.DeviceCertNotAfterAt(filepath.Join(dir, "device.crt"))
 	if err != nil {
 		t.Fatalf("read renewed NotAfter: %v", err)
 	}
