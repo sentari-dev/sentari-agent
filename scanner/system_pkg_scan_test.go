@@ -225,6 +225,60 @@ func TestScanDebianViaStatusFile_AllModeEmitsEverything(t *testing.T) {
 	}
 }
 
+// debStatusRemovedFixture pairs an installed stanza with a
+// removed-but-not-purged stanza (Status: deinstall ok config-files, the
+// routine state after `apt remove` without `--purge`).  Only the installed
+// package's files are on disk, so only it must be emitted — reporting the
+// config-files stanza would generate persistent CVE false positives.
+const debStatusRemovedFixture = `Package: python3
+Version: 3.11.4-1
+Status: install ok installed
+
+Package: python3-openssl
+Version: 22.0.0-1
+Status: deinstall ok config-files
+`
+
+func TestScanDebianViaStatusFile_PythonOnlyModeExcludesRemoved(t *testing.T) {
+	t.Setenv("SENTARI_SCAN_OS_PACKAGES", "python_only")
+	setDpkgStatusPath(t, debStatusRemovedFixture)
+
+	pkgs, errs := scanDebianViaStatusFile()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected scan errors: %+v", errs)
+	}
+	got := map[string]string{}
+	for _, p := range pkgs {
+		got[p.Name] = p.Version
+	}
+	if _, ok := got["python3"]; !ok {
+		t.Errorf("python_only: expected installed python3 to be emitted, got names: %v", keysOf(got))
+	}
+	if _, ok := got["python3-openssl"]; ok {
+		t.Errorf("python_only: removed-but-not-purged python3-openssl must NOT be emitted (got %+v)", got)
+	}
+}
+
+func TestScanDebianViaStatusFile_AllModeExcludesRemoved(t *testing.T) {
+	t.Setenv("SENTARI_SCAN_OS_PACKAGES", "all")
+	setDpkgStatusPath(t, debStatusRemovedFixture)
+
+	pkgs, errs := scanDebianViaStatusFile()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected scan errors: %+v", errs)
+	}
+	got := map[string]string{}
+	for _, p := range pkgs {
+		got[p.Name] = p.Version
+	}
+	if _, ok := got["python3"]; !ok {
+		t.Errorf("mode=all: expected installed python3 to be emitted, got names: %v", keysOf(got))
+	}
+	if _, ok := got["python3-openssl"]; ok {
+		t.Errorf("mode=all: removed-but-not-purged python3-openssl must NOT be emitted (got %+v)", got)
+	}
+}
+
 // keysOf returns map keys for stable error messages.
 func keysOf(m map[string]string) []string {
 	out := make([]string, 0, len(m))

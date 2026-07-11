@@ -49,22 +49,22 @@ func init() {
 // avoid the heavyweight go-toml dependency for a simple extraction task.
 func scanPoetryEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 	var packages []PackageRecord
-	var errors []ScanError
+	var scanErrs []ScanError
 
 	poetryLockPath := filepath.Join(envPath, "poetry.lock")
 
 	// Bounded + symlink-refusing read.  A malicious monorepo could
-	// plant ``poetry.lock -> /etc/shadow`` inside a directory the
+	// plant `poetry.lock -> /etc/shadow` inside a directory the
 	// scanner walks into; safeio refuses the follow.
 	data, err := safeio.ReadFile(poetryLockPath, maxLockFileSize)
 	if err != nil {
-		errors = append(errors, ScanError{
+		scanErrs = append(scanErrs, ScanError{
 			Path:      envPath,
 			EnvType:   EnvPoetry,
 			Error:     err.Error(),
 			Timestamp: time.Now().UTC(),
 		})
-		return packages, errors
+		return packages, scanErrs
 	}
 
 	lockModTime := getFileModTime(poetryLockPath)
@@ -97,14 +97,13 @@ func scanPoetryEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 			}
 
 			// Try to extract license from installed METADATA in site-packages.
-			if sitePackagesDir != "" {
-				metadataPath := filepath.Join(sitePackagesDir, currentName+"-"+currentVersion+".dist-info", "METADATA")
-				if metaBytes, err := safeio.ReadFile(metadataPath, maxPipMetadataSize); err == nil {
-					raw, spdx, tier := ExtractLicenseFromMetadata(string(metaBytes))
-					pkg.LicenseRaw = raw
-					pkg.LicenseSPDX = spdx
-					pkg.LicenseTier = tier
-				}
+			// The dist-info dir name is the wheel-normalized project name, not
+			// the raw poetry.lock name (see findDistInfoMetadata).
+			if metaBytes := findDistInfoMetadata(sitePackagesDir, currentName, currentVersion); metaBytes != nil {
+				raw, spdx, tier := ExtractLicenseFromMetadata(string(metaBytes))
+				pkg.LicenseRaw = raw
+				pkg.LicenseSPDX = spdx
+				pkg.LicenseTier = tier
 			}
 
 			packages = append(packages, pkg)
@@ -153,7 +152,7 @@ func scanPoetryEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 	flushPackage()
 
 	if err := scanner.Err(); err != nil {
-		errors = append(errors, ScanError{
+		scanErrs = append(scanErrs, ScanError{
 			Path:      poetryLockPath,
 			EnvType:   EnvPoetry,
 			Error:     err.Error(),
@@ -161,7 +160,7 @@ func scanPoetryEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 		})
 	}
 
-	return packages, errors
+	return packages, scanErrs
 }
 
 // parseTomlKeyValue extracts a key and unquoted string value from a TOML line.
@@ -191,36 +190,100 @@ func parseTomlKeyValue(line string) (string, string, bool) {
 	return "", "", false
 }
 
-// getPoetryInterpreterVersion reads the Python version constraint from
-// pyproject.toml if available, otherwise checks for a local .venv.
-func getPoetryInterpreterVersion(envPath string) string {
-	// Try to read pyproject.toml for the python version constraint.
-	pyprojectPath := filepath.Join(envPath, "pyproject.toml")
-	if data, err := safeio.ReadFile(pyprojectPath, maxPyprojectSize); err == nil {
-		scanner := bufio.NewScanner(bytes.NewReader(data))
-		inDeps := false
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
+// normalizeDistInfoName normalizes a project name into the form used for
+// wheel .dist-info directory names: lowercased, with runs of [-_.]
+// collapsed to a single underscore (per the binary-distribution spec).
+// e.g. "typing-extensions" → "typing_extensions", "ruamel.yaml" →
+// "ruamel_yaml", "Jinja2" → "jinja2". Without this, a lock-file name like
+// "typing-extensions" never matches "typing_extensions-4.9.0.dist-info" on
+// disk and the package is misclassified as license tier "unknown".
+func normalizeDistInfoName(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	prevSep := false
+	for _, r := range strings.ToLower(name) {
+		if r == '-' || r == '_' || r == '.' {
+			if !prevSep {
+				b.WriteByte('_')
+				prevSep = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		prevSep = false
+	}
+	return b.String()
+}
 
-			if line == "[tool.poetry.dependencies]" {
-				inDeps = true
-				continue
-			}
-			if strings.HasPrefix(line, "[") {
-				inDeps = false
-				continue
-			}
-			if inDeps {
-				key, value, ok := parseTomlKeyValue(line)
-				if ok && key == "python" {
-					return value
-				}
+// findDistInfoMetadata locates and reads the METADATA file for a package
+// installed under sitePackagesDir. Wheel install directories are named
+// "<normalized>-<version>.dist-info" where <normalized> is the project name
+// run through normalizeDistInfoName — so "typing-extensions" is stored as
+// "typing_extensions-4.9.0.dist-info", not "typing-extensions-...". We first
+// try the direct normalized path (the common case), then fall back to a
+// case-insensitive scan of the directory entries. Returns nil if no matching
+// METADATA can be read. Shared by the poetry and pipenv scanners.
+func findDistInfoMetadata(sitePackagesDir, name, version string) []byte {
+	if sitePackagesDir == "" {
+		return nil
+	}
+
+	distInfo := normalizeDistInfoName(name) + "-" + version + ".dist-info"
+
+	// Direct hit — the common case.
+	metadataPath := filepath.Join(sitePackagesDir, distInfo, "METADATA")
+	if data, err := safeio.ReadFile(metadataPath, maxPipMetadataSize); err == nil {
+		return data
+	}
+
+	// Fall back to a case-insensitive scan of the site-packages entries;
+	// some tools preserve project-name casing on case-sensitive filesystems.
+	entries, err := os.ReadDir(sitePackagesDir)
+	if err != nil {
+		return nil
+	}
+	for _, entry := range entries {
+		if strings.EqualFold(entry.Name(), distInfo) {
+			p := filepath.Join(sitePackagesDir, entry.Name(), "METADATA")
+			if data, err := safeio.ReadFile(p, maxPipMetadataSize); err == nil {
+				return data
 			}
 		}
 	}
+	return nil
+}
 
-	// Check for a .venv directory as a fallback indicator.
+// getPoetryInterpreterVersion determines the Python interpreter version for a
+// poetry project without invoking any binary.  It understands both interpreter
+// declarations:
+//
+//   - legacy Poetry 1.x:  [tool.poetry.dependencies] python = "^3.11"
+//   - PEP 621 / Poetry 2.x: [project] requires-python = ">=3.9"
+//
+// Both of those are *constraints* (what the project accepts), not the concrete
+// interpreter that is installed.  When the project has a local .venv we prefer
+// the concrete version read from its pyvenv.cfg / lib layout
+// (detectInterpreterVersion, which now carries the version_info fallback) over
+// the declared constraint.  Only when no concrete version can be read do we
+// fall back to the declared constraint verbatim.
+func getPoetryInterpreterVersion(envPath string) string {
+	constraint := parsePyprojectPythonConstraint(envPath)
+
 	venvPath := filepath.Join(envPath, ".venv")
+
+	// Prefer a concrete interpreter version from the project's .venv over a
+	// bare constraint.  detectInterpreterVersion reads pyvenv.cfg
+	// (version / version_info) and the lib/pythonX.Y directory name.
+	if v := detectInterpreterVersion(venvPath); v != "unknown" && v != "" {
+		return v
+	}
+
+	// No concrete venv version — fall back to the declared constraint.
+	if constraint != "" {
+		return constraint
+	}
+
+	// Last resort: a .venv exists but carried no readable version.
 	candidates := []string{
 		filepath.Join(venvPath, "bin", "python"),
 		filepath.Join(venvPath, "bin", "python3"),
@@ -233,4 +296,48 @@ func getPoetryInterpreterVersion(envPath string) string {
 	}
 
 	return "unknown"
+}
+
+// parsePyprojectPythonConstraint extracts the declared Python version
+// constraint from pyproject.toml, understanding both the legacy Poetry form
+// ([tool.poetry.dependencies] python = "...") and the PEP 621 form
+// ([project] requires-python = "..."). The legacy poetry constraint wins when
+// both are present (a Poetry 1.x project that also carries a [project] table).
+// Returns "" when neither is declared or the file cannot be read.
+func parsePyprojectPythonConstraint(envPath string) string {
+	pyprojectPath := filepath.Join(envPath, "pyproject.toml")
+	data, err := safeio.ReadFile(pyprojectPath, maxPyprojectSize)
+	if err != nil {
+		return ""
+	}
+
+	var legacyPython, requiresPython string
+	section := ""
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "[") {
+			section = line
+			continue
+		}
+		key, value, ok := parseTomlKeyValue(line)
+		if !ok {
+			continue
+		}
+		switch section {
+		case "[tool.poetry.dependencies]":
+			if key == "python" {
+				legacyPython = value
+			}
+		case "[project]":
+			if key == "requires-python" {
+				requiresPython = value
+			}
+		}
+	}
+
+	if legacyPython != "" {
+		return legacyPython
+	}
+	return requiresPython
 }

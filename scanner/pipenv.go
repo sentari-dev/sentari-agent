@@ -44,9 +44,9 @@ func init() {
 
 // pipfileLockData represents the top-level structure of a Pipfile.lock.
 type pipfileLockData struct {
-	Meta    pipfileLockMeta                `json:"_meta"`
-	Default map[string]pipfileLockEntry    `json:"default"`
-	Develop map[string]pipfileLockEntry    `json:"develop"`
+	Meta    pipfileLockMeta             `json:"_meta"`
+	Default map[string]pipfileLockEntry `json:"default"`
+	Develop map[string]pipfileLockEntry `json:"develop"`
 }
 
 // pipfileLockMeta holds the _meta section of Pipfile.lock.
@@ -56,7 +56,7 @@ type pipfileLockMeta struct {
 
 // pipfileLockRequires holds the python version constraint.
 type pipfileLockRequires struct {
-	PythonVersion string `json:"python_version"`
+	PythonVersion     string `json:"python_version"`
 	PythonFullVersion string `json:"python_full_version"`
 }
 
@@ -69,30 +69,30 @@ type pipfileLockEntry struct {
 // It parses the JSON lock file directly — no pipenv binary is invoked.
 func scanPipenvEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 	var packages []PackageRecord
-	var errors []ScanError
+	var scanErrs []ScanError
 
 	pipfileLockPath := filepath.Join(envPath, "Pipfile.lock")
 
 	data, err := safeio.ReadFile(pipfileLockPath, maxLockFileSize)
 	if err != nil {
-		errors = append(errors, ScanError{
+		scanErrs = append(scanErrs, ScanError{
 			Path:      envPath,
 			EnvType:   EnvPipenv,
 			Error:     err.Error(),
 			Timestamp: time.Now().UTC(),
 		})
-		return packages, errors
+		return packages, scanErrs
 	}
 
 	var lockData pipfileLockData
 	if err := json.Unmarshal(data, &lockData); err != nil {
-		errors = append(errors, ScanError{
+		scanErrs = append(scanErrs, ScanError{
 			Path:      pipfileLockPath,
 			EnvType:   EnvPipenv,
 			Error:     err.Error(),
 			Timestamp: time.Now().UTC(),
 		})
-		return packages, errors
+		return packages, scanErrs
 	}
 
 	lockModTime := getFileModTime(pipfileLockPath)
@@ -118,14 +118,13 @@ func scanPipenvEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 			}
 
 			// Try to extract license from installed METADATA in site-packages.
-			if sitePackagesDir != "" {
-				metadataPath := filepath.Join(sitePackagesDir, name+"-"+version+".dist-info", "METADATA")
-				if metaBytes, err := safeio.ReadFile(metadataPath, maxPipMetadataSize); err == nil {
-					raw, spdx, tier := ExtractLicenseFromMetadata(string(metaBytes))
-					pkg.LicenseRaw = raw
-					pkg.LicenseSPDX = spdx
-					pkg.LicenseTier = tier
-				}
+			// The dist-info dir name is the wheel-normalized project name, not
+			// the raw Pipfile.lock name (see findDistInfoMetadata).
+			if metaBytes := findDistInfoMetadata(sitePackagesDir, name, version); metaBytes != nil {
+				raw, spdx, tier := ExtractLicenseFromMetadata(string(metaBytes))
+				pkg.LicenseRaw = raw
+				pkg.LicenseSPDX = spdx
+				pkg.LicenseTier = tier
 			}
 
 			packages = append(packages, pkg)
@@ -141,7 +140,7 @@ func scanPipenvEnvironment(envPath string) ([]PackageRecord, []ScanError) {
 		packages[i].InterpreterVersion = interpreterVersion
 	}
 
-	return packages, errors
+	return packages, scanErrs
 }
 
 // stripVersionPrefix removes leading == from pipenv version strings.

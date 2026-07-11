@@ -69,8 +69,6 @@ const (
 	EnvSystemRpm EnvType = "system_rpm"
 )
 
-// PackageRecord represents a single installed Python package discovered on
-// the device. Optional fields use omitempty to reduce JSON noise.
 // OsRelease is the subset of /etc/os-release the server needs to derive a
 // release-keyed distro CVE partition. ID is the distro id (debian, ubuntu,
 // rocky, rhel, …); VersionID is the release (12, 22.04, 9.3). Both may be
@@ -80,6 +78,10 @@ type OsRelease struct {
 	VersionID string `json:"version_id"`
 }
 
+// PackageRecord represents a single installed package discovered on the
+// device across any supported ecosystem (pip/uv/conda/poetry/pipenv PyPI,
+// npm, Maven, NuGet, and system_deb/system_rpm OS packages). Optional
+// fields use omitempty to reduce JSON noise.
 type PackageRecord struct {
 	Name        string `json:"name"`
 	Version     string `json:"version"`
@@ -92,12 +94,18 @@ type PackageRecord struct {
 	// system_rpm; omitted otherwise (apt/yum CVE-correctness slice).
 	SourcePackage      string `json:"source_package,omitempty"`
 	InterpreterVersion string `json:"interpreter_version,omitempty"`
-	InstallerUser      string `json:"installer_user,omitempty"`
-	InstallDate        string `json:"install_date,omitempty"`
-	Environment        string `json:"environment"`
-	LicenseRaw         string `json:"license_raw"`
-	LicenseSPDX        string `json:"license_spdx"`
-	LicenseTier        string `json:"license_tier"`
+	// InstallerUser is the OS account that owns the package's install metadata
+	// (see getFileOwner in owner_{unix,windows}.go).  On Unix it may degrade to
+	// the numeric "uid:<N>" form: the CGO_ENABLED=0 static-binary charter
+	// disables NSS, so a directory (LDAP/AD) owner with no /etc/passwd entry
+	// cannot be resolved to a name.  This is a documented, known degradation,
+	// not a scan error — consumers must tolerate a "uid:<N>" value here.
+	InstallerUser string `json:"installer_user,omitempty"`
+	InstallDate   string `json:"install_date,omitempty"`
+	Environment   string `json:"environment"`
+	LicenseRaw    string `json:"license_raw"`
+	LicenseSPDX   string `json:"license_spdx"`
+	LicenseTier   string `json:"license_tier"`
 	// Container-origin fields — populated only when the scan was
 	// performed inside a container's merged rootfs (Sprint-17
 	// container-image scanner, opt-in via Config.ScanContainers).
@@ -145,30 +153,30 @@ type ScanResult struct {
 	ContainerTargets []ContainerTargetSummary `json:"container_targets,omitempty"`
 
 	// Tags is the operator-supplied per-host metadata from
-	// ``[agent] tags = ...`` in agent.conf.  Pointer-to-slice
+	// `[agent] tags = ...` in agent.conf.  Pointer-to-slice
 	// because we need three distinguishable wire states:
 	//
 	//   nil           → field omitted on the wire entirely
 	//                   (older agent / config has no [agent] section)
 	//                   → server leaves device.tags_agent untouched
-	//   &[]string{}   → field serialises as ``"tags": []``
-	//                   (operator wrote ``tags =`` with no values)
+	//   &[]string{}   → field serialises as `"tags": []`
+	//                   (operator wrote `tags =` with no values)
 	//                   → server clears device.tags_agent
-	//   &[]string{…}  → field serialises as ``"tags": [...]``
+	//   &[]string{…}  → field serialises as `"tags": [...]`
 	//                   → server applies the canonical list
 	//
-	// Plain ``[]string`` + ``omitempty`` would conflate the first
+	// Plain `[]string` + `omitempty` would conflate the first
 	// two cases (Go encoding/json treats nil and empty slices both
 	// as "empty" → both omitted from JSON), making "explicit clear"
 	// indistinguishable from "no tags configured".
 	Tags *[]string `json:"tags,omitempty"`
 
 	// Runtime is the auto-detected host classification — one of
-	// ``bare_metal``, ``container``, ``k8s``, ``unknown``.  Sent
+	// `bare_metal`, `container`, `k8s`, `unknown`.  Sent
 	// on every scan; the server runs the propose-then-approve
 	// workflow (sentari PR #79).  Empty string is back-compat for
 	// older agents — server treats as "field absent" and leaves
-	// ``device.runtime`` untouched.
+	// `device.runtime` untouched.
 	Runtime string `json:"runtime,omitempty"`
 
 	// --- v3 payload extensions (Phase 3 Family-1 data pipeline) ---
@@ -227,4 +235,12 @@ type Config struct {
 	// container.  Exceeded => ScanError, continue with next.
 	// 0 = use default (60s).
 	PerContainerTimeout time.Duration
+	// DataDir is the agent's on-disk state directory (audit/cache
+	// DBs, certs).  The container scanner materialises merged rootfs
+	// trees under it rather than os.TempDir(): on modern distros /tmp
+	// is a tmpfs (RAM), so a large image materialised there would
+	// balloon memory instead of using the agent's disk-backed state
+	// volume.  Empty for bare OSS one-shot runs (`--scan`), which then
+	// fall back to os.TempDir().
+	DataDir string
 }
