@@ -1,6 +1,7 @@
 package containers
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,7 +65,7 @@ func TestMaterialize_OversizeFileRecordedAsScanError(t *testing.T) {
 	// hardlink/copy step, so the result is deterministic regardless of
 	// whether the host filesystem supports hardlinks: the oversize
 	// file is always skipped and recorded, never attached to dest.
-	errs, err := Materialize(tree, dest)
+	errs, err := Materialize(context.Background(), tree, dest, 0)
 	if err != nil {
 		t.Fatalf("Materialize returned fatal error: %v", err)
 	}

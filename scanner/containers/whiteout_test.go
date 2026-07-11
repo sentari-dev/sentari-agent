@@ -27,7 +27,7 @@ func TestParseWhiteoutMarker(t *testing.T) {
 		{"hardlink whiteout short hash", ".wh..wh..plnk.abc123", HardlinkWhiteout, ""},
 		{"hardlink whiteout long hash", ".wh..wh..plnk.deadbeef0001", HardlinkWhiteout, ""},
 
-		// --- unknown ``.wh..wh.`` meta-marker ----------------------
+		// --- unknown `.wh..wh.` meta-marker ----------------------
 		// Not a marker we know; still refuse to emit it as content.
 		{"unknown meta marker", ".wh..wh..xyz", HardlinkWhiteout, ""},
 

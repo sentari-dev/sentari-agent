@@ -16,13 +16,13 @@ import (
 
 // defaultDockerRoot is the well-known Docker data-root on Linux.
 // Overridable via Config.DockerRoot for tests or for hosts where
-// the daemon was configured with ``--data-root=/mnt/docker``.
+// the daemon was configured with `--data-root=/mnt/docker`.
 const defaultDockerRoot = "/var/lib/docker"
 
 // Per-metadata-file size caps.  Every Docker metadata read is routed
 // through safeio with an explicit ceiling so a symlinked or oversized
-// file (a hostile package planting ``cache-id -> /etc/shadow``, or a
-// multi-GB ``repositories.json``) is refused rather than followed or
+// file (a hostile package planting `cache-id -> /etc/shadow`, or a
+// multi-GB `repositories.json`) is refused rather than followed or
 // slurped whole.
 const (
 	// cacheID / mount-id hold a single 64-hex-char layer/mount UUID;
@@ -36,7 +36,7 @@ const (
 // dockerImageConfig mirrors the subset of the Docker image config
 // JSON we consume.  Docker writes the full OCI image config (plus a
 // few Docker-specific fields) under
-// ``image/overlay2/imagedb/content/sha256/<image-id>``; we only need
+// `image/overlay2/imagedb/content/sha256/<image-id>`; we only need
 // the layer chain and a couple of metadata fields for tagging.
 type dockerImageConfig struct {
 	RootFS struct {
@@ -60,17 +60,17 @@ type dockerRepositoriesFile struct {
 }
 
 // dockerContainerConfig is the subset of
-// ``containers/<id>/config.v2.json`` we consume.
+// `containers/<id>/config.v2.json` we consume.
 type dockerContainerConfig struct {
 	ID    string `json:"ID"`
-	Name  string `json:"Name"` // leading ``/`` in docker's layout
+	Name  string `json:"Name"` // leading `/` in docker's layout
 	Image string `json:"Image"`
 	State struct {
 		Running bool `json:"Running"`
 	} `json:"State"`
 }
 
-// discoverDocker walks the Docker storage tree under ``root`` (or
+// discoverDocker walks the Docker storage tree under `root` (or
 // the default) and returns one ContainerTarget per image and per
 // running container.  A non-existent root is not an error — simply
 // no Docker on this host.
@@ -91,8 +91,8 @@ func discoverDocker(root string) ([]ContainerTarget, []scanner.ScanError) {
 		errs    []scanner.ScanError
 	)
 
-	// ``image/<driver>/`` — ``overlay2`` is default since 2017.
-	// Accept ``overlay`` and ``aufs`` as legacy fallbacks so the
+	// `image/<driver>/` — `overlay2` is default since 2017.
+	// Accept `overlay` and `aufs` as legacy fallbacks so the
 	// discoverer doesn't silently miss an old host.
 	imageDir := filepath.Join(root, "image", "overlay2")
 	if !dirExists(imageDir) {
@@ -123,7 +123,7 @@ func discoverDocker(root string) ([]ContainerTarget, []scanner.ScanError) {
 		})
 	}
 
-	// Running containers: walk ``containers/`` and for each one
+	// Running containers: walk `containers/` and for each one
 	// that has the writable upper-dir metadata in layerdb/mounts,
 	// emit a second target with that dir appended.
 	cTargets, cErrs := discoverDockerContainers(root, imageLayers, repoTagsByID)
@@ -149,8 +149,8 @@ func buildDockerImageIndex(root, imageDir string) (
 	repoTagsByID := map[string][]string{}
 	var errs []scanner.ScanError
 
-	// Tags first — lets us attribute ``python:3.12`` back to its
-	// sha256 even when the image was loaded via ``docker load``.
+	// Tags first — lets us attribute `python:3.12` back to its
+	// sha256 even when the image was loaded via `docker load`.
 	if tags, err := readRepositories(filepath.Join(imageDir, "repositories.json")); err == nil {
 		for imageID, ts := range tags {
 			sort.Strings(ts)
@@ -204,8 +204,8 @@ func buildDockerImageIndex(root, imageDir string) (
 }
 
 // resolveDockerLayerPaths turns the image config's bottom-to-top
-// ``diff_ids`` list into a bottom-to-top list of physical layer
-// rootfs paths (``overlay2/<cache-id>/diff``) via the chainID →
+// `diff_ids` list into a bottom-to-top list of physical layer
+// rootfs paths (`overlay2/<cache-id>/diff`) via the chainID →
 // cacheID → diff-dir hop.
 //
 // Chain-ID computation (from docker/distribution's source):
@@ -213,7 +213,7 @@ func buildDockerImageIndex(root, imageDir string) (
 //	chainID[0] = diff_ids[0]
 //	chainID[i] = sha256("<chainID[i-1]> <diff_ids[i]>")
 //
-// The ``sha256:`` prefix is dropped during hashing and re-added for
+// The `sha256:` prefix is dropped during hashing and re-added for
 // layerdb lookup (the directory name omits the prefix).
 func resolveDockerLayerPaths(root, imageDir string, diffIDs []string) ([]string, []scanner.ScanError) {
 	if len(diffIDs) == 0 {
@@ -232,8 +232,8 @@ func resolveDockerLayerPaths(root, imageDir string, diffIDs []string) ([]string,
 			chainID = hex.EncodeToString(h[:])
 		}
 		cacheIDPath := filepath.Join(layerdb, chainID, "cache-id")
-		// safeio: refuse a symlinked cache-id (``cache-id ->
-		// /etc/shadow``) and cap the tiny UUID payload.
+		// safeio: refuse a symlinked cache-id (`cache-id ->
+		// /etc/shadow`) and cap the tiny UUID payload.
 		cacheID, err := safeio.ReadFile(cacheIDPath, dockerLayerIDMaxBytes)
 		if err != nil {
 			errs = append(errs, scanner.ScanError{
@@ -316,7 +316,7 @@ func discoverDockerContainers(root string, imageLayers, repoTagsByID map[string]
 			continue
 		}
 		// Writable upper-dir lives at
-		// ``image/overlay2/layerdb/mounts/<cid>/mount-id`` → UUID.
+		// `image/overlay2/layerdb/mounts/<cid>/mount-id` → UUID.
 		upperDir, err := dockerContainerUpperDir(root, cid)
 		if err != nil {
 			// Best-effort: emit the image layers only.  A
@@ -370,7 +370,7 @@ func dockerContainerUpperDir(root, cid string) (string, error) {
 	return "", fmt.Errorf("no mount-id found for container %s under any known driver", cid)
 }
 
-// readRepositories parses Docker's ``repositories.json`` and
+// readRepositories parses Docker's `repositories.json` and
 // returns imageID → []tags, or nil if the file is absent.
 func readRepositories(path string) (map[string][]string, error) {
 	// safeio-backed: refuses a symlinked or oversized index, caps the
@@ -425,7 +425,7 @@ func readDockerContainerConfig(path string) (dockerContainerConfig, error) {
 	return cfg, nil
 }
 
-// readCappedFile reads up to ``max`` bytes via safeio: it refuses a
+// readCappedFile reads up to `max` bytes via safeio: it refuses a
 // symlinked leaf (O_NOFOLLOW) and non-regular files, caps the size,
 // and stats through the open fd — closing the os.Stat+os.ReadFile
 // TOCTOU window where a path could be swapped to a symlink between
@@ -436,7 +436,7 @@ func readCappedFile(path string, max int64) ([]byte, error) {
 	return safeio.ReadFile(path, max)
 }
 
-// stripSHA256 returns the hex portion of a ``sha256:<hex>`` digest
+// stripSHA256 returns the hex portion of a `sha256:<hex>` digest
 // string, passing through the string unchanged if no prefix is
 // present.
 func stripSHA256(s string) string {

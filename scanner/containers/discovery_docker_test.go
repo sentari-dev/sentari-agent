@@ -10,7 +10,7 @@ import (
 )
 
 // buildDockerFixture crafts a minimal but valid /var/lib/docker tree
-// for unit testing the discoverer.  Each image in ``images`` produces
+// for unit testing the discoverer.  Each image in `images` produces
 // an imagedb config, layerdb entries for every chainID, and an
 // overlay2 diff dir per layer with a marker file inside so the
 // Phase-A walker has something to emit.
@@ -48,7 +48,7 @@ func buildDockerFixture(t *testing.T, images []dockerFixtureImage, containers []
 	}
 	for _, img := range images {
 		// Docker stores tags grouped by repo name (the bit before
-		// ``:tag``).  Keep it simple here: put every image under a
+		// `:tag`).  Keep it simple here: put every image under a
 		// "fixture" repo.  The discoverer only consumes the inner
 		// map, so grouping doesn't matter for the assertions.
 		repos.Repositories["fixture"] = map[string]string{}
@@ -166,8 +166,8 @@ func TestDiscoverDocker_NoRoot(t *testing.T) {
 // match repositories.json.
 func TestDiscoverDocker_SingleImage(t *testing.T) {
 	img := dockerFixtureImage{
-		ID:      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Tags:    []string{"python:3.12"},
+		ID:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Tags: []string{"python:3.12"},
 		DiffIDs: []string{
 			"sha256:1111111111111111111111111111111111111111111111111111111111111111",
 			"sha256:2222222222222222222222222222222222222222222222222222222222222222",

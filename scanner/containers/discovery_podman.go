@@ -51,7 +51,7 @@ type podmanContainerRecord struct {
 // discoverPodman probes each candidate storage root and returns
 // one ContainerTarget per image and per container.  Roots that
 // don't exist are silently skipped — this lets the caller pass
-// the rootless ``$HOME/...`` path alongside the system path without
+// the rootless `$HOME/...` path alongside the system path without
 // emitting spurious "not found" errors on single-mode hosts.
 func discoverPodman(roots []string) ([]ContainerTarget, []scanner.ScanError) {
 	var (
@@ -271,9 +271,9 @@ func readPodmanContainers(path string) ([]podmanContainerRecord, error) {
 	return out, nil
 }
 
-// ensureSHA256Prefix normalises to ``sha256:<hex>`` form.  Podman's
+// ensureSHA256Prefix normalises to `sha256:<hex>` form.  Podman's
 // images.json carries an unprefixed 64-char hex ID and a separate
-// ``digest`` field; we prefer the digest if present, otherwise
+// `digest` field; we prefer the digest if present, otherwise
 // synthesise the prefix.
 func ensureSHA256Prefix(digest, fallbackID string) string {
 	if digest != "" {
