@@ -5,9 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/santhosh-tekuri/jsonschema/v5"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // helper: register a fresh test key under the install-gate trust
@@ -180,7 +185,7 @@ func TestVerifyInstallGate_RejectsMalformedJSON(t *testing.T) {
 func TestVerifyInstallGate_RejectsMissingEcosystems(t *testing.T) {
 	priv := registerInstallGateTestKey(t, "ig-no-ecosystems")
 	// Payload that's structurally valid (passes JSON + signature) but
-	// lacks the ``ecosystems`` field.  Could be a forged payload
+	// lacks the `ecosystems` field.  Could be a forged payload
 	// signed by a compromised key, or the agent talking to the wrong
 	// envelope endpoint.  Refuse rather than silently apply nothing.
 	payload := map[string]interface{}{
@@ -206,7 +211,7 @@ func TestInstallGateCache_RoundTrip(t *testing.T) {
 	}
 
 	// Persisted file must be 0600 — the envelope embeds operator
-	// notes (``reason`` field) that may contain incident references.
+	// notes (`reason` field) that may contain incident references.
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
@@ -282,6 +287,34 @@ func TestInstallGateCache_TamperedFileFailsVerify(t *testing.T) {
 
 	if _, _, err := LoadVerifiedInstallGateFromFile(path); err == nil {
 		t.Fatal("expected verify failure on tampered cache file")
+	}
+}
+
+// TestInstallGateCache_RefusesSymlink: a hostile process with write
+// access to the cache dir could replace the policy-map with a symlink
+// pointing at an arbitrary file.  The safeio-backed loader must refuse
+// to follow it (ErrSymlink) rather than reading and verifying the
+// target — same threat the LoadVerifiedOverlayFromFile twin defends.
+func TestInstallGateCache_RefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "secret.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "policy_map.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create symlink on this platform: %v", err)
+	}
+
+	got, raw, err := LoadVerifiedInstallGateFromFile(link)
+	if err == nil {
+		t.Fatal("expected error loading a symlinked cache path")
+	}
+	if !errors.Is(err, safeio.ErrSymlink) {
+		t.Errorf("expected ErrSymlink, got %v", err)
+	}
+	if got != nil || raw != nil {
+		t.Errorf("symlink load must return nil map/bytes, got (%v, %v)", got, raw)
 	}
 }
 
@@ -451,5 +484,117 @@ func TestAllRegistryEndpoints_OmitsEmptyProxyWhenUnset(t *testing.T) {
 	all := m.AllRegistryEndpoints("pypi")
 	if len(all) != 1 || all[0] != "https://nexus.acme.com/repository/pypi/" {
 		t.Errorf("got %v, want single Nexus entry", all)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Contract pin — install-gate-policy-map-v1 JSON Schema.
+//
+// The agent only CONSUMES this contract: it verifies signed policy-map
+// envelopes fetched from the server and never emits one.  So the guard here
+// validates the canonical payload fixtures the agent MUST accept against the
+// shared schema (docs/contracts/install-gate-policy-map-v1.json), mirroring
+// the pattern in scanner/deptree/contract_v3_round_trip_test.go.  If the
+// server ever tightens the schema in a way that would reject a payload the
+// agent still accepts (or vice-versa), this fails on every PR instead of
+// surfacing as a silently-rejected policy-map in the field.
+// ---------------------------------------------------------------------------
+
+// installGateSchema compiles the shared install-gate policy-map schema.
+// scanner/ is one level below the repo root, so the contract lives at
+// ../docs/contracts.
+func installGateSchema(t *testing.T) *jsonschema.Schema {
+	t.Helper()
+	schemaPath, err := filepath.Abs(filepath.Join("..", "docs", "contracts", "install-gate-policy-map-v1.json"))
+	if err != nil {
+		t.Fatalf("resolve schema path: %v", err)
+	}
+	schema, err := jsonschema.NewCompiler().Compile(schemaPath)
+	if err != nil {
+		t.Fatalf("compile schema %s: %v", schemaPath, err)
+	}
+	return schema
+}
+
+// validateInstallGatePayload marshals a payload map through JSON (the same
+// wire encoding the server produces before signing) and validates it against
+// the compiled schema.
+func validateInstallGatePayload(t *testing.T, schema *jsonschema.Schema, payload map[string]interface{}) error {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var doc interface{}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("unmarshal for validation: %v", err)
+	}
+	return schema.Validate(doc)
+}
+
+// trustedRegistriesInstallGatePayload extends the base fixture with a
+// trusted_registries block carrying both auth modes (bearer + basic), so the
+// schema's `auth` oneOf branch is exercised by the contract guard.
+func trustedRegistriesInstallGatePayload() map[string]interface{} {
+	p := validInstallGatePayload()
+	p["trusted_registries"] = map[string]interface{}{
+		"pypi": []interface{}{
+			map[string]interface{}{
+				"url":   "https://nexus.acme.com/repository/pypi/",
+				"label": "ACME Nexus",
+				"auth": map[string]interface{}{
+					"mode":  "bearer",
+					"token": "s3cr3t-token",
+				},
+			},
+			map[string]interface{}{
+				"url": "https://nexus-eu.acme.com/repository/pypi/",
+				"auth": map[string]interface{}{
+					"mode":     "basic",
+					"username": "svc-agent",
+					"password": "hunter2",
+				},
+			},
+		},
+	}
+	return p
+}
+
+// TestInstallGateContract_AcceptedPayloadsValidateAgainstSchema proves that
+// every payload the agent's verifier accepts also satisfies the shared
+// schema.  For each fixture it (1) signs + runs the real consume path
+// (VerifyInstallGateEnvelope) and (2) validates the same payload against the
+// schema, tying the accepted-on-the-wire form to the contract.
+func TestInstallGateContract_AcceptedPayloadsValidateAgainstSchema(t *testing.T) {
+	schema := installGateSchema(t)
+	fixtures := map[string]map[string]interface{}{
+		"base":              validInstallGatePayload(),
+		"with_trusted_auth": trustedRegistriesInstallGatePayload(),
+	}
+	for name, payload := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			keyID := "ig-contract-" + name
+			priv := registerInstallGateTestKey(t, keyID)
+			envelope := signInstallGateEnvelope(t, priv, keyID, payload)
+			if _, err := VerifyInstallGateEnvelope(envelope); err != nil {
+				t.Fatalf("agent rejected a fixture the contract test treats as canonical: %v", err)
+			}
+			if err := validateInstallGatePayload(t, schema, payload); err != nil {
+				t.Fatalf("accepted payload failed schema validation: %v", err)
+			}
+		})
+	}
+}
+
+// TestInstallGateContract_SchemaRejectsMissingRequiredField guards against a
+// vacuous contract test: if the schema failed to compile or matched anything,
+// the positive test above would pass regardless.  A payload missing the
+// required `ecosystems` field must be rejected by the schema.
+func TestInstallGateContract_SchemaRejectsMissingRequiredField(t *testing.T) {
+	schema := installGateSchema(t)
+	bad := validInstallGatePayload()
+	delete(bad, "ecosystems")
+	if err := validateInstallGatePayload(t, schema, bad); err == nil {
+		t.Fatal("schema must reject a payload missing the required 'ecosystems' field")
 	}
 }

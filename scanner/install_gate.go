@@ -11,16 +11,16 @@
 // Why a separate channel from the license-map and (future) vuln-map:
 // the install-gate signing key is rotated independently — a key
 // compromise on one channel must not bleed into the other two.
-// Trust state per channel is keyed by ``key_id``; the registries are
+// Trust state per channel is keyed by `key_id`; the registries are
 // disjoint maps in this package so a misconfigured caller cannot
 // accidentally share a key across channels.
 //
 // Canonical-JSON rules are identical to the license-map: sorted keys
 // at every level, no insignificant whitespace, UTF-8 with non-ASCII
-// preserved, HTML chars not escaped.  The ``canonicalJSON`` helper in
-// ``signed_map.go`` is reused unchanged — Go's package-private
+// preserved, HTML chars not escaped.  The `canonicalJSON` helper in
+// `signed_map.go` is reused unchanged — Go's package-private
 // linkage gives us that for free, and the server-side
-// ``server/services/signing.py`` produces byte-identical output
+// `server/services/signing.py` produces byte-identical output
 // for the install-gate payload schema.
 
 package scanner
@@ -31,22 +31,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // MaxInstallGatePayloadBytes caps the canonical-JSON size of a
 // policy-map payload.  Mirrors the server-side cap in
-// ``server/services/signing.py``; an envelope larger than this is
+// `server/services/signing.py`; an envelope larger than this is
 // refused by the server signer too.
 const MaxInstallGatePayloadBytes = 5 * 1024 * 1024 // 5 MiB
 
 // trustedInstallGateKeys is the registry of ed25519 public keys the
-// agent will accept as policy-map signers, keyed by ``key_id``.
-// Populated by ``RegisterTrustedInstallGateKey`` (called from
+// agent will accept as policy-map signers, keyed by `key_id`.
+// Populated by `RegisterTrustedInstallGateKey` (called from
 // /register response handling) and never mutated on the hot path.
 //
 // trustedInstallGateKeysMu guards the map against a register racing a
@@ -95,21 +96,26 @@ func TrustedInstallGateKeyIDs() []string {
 // InstallGateEntry is one rule on the deny/allow list — flat enough
 // that the per-ecosystem writers can iterate it without further
 // schema knowledge.  Pointer fields are intentional — the server
-// emits ``null`` (not the empty string) for "no value", and a
-// non-pointer ``string`` would silently coerce ``null`` to the zero
+// emits `null` (not the empty string) for "no value", and a
+// non-pointer `string` would silently coerce `null` to the zero
 // value, hiding the distinction between "unset" and "empty string"
 // from downstream writers that may want to treat them differently.
+// `severity` is typed `["string", "null"]` in
+// install-gate-policy-map-v1, so it is a pointer for the same reason;
+// only `pattern` is guaranteed present. The map is consume-only —
+// unmarshalled from the verified envelope and never re-emitted — so
+// the pointer round-trips `null` faithfully with no payload impact.
 type InstallGateEntry struct {
 	Pattern      string  `json:"pattern"`
 	VersionRange *string `json:"version_range"`
-	Severity     string  `json:"severity"`
+	Severity     *string `json:"severity"`
 	Reason       *string `json:"reason"`
 	ScopeEnvTag  *string `json:"scope_env_tag"`
 	ExpiresAt    *string `json:"expires_at"`
 }
 
-// InstallGateEcosystemBlock is one ecosystem's rule set.  ``Mode`` is
-// "deny_list" or "allow_list".  Empty ``Entries`` is meaningful —
+// InstallGateEcosystemBlock is one ecosystem's rule set.  `Mode` is
+// "deny_list" or "allow_list".  Empty `Entries` is meaningful —
 // signals that any previously-applied config for this ecosystem
 // should be reverted on the next sync.
 type InstallGateEcosystemBlock struct {
@@ -118,19 +124,19 @@ type InstallGateEcosystemBlock struct {
 }
 
 // InstallGateMap is the verified policy-map payload.  Maps to the
-// envelope shape produced by ``server/api/v1/agent.py:get_policy_map``.
+// envelope shape produced by `server/api/v1/agent.py:get_policy_map`.
 //
-// ``Version`` is the integer epoch of the most-recent ``updated_at``
+// `Version` is the integer epoch of the most-recent `updated_at`
 // across active rules.  Agents skip the apply step when their cached
 // version is already >= the incoming value, so the writers run only
 // when something actually changed.
 //
-// ``ProxyEndpoints`` carries the per-ecosystem Sentari-Proxy URLs
+// `ProxyEndpoints` carries the per-ecosystem Sentari-Proxy URLs
 // the writers will use to gate installs.  Empty for ecosystems the
 // operator has not configured a proxy for; the writer treats empty
 // as "no proxy override" and emits a no-op config.
 //
-// ``TrustedRegistries`` (server PR #118) carries the per-tenant
+// `TrustedRegistries` (server PR #118) carries the per-tenant
 // Nexus / Artifactory / ProGet mirror URLs the operator has
 // configured.  When set for an ecosystem, writers prefer the first
 // trusted-registry URL over the Sentari-Proxy endpoint — that's the
@@ -149,29 +155,29 @@ type InstallGateMap struct {
 
 // TrustedRegistry is one entry in the per-tenant override list.
 //
-// ``URL`` is the canonical mirror endpoint that pip / npm / Maven /
+// `URL` is the canonical mirror endpoint that pip / npm / Maven /
 // NuGet writers will inject into the native config (index-url,
 // registry=, <mirror><url>, <add key="…" value="…">).  Server-side
 // validation guarantees it's http:// or https:// with no embedded
 // credentials.
 //
-// ``Label`` is an optional human-friendly tag the operator set in
+// `Label` is an optional human-friendly tag the operator set in
 // the dashboard.  Decoded off the envelope and held on the in-
 // memory struct so future writer changes (registry-aware audit-log
 // entries, generated-config comment lines) can surface it without a
 // schema change.  Today's writers don't render it — they pick a URL
 // and stop — but the field round-trips through the agent unchanged.
 //
-// ``Auth`` is the optional credential block the server inlines when
+// `Auth` is the optional credential block the server inlines when
 // the operator has configured per-registry auth via the install-gate
 // trusted-registries API.  Absent on entries that don't require auth
 // (the common case — public mirrors, anonymous Nexus instances).
-// Pointer-typed so the JSON tag's ``omitempty`` actually omits the
+// Pointer-typed so the JSON tag's `omitempty` actually omits the
 // field on serialise; a value-typed struct with all empty fields
-// would still marshal to ``"auth":{}`` and the server-side contract
+// would still marshal to `"auth":{}` and the server-side contract
 // requires that "no auth" mean "no field".  When the server's
-// decrypt path fails (PR #126 ``_resolve_registry_auth``), the
-// server ships the entry with ``Auth == nil`` — writers MUST treat
+// decrypt path fails (PR #126 `_resolve_registry_auth`), the
+// server ships the entry with `Auth == nil` — writers MUST treat
 // that as "apply URL only" without retrying without auth, and the
 // resulting 401 against the private mirror is the operator-visible
 // signal that the credential side is broken.
@@ -182,26 +188,26 @@ type TrustedRegistry struct {
 }
 
 // RegistryAuth carries the cleartext credentials reconstituted from
-// the server's encrypted ``system_config`` sibling rows.  See
-// ``docs/contracts/install-gate-policy-map-v1.md`` (server-side
+// the server's encrypted `system_config` sibling rows.  See
+// `docs/contracts/install-gate-policy-map-v1.md` (server-side
 // copy) for the wire shape — agent-side this file is the byte-
 // identical mirror.
 //
-// Two modes are valid today; an unknown ``Mode`` is treated as
+// Two modes are valid today; an unknown `Mode` is treated as
 // "apply URL only" by the writers (forwards-compatibility — the
 // server may add modes ahead of the agent).
 //
-//   - ``bearer``: ``Token`` carries the value.  Apply as
-//     ``Authorization: Bearer <Token>`` (npm
-//     ``_authToken``, Maven ``httpHeaders``, NuGet password slot
-//     with literal username "any") or as a pip ``~/.netrc`` line
-//     with login ``__token__``.
+//   - `bearer`: `Token` carries the value.  Apply as
+//     `Authorization: Bearer <Token>` (npm
+//     `_authToken`, Maven `httpHeaders`, NuGet password slot
+//     with literal username "any") or as a pip `~/.netrc` line
+//     with login `__token__`.
 //
-//   - ``basic``: ``Username`` + ``Password``.  Apply as the
+//   - `basic`: `Username` + `Password`.  Apply as the
 //     ecosystem's native basic-auth idiom (netrc, npm
-//     ``_auth``/``_password``, Maven ``<server>`` username +
-//     password, NuGet ``<add key="Username">`` +
-//     ``<add key="ClearTextPassword">``).
+//     `_auth`/`_password`, Maven `<server>` username +
+//     password, NuGet `<add key="Username">` +
+//     `<add key="ClearTextPassword">`).
 //
 // The struct is intentionally not stringified anywhere — writers
 // embed fields into rendered files directly, and the agent must
@@ -215,7 +221,7 @@ type RegistryAuth struct {
 }
 
 // HasUsableAuth returns true when the auth block carries enough to
-// authenticate.  An entry whose ``Auth`` field is non-nil but whose
+// authenticate.  An entry whose `Auth` field is non-nil but whose
 // mode is unknown or fields are missing is treated as "no auth" so
 // writers fail closed against the mirror rather than emit a half-
 // formed credential.
@@ -261,12 +267,12 @@ func (m *InstallGateMap) PickRegistryEndpoint(ecosystem string) (url string, tru
 // Sentari-Proxy endpoint when present.
 //
 // Today only the pip writer consumes the full list (it renders the
-// primary URL as ``index-url`` and the rest as a single
-// ``extra-index-url`` line).  The npm, Maven, and NuGet writers
-// currently take a single URL via ``PickRegistryEndpoint``, and the
-// uv / pdm writers still read ``ProxyEndpoints`` directly.  The
-// helper is exported for the day NuGet ``<add key>`` chains and
-// Maven per-repository ``<mirrorOf>`` patterns become writer-
+// primary URL as `index-url` and the rest as a single
+// `extra-index-url` line).  The npm, Maven, and NuGet writers
+// currently take a single URL via `PickRegistryEndpoint`, and the
+// uv / pdm writers still read `ProxyEndpoints` directly.  The
+// helper is exported for the day NuGet `<add key>` chains and
+// Maven per-repository `<mirrorOf>` patterns become writer-
 // supported — leaving them as a one-line helper change away.
 //
 // Keep this docstring in sync with the writer matrix when that
@@ -289,10 +295,10 @@ func (m *InstallGateMap) AllRegistryEndpoints(ecosystem string) []string {
 
 // RegistryEndpoint is a (URL, Auth) pair returned by credential-aware
 // selectors below.  Writers consume this when they need to apply
-// per-mirror credentials to native config files (pip's ``~/.netrc``,
-// npm's ``_authToken`` lines, Maven ``<servers>`` block, NuGet
-// ``<packageSourceCredentials>``).  The Sentari-Proxy fallback
-// always has ``Auth == nil`` (the proxy uses agent mTLS for AuthN);
+// per-mirror credentials to native config files (pip's `~/.netrc`,
+// npm's `_authToken` lines, Maven `<servers>` block, NuGet
+// `<packageSourceCredentials>`).  The Sentari-Proxy fallback
+// always has `Auth == nil` (the proxy uses agent mTLS for AuthN);
 // only operator-curated trusted-registry entries can carry auth.
 type RegistryEndpoint struct {
 	URL  string
@@ -301,11 +307,11 @@ type RegistryEndpoint struct {
 
 // AllRegistryEndpointsWithAuth returns each configured endpoint paired
 // with its auth block (nil when the entry has no credentials).  Order
-// is identical to ``AllRegistryEndpoints``: trusted-registries first
+// is identical to `AllRegistryEndpoints`: trusted-registries first
 // in declaration order, then the Sentari-Proxy fallback.
 //
 // Writers that need both URLs and credentials use this helper; older
-// writers that only need URLs keep calling ``AllRegistryEndpoints``
+// writers that only need URLs keep calling `AllRegistryEndpoints`
 // (which now thin-wraps this one) and stay credential-agnostic.
 func (m *InstallGateMap) AllRegistryEndpointsWithAuth(ecosystem string) []RegistryEndpoint {
 	if m == nil {
@@ -375,7 +381,7 @@ func (m *InstallGateMap) ZeroRegistryCredentials() {
 }
 
 // VerifyInstallGateEnvelope parses + verifies a signed policy-map
-// envelope and returns the inner ``InstallGateMap`` on success.
+// envelope and returns the inner `InstallGateMap` on success.
 // Returns a typed error for any failure so callers can log without
 // leaking internals.
 //
@@ -417,8 +423,8 @@ func VerifyInstallGateEnvelope(data []byte) (*InstallGateMap, error) {
 	// Re-canonicalise the payload so Go's map-iteration order does not
 	// affect verification.  Reuses the package-private helper that the
 	// license-map verifier shares; same byte output as
-	// ``server/services/signing.py:canonical_json``.  The helper decodes
-	// numbers with json.Number (UseNumber) so the integer ``version``
+	// `server/services/signing.py:canonical_json`.  The helper decodes
+	// numbers with json.Number (UseNumber) so the integer `version`
 	// epoch round-trips exactly even at or above 2^53 — a plain
 	// map[string]interface{} would coerce it to float64 and break the
 	// signature check.
@@ -435,7 +441,7 @@ func VerifyInstallGateEnvelope(data []byte) (*InstallGateMap, error) {
 	if err := json.Unmarshal(env.Payload, &m); err != nil {
 		return nil, fmt.Errorf("install-gate envelope: payload schema: %w", err)
 	}
-	// ``Ecosystems`` is mandatory — the server always emits a key for
+	// `Ecosystems` is mandatory — the server always emits a key for
 	// every supported ecosystem (with empty Entries when no rules
 	// exist).  Missing entirely means we are reading something other
 	// than a policy-map (or a forged but signed payload from a
@@ -447,41 +453,35 @@ func VerifyInstallGateEnvelope(data []byte) (*InstallGateMap, error) {
 }
 
 // LoadVerifiedInstallGateFromFile reads a cached envelope from disk,
-// verifies it, and returns ``(map, raw envelope bytes, nil)`` on
+// verifies it, and returns `(map, raw envelope bytes, nil)` on
 // success.  Returns:
 //
-//   - ``(nil, nil, nil)`` when the file does not exist (fresh install
+//   - `(nil, nil, nil)` when the file does not exist (fresh install
 //     — caller falls back to a network fetch).
-//   - ``(nil, nil, err)`` on read errors and on verification failures
+//   - `(nil, nil, err)` on read errors and on verification failures
 //     so the caller can log at warning level.  A tampered cache is
 //     the expected signal to refuse to apply and re-fetch fresh.
 //
-// The read is bounded by ``MaxInstallGatePayloadBytes`` so a
+// The read is bounded by `MaxInstallGatePayloadBytes` so a
 // pathological cache file (filesystem corruption, hostile process
 // with write access to the cache dir) cannot OOM the agent before
-// the size check inside ``VerifyInstallGateEnvelope`` fires.
+// the size check inside `VerifyInstallGateEnvelope` fires.
 func LoadVerifiedInstallGateFromFile(path string) (*InstallGateMap, []byte, error) {
-	f, err := os.Open(path)
+	// Bounded, symlink-/special-file-refusing read.  A plain os.Open +
+	// unbounded io.ReadAll would block forever on a FIFO cache path (no
+	// writer) or follow a symlink swapped in by a hostile process with
+	// write access to the cache dir, before VerifyInstallGateEnvelope's
+	// size cap could fire.  safeio.ReadFile stat-checks the file type and
+	// size up front and refuses symlinks / non-regular files, mirroring
+	// the LoadVerifiedOverlayFromFile twin.  Cap at
+	// MaxInstallGatePayloadBytes — VerifyInstallGateEnvelope re-applies
+	// the same cap defensively.
+	data, err := safeio.ReadFile(path, MaxInstallGatePayloadBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil, nil
 		}
-		return nil, nil, fmt.Errorf("install-gate cache open: %w", err)
-	}
-	defer f.Close()
-
-	// Read one byte past the cap so we can distinguish "exactly at
-	// cap" (legal) from "over cap" (refuse).  ``VerifyInstallGateEnvelope``
-	// re-applies the same cap defensively.
-	data, err := io.ReadAll(io.LimitReader(f, MaxInstallGatePayloadBytes+1))
-	if err != nil {
 		return nil, nil, fmt.Errorf("install-gate cache read: %w", err)
-	}
-	if len(data) > MaxInstallGatePayloadBytes {
-		return nil, nil, fmt.Errorf(
-			"install-gate cache exceeds max size (>%d bytes)",
-			MaxInstallGatePayloadBytes,
-		)
 	}
 
 	m, err := VerifyInstallGateEnvelope(data)
@@ -494,7 +494,7 @@ func LoadVerifiedInstallGateFromFile(path string) (*InstallGateMap, []byte, erro
 // SaveVerifiedInstallGateEnvelopeToFile persists the full signed
 // envelope (not the decoded map) so the next load can re-verify
 // rather than trust the on-disk decoded form.  File mode 0600 — the
-// envelope embeds operator notes (the ``reason`` field on each rule)
+// envelope embeds operator notes (the `reason` field on each rule)
 // that may include incident IDs or upstream-vendor references.
 //
 // SECURITY: the envelope is the verbatim signed bytes, which can embed

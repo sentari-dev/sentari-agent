@@ -14,14 +14,14 @@ import (
 // added to the expected set.
 func TestScannerRegistry_AllBuiltinsRegistered(t *testing.T) {
 	want := map[string]bool{
-		EnvPip:              true,
-		EnvVenv:             true,
-		EnvConda:            true,
-		EnvPoetry:           true,
-		EnvPipenv:           true,
-		EnvSystemDeb:        true,
-		EnvSystemRpm:        true,
-		envWindowsRegistry:  true,
+		EnvPip:             true,
+		EnvVenv:            true,
+		EnvConda:           true,
+		EnvPoetry:          true,
+		EnvPipenv:          true,
+		EnvSystemDeb:       true,
+		EnvSystemRpm:       true,
+		envWindowsRegistry: true,
 	}
 	got := map[string]bool{}
 	for _, s := range RegisteredScanners() {
