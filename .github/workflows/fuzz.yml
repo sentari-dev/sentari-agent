@@ -20,7 +20,7 @@ on:
     - cron: "0 3 * * *"
   # Cheap bounded pass on any PR that touches the parsers or this workflow.
   pull_request:
-    branches: [main]
+    branches: [main, develop]
     paths:
       - "scanner/**/*.go"
       - ".github/workflows/fuzz.yml"
