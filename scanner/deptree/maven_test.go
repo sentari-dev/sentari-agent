@@ -1,6 +1,7 @@
 package deptree
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -8,7 +9,7 @@ import (
 func TestParseMavenPom_directWithTransitive(t *testing.T) {
 	fixtureDir := filepath.Join("testdata", "maven", "simple")
 	m2Dir := filepath.Join(fixtureDir, ".m2", "repository")
-	edges, err := ParseMavenPom(filepath.Join(fixtureDir, "pom.xml"), m2Dir)
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(fixtureDir, "pom.xml"), m2Dir)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
@@ -41,12 +42,43 @@ func TestParseMavenPom_directWithTransitive(t *testing.T) {
 	}
 }
 
+// TestParseMavenPom_contextCancellation verifies the transitive BFS honours
+// ctx cancellation: a cancelled context returns promptly with a PARTIAL edge
+// set (fewer than the full walk), no error, and no panic — matching the
+// best-effort contract of the other deptree parsers.
+func TestParseMavenPom_contextCancellation(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "maven", "simple")
+	m2Dir := filepath.Join(fixtureDir, ".m2", "repository")
+	pom := filepath.Join(fixtureDir, "pom.xml")
+
+	// Baseline: an un-cancelled walk resolves the full graph (2 edges).
+	full, err := ParseMavenPom(context.Background(), pom, m2Dir)
+	if err != nil {
+		t.Fatalf("baseline parse failed: %v", err)
+	}
+	if len(full) == 0 {
+		t.Fatalf("baseline should emit edges, got 0")
+	}
+
+	// Cancelled up-front: the BFS loop bails on its first ctx.Err() check,
+	// so the transitive edges are never resolved. Must not error or panic.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err := ParseMavenPom(ctx, pom, m2Dir)
+	if err != nil {
+		t.Fatalf("cancelled parse must return nil error (best-effort), got %v", err)
+	}
+	if len(got) >= len(full) {
+		t.Fatalf("cancelled walk should return fewer edges than the full walk: got %d, full %d", len(got), len(full))
+	}
+}
+
 func TestParseMavenPom_bomImportEmitsUnresolved(t *testing.T) {
 	fixtureDir := filepath.Join("testdata", "maven", "with-bom")
 	// No .m2 needed — the spring-boot-dependencies POM is intentionally
 	// absent so we can verify BOM import emits Resolved=false without
 	// recursing into anything.
-	edges, err := ParseMavenPom(filepath.Join(fixtureDir, "pom.xml"), filepath.Join(fixtureDir, "nonexistent-m2"))
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(fixtureDir, "pom.xml"), filepath.Join(fixtureDir, "nonexistent-m2"))
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}

@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\n  \"name\": \"seed-app\",\n  \"version\": \"1.0.0\",\n  \"lockfileVersion\": 3,\n  \"requires\": true,\n  \"packages\": {\n    \"\": {\n      \"name\": \"seed-app\",\n      \"version\": \"1.0.0\",\n      \"dependencies\": { \"lodash\": \"^4.17.21\" }\n    },\n    \"node_modules/lodash\": { \"version\": \"4.17.21\", \"license\": \"MIT\" }\n  }\n}")

@@ -1,0 +1,43 @@
+{
+  "version": 3,
+  "targets": {
+    ".NETCoreApp,Version=v6.0/win-x64": {
+      "Serilog/3.1.1": {
+        "type": "package",
+        "dependencies": {
+          "Serilog.Sinks.Console": "5.0.1"
+        }
+      },
+      "Serilog.Sinks.Console/5.0.1": {
+        "type": "package"
+      },
+      "Newtonsoft.Json/13.0.3": {
+        "type": "package",
+        "dependencies": {
+          "Microsoft.CSharp": "4.7.0"
+        }
+      },
+      "Microsoft.CSharp/4.7.0": {
+        "type": "package"
+      }
+    }
+  },
+  "project": {
+    "version": "2.0.0",
+    "restore": {
+      "projectName": "RealNetApp"
+    },
+    "frameworks": {
+      "net6.0": {
+        "dependencies": {
+          "Serilog": {
+            "version": "[3.1.1, )"
+          },
+          "Newtonsoft.Json": {
+            "version": "[13.0.3, )"
+          }
+        }
+      }
+    }
+  }
+}

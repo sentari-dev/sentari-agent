@@ -54,12 +54,16 @@ func ParseNpmPackageLock(lockPath string) ([]DepEdge, error) {
 
 	// Build a map from package-lock key (e.g. "node_modules/lodash" or
 	// "node_modules/@scope/pkg") to the package name. Root key is "".
+	// Workspace-member keys are local filesystem paths (e.g.
+	// "packages/liba") that are NOT package names — for those the entry's
+	// own "name" field is used (see npmEntryName), so a key like
+	// "packages/liba" never leaks onto the wire as a parent/child name.
 	keyToName := map[string]string{"": rootName}
-	for key := range lock.Packages {
+	for key, entry := range lock.Packages {
 		if key == "" {
 			continue
 		}
-		keyToName[key] = npmPackageNameFromKey(key)
+		keyToName[key] = npmEntryName(key, entry)
 	}
 
 	// BFS from root to compute depth + introduced_by_path.
@@ -71,6 +75,33 @@ func ParseNpmPackageLock(lockPath string) ([]DepEdge, error) {
 	depthByKey := map[string]int{"": 0}
 	pathByKey := map[string][]string{"": {rootName}}
 	queue := []bfsItem{{key: "", path: []string{rootName}, depth: 0}}
+
+	// Seed the BFS with workspace-member entries as additional depth-1
+	// roots. In an npm workspaces lockfile the members live under local
+	// filesystem keys (e.g. "packages/liba") that carry their own "name"
+	// field and are NOT reachable from the root "" via node_modules
+	// resolution — their dependency subtrees would otherwise be
+	// BFS-unreachable and (pre-fix) shipped as fabricated depth-0 edges
+	// with a 2-element path, violating depth==len(path)-1 and the
+	// root-anchored-path invariant. Anchoring each member at
+	// [root, member] (depth 1) gives its whole subtree a real
+	// root→member→… path. Members mirror Maven reactor modules; their own
+	// direct deps then surface as transitive (depth>=2) like every other
+	// sub-root npm edge.
+	for key, entry := range lock.Packages {
+		if key == "" || strings.Contains(key, "node_modules/") {
+			continue
+		}
+		name := entry.Name
+		if name == "" {
+			continue
+		}
+		memberPath := []string{rootName, name}
+		depthByKey[key] = 1
+		pathByKey[key] = memberPath
+		queue = append(queue, bfsItem{key: key, path: memberPath, depth: 1})
+	}
+
 	for len(queue) > 0 {
 		head := queue[0]
 		queue = queue[1:]
@@ -86,7 +117,7 @@ func ParseNpmPackageLock(lockPath string) ([]DepEdge, error) {
 		}
 		for _, deps := range depMaps {
 			for childSpec := range deps {
-				childKey, childEntry, found := npmResolveChild(lock.Packages, head.key, childSpec)
+				childKey, _, found := npmResolveChild(lock.Packages, head.key, childSpec)
 				if !found {
 					continue
 				}
@@ -94,32 +125,39 @@ func ParseNpmPackageLock(lockPath string) ([]DepEdge, error) {
 					continue
 				}
 				childPath := append([]string{}, head.path...)
-				childPath = append(childPath, npmPackageNameFromKey(childKey))
+				childPath = append(childPath, keyToName[childKey])
 				depthByKey[childKey] = head.depth + 1
 				pathByKey[childKey] = childPath
 				queue = append(queue, bfsItem{key: childKey, path: childPath, depth: head.depth + 1})
-				_ = childEntry // marker to keep variable in scope for readability
 			}
 		}
 	}
 
 	var edges []DepEdge
 	for parentKey, parentEntry := range lock.Packages {
+		if _, reached := pathByKey[parentKey]; !reached {
+			// Parent not reachable from the root project (extraneous
+			// install, orphaned entry, a workspace member with no "name").
+			// Drop all its edges — the same convention pypi/pnpm/nuget
+			// follow — instead of fabricating a depth-0, 2-element path
+			// that violates depth==len(path)-1 and the root-anchored-path
+			// invariant.
+			continue
+		}
 		parentName := keyToName[parentKey]
 		parentVersion := parentEntry.Version
 		if parentKey == "" {
 			parentVersion = rootVersion
 		}
-		parentPath := pathByKey[parentKey]
 		// Each of the 4 dependency maps becomes edges with the appropriate type.
 		// At root, devDependencies → "dev", peerDeps → "peer", optionalDeps → "optional".
 		// Below root, every edge is "transitive" regardless of how it was declared
 		// (npm flattens; we lose the "was this dev?" semantics past depth 0).
-		edges = appendEdges(edges, parentKey, parentName, parentVersion, parentPath, parentEntry.Dependencies, lock.Packages, keyToName, depthByKey, pathByKey, "direct")
+		edges = appendEdges(edges, parentKey, parentName, parentVersion, parentEntry.Dependencies, lock.Packages, keyToName, depthByKey, pathByKey, "direct")
 		if parentKey == "" {
-			edges = appendEdges(edges, parentKey, parentName, parentVersion, parentPath, parentEntry.DevDependencies, lock.Packages, keyToName, depthByKey, pathByKey, "dev")
-			edges = appendEdges(edges, parentKey, parentName, parentVersion, parentPath, parentEntry.PeerDependencies, lock.Packages, keyToName, depthByKey, pathByKey, "peer")
-			edges = appendEdges(edges, parentKey, parentName, parentVersion, parentPath, parentEntry.OptionalDependencies, lock.Packages, keyToName, depthByKey, pathByKey, "optional")
+			edges = appendEdges(edges, parentKey, parentName, parentVersion, parentEntry.DevDependencies, lock.Packages, keyToName, depthByKey, pathByKey, "dev")
+			edges = appendEdges(edges, parentKey, parentName, parentVersion, parentEntry.PeerDependencies, lock.Packages, keyToName, depthByKey, pathByKey, "peer")
+			edges = appendEdges(edges, parentKey, parentName, parentVersion, parentEntry.OptionalDependencies, lock.Packages, keyToName, depthByKey, pathByKey, "optional")
 		}
 	}
 	return edges, nil
@@ -128,7 +166,6 @@ func ParseNpmPackageLock(lockPath string) ([]DepEdge, error) {
 func appendEdges(
 	edges []DepEdge,
 	parentKey, parentName, parentVersion string,
-	parentPath []string,
 	deps map[string]string,
 	packages map[string]npmPackageEntry,
 	keyToName map[string]string,
@@ -141,13 +178,14 @@ func appendEdges(
 		if !found {
 			continue
 		}
-		childName := keyToName[childKey]
-		childPath := pathByKey[childKey]
-		if len(childPath) == 0 && len(parentPath) > 0 {
-			// Child not BFS-reached but parent was: extend the parent chain.
-			childPath = append([]string{}, parentPath...)
-			childPath = append(childPath, childName)
+		childPath, reached := pathByKey[childKey]
+		if !reached {
+			// Child not reachable from the root project — drop the edge
+			// rather than fabricate a depth-0 path (mirrors the parent
+			// drop in the emission loop above).
+			continue
 		}
+		childName := keyToName[childKey]
 		edgeType := atRootType
 		if parentKey != "" {
 			edgeType = "transitive"
@@ -210,6 +248,26 @@ func npmParentKey(key string) string {
 	// Step back over the leading "node_modules/" plus the preceding "/".
 	parent := strings.TrimSuffix(key[:idx], "/")
 	return parent
+}
+
+// npmEntryName resolves the package name for a packages-map key.
+//
+// For installed-dependency keys (those containing a node_modules/
+// segment) the trailing segment after the last node_modules/ is the
+// name. For workspace-member keys — local filesystem paths like
+// "packages/liba" with no node_modules/ segment — the key is NOT a
+// package name, so the entry's own "name" field is preferred; the raw
+// key is only a last-resort fallback when the entry omits its name.
+// This stops workspace lockfile keys ("packages/liba") from leaking
+// onto the wire as parent_name/child_name/path entries.
+func npmEntryName(key string, entry npmPackageEntry) string {
+	if strings.Contains(key, "node_modules/") {
+		return npmPackageNameFromKey(key)
+	}
+	if entry.Name != "" {
+		return entry.Name
+	}
+	return npmPackageNameFromKey(key)
 }
 
 // npmPackageNameFromKey extracts the package name from a key like

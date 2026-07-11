@@ -1,0 +1,2 @@
+go test fuzz v1
+string("# project deps\nrequests==2.31.0\nurllib3>=1.26,<3\nflask[async]>=2.0\n")

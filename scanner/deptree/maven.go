@@ -11,6 +11,7 @@
 package deptree
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"os"
@@ -85,13 +86,19 @@ func resolveVersionRange(m2Dir, groupId, artifactId, rangeStr string) string {
 	// Parse the range to extract bounds.
 	// Supported: [low,high)  [low,high]  (low,high)  [exact]
 	s := strings.TrimSpace(rangeStr)
-	if s == "" {
+	// A well-formed range needs at least the two bracket delimiters
+	// ("[]"/"()"). A 1-char (or empty) string such as "[" or "(" — which
+	// isVersionRange accepts because it only checks the first byte — would
+	// otherwise slice s[1:len(s)-1] == s[1:0] and panic on the bounds. The
+	// package doc promises this resolver never panics, so bail out to a
+	// verbatim (Resolved=false) range instead.
+	if len(s) < 2 {
 		return ""
 	}
 
 	// Determine inclusivity of bounds.
 	lowInclusive := s[0] == '['
-	highInclusive := len(s) > 0 && s[len(s)-1] == ']'
+	highInclusive := s[len(s)-1] == ']'
 	inner := s[1 : len(s)-1]
 
 	var low, high string
@@ -107,7 +114,11 @@ func resolveVersionRange(m2Dir, groupId, artifactId, rangeStr string) string {
 		// Return exact if installed.
 		gaDir := filepath.Join(m2Dir, strings.ReplaceAll(groupId, ".", string(filepath.Separator)), artifactId, exact)
 		pomFile := filepath.Join(gaDir, fmt.Sprintf("%s-%s.pom", artifactId, exact))
-		if _, err := safeio.ReadFile(pomFile, 1); err == nil {
+		// A regular .pom on disk is the strongest signal the exact version
+		// is installed.  Lstat (not Stat) so a symlinked .pom cannot
+		// masquerade as an installed artifact — mirrors safeio's refusal
+		// to follow a symlink leaf.
+		if info, err := os.Lstat(pomFile); err == nil && info.Mode().IsRegular() {
 			return exact
 		}
 		// Fall back to directory presence (no .pom yet fully downloaded).
@@ -275,7 +286,7 @@ func interpolateProps(v, projectVersion string, props map[string]string) string 
 // Parent POMs are resolved from ~/.m2 via their GAV coordinate.
 // If a parent POM is absent from the local cache the chain terminates
 // at that point — the agent never fetches from the network.
-func resolveParentChain(pom mavenPom, m2Dir string) (props map[string]string, managed map[mavenGA]string) {
+func resolveParentChain(ctx context.Context, pom mavenPom, m2Dir string) (props map[string]string, managed map[mavenGA]string) {
 	props = map[string]string{}
 	managed = map[mavenGA]string{}
 
@@ -291,6 +302,10 @@ func resolveParentChain(pom mavenPom, m2Dir string) (props map[string]string, ma
 	cur := pom
 	seen := map[string]bool{}
 	for depth := 0; depth < maxParentChainDepth; depth++ {
+		if ctx.Err() != nil {
+			// Cancelled mid-walk: return whatever ancestors resolved so far.
+			break
+		}
 		p := cur.Parent
 		if p.GroupID == "" || p.ArtifactID == "" || p.Version == "" {
 			break
@@ -356,7 +371,13 @@ func resolveParentChain(pom mavenPom, m2Dir string) (props map[string]string, ma
 // lets multi-module Spring Boot / Quarkus / Camel projects (where the
 // top-level pom has no <dependencies>) surface their full dep graph
 // instead of silently emitting zero edges.
-func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
+//
+// The walk is cancellable: a huge multi-module reactor can take a while, so
+// ctx is checked at the top of the transitive BFS loop and threaded into the
+// parent-chain and reactor-module walks. On cancellation the resolver returns
+// the edges resolved so far (PARTIAL, nil error) rather than a hard failure —
+// matching the best-effort contract of the other deptree parsers.
+func ParseMavenPom(ctx context.Context, pomPath, m2Dir string) ([]DepEdge, error) {
 	// POMs are bounded XML manifests; the 1 MiB cap covers every
 	// real-world reactor parent we've encountered and refuses to load
 	// a hostile/oversized file before it reaches the XML decoder.
@@ -369,13 +390,28 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 		return nil, fmt.Errorf("parse %s: %w", pomPath, err)
 	}
 
-	rootGA := mavenGA{groupId: root.GroupID, artifactId: root.ArtifactID}
+	// Inherit coordinate from <parent> when the root POM omits its own
+	// groupId/version. Maven inheritance: a POM (very commonly a reactor
+	// child that is itself the scan entry point) may declare only
+	// <artifactId> and inherit groupId+version from its <parent>. Without
+	// this, rootGA becomes ":my-app" (malformed) and ${project.version}
+	// interpolates to "" — silently DROPPING every sibling-module dep
+	// pinned at ${project.version}. collectReactorModules already does
+	// exactly this for child modules; mirror it for the root.
+	rootGroupID := root.GroupID
+	if rootGroupID == "" {
+		rootGroupID = root.Parent.GroupID
+	}
 	rootVersion := root.Version
+	if rootVersion == "" {
+		rootVersion = root.Parent.Version
+	}
+	rootGA := mavenGA{groupId: rootGroupID, artifactId: root.ArtifactID}
 
 	// Resolve the <parent> chain to inherit properties and managed versions.
 	// Child overrides parent: we start with inherited values then apply the
 	// child's own declarations on top.
-	inheritedProps, inheritedManaged := resolveParentChain(root, m2Dir)
+	inheritedProps, inheritedManaged := resolveParentChain(ctx, root, m2Dir)
 
 	// Merge root's own <properties> on top of inherited ones.
 	// Build the effective property map: inherited (parent chain) then child.
@@ -561,7 +597,7 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 	// existing nearest-wins map dedupes across modules.
 	if len(root.Modules) > 0 {
 		visited := map[string]bool{pomPath: true}
-		collectReactorModules(filepath.Dir(pomPath), root, rootVersion, rootCoord, &queue, visited, 1)
+		collectReactorModules(ctx, filepath.Dir(pomPath), m2Dir, root, rootVersion, rootCoord, &queue, visited, 1)
 	}
 
 	// BOM imports emit Resolved=false at depth 1 — but no transitive recursion.
@@ -581,6 +617,12 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 	}
 
 	for len(queue) > 0 {
+		// Cancellation check: a deep reactor / transitive walk is the most
+		// expensive part of the resolver. Bail promptly and return the edges
+		// resolved so far (sorted below) rather than draining the whole queue.
+		if ctx.Err() != nil {
+			break
+		}
 		head := queue[0]
 		queue = queue[1:]
 		ga := mavenGA{groupId: head.dep.GroupID, artifactId: head.dep.ArtifactID}
@@ -682,7 +724,7 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 		// This ensures transitive deps that use ${some.prop} resolve
 		// against the full set of properties the child POM declares or
 		// inherits — not just the literal ${project.version} alias.
-		childInheritedProps, _ := resolveParentChain(child, m2Dir)
+		childInheritedProps, _ := resolveParentChain(ctx, child, m2Dir)
 		childEffectiveProps := childInheritedProps
 		for k, val := range child.Properties.entries {
 			childEffectiveProps[k] = val
@@ -731,11 +773,16 @@ func ParseMavenPom(pomPath, m2Dir string) ([]DepEdge, error) {
 // The walk is depth-bounded by maxReactorDepth and refuses to revisit
 // a pom path more than once, so cyclic <modules> declarations cannot
 // drive a runaway loop.
-func collectReactorModules(parentDir string, parent mavenPom, reactorRootVersion, reactorRootCoord string, queue *[]pendingDep, visited map[string]bool, depth int) {
+func collectReactorModules(ctx context.Context, parentDir, m2Dir string, parent mavenPom, reactorRootVersion, reactorRootCoord string, queue *[]pendingDep, visited map[string]bool, depth int) {
 	if depth > maxReactorDepth {
 		return
 	}
 	for _, mod := range parent.Modules {
+		if ctx.Err() != nil {
+			// Cancelled mid-reactor: stop appending; the caller returns the
+			// PARTIAL edge set already queued.
+			return
+		}
 		mod = strings.TrimSpace(mod)
 		if mod == "" {
 			continue
@@ -783,11 +830,21 @@ func collectReactorModules(parentDir string, parent mavenPom, reactorRootVersion
 		// Child's path traces back to the reactor root: [root, child].
 		childPath := []string{reactorRootCoord, childCoord}
 
+		// Build the module's OWN effective property map: its parent-chain
+		// props (closest ancestor wins) with the module's <properties> merged
+		// on top — mirroring the childEffectiveProps logic in the transitive
+		// recursion path.  A reactor module that declares its dep versions via
+		// a property defined in its own (or inherited) <properties> — e.g.
+		// <version>${jackson.version}</version> with <jackson.version> in the
+		// module, not the reactor root — resolves to a concrete version here
+		// instead of leaking the verbatim ${...} placeholder.
+		childInheritedProps, _ := resolveParentChain(ctx, child, m2Dir)
+		childEffectiveProps := childInheritedProps
+		for k, val := range child.Properties.entries {
+			childEffectiveProps[k] = val
+		}
 		childInterpolate := func(v string) string {
-			if v == "${project.version}" {
-				return childVersion
-			}
-			return v
+			return interpolateProps(v, childVersion, childEffectiveProps)
 		}
 		for _, d := range child.Dependencies {
 			d.Version = childInterpolate(d.Version)
@@ -802,7 +859,7 @@ func collectReactorModules(parentDir string, parent mavenPom, reactorRootVersion
 
 		// Recurse into this child's own <modules> (nested reactor).
 		if len(child.Modules) > 0 {
-			collectReactorModules(filepath.Dir(childPomPath), child, reactorRootVersion, reactorRootCoord, queue, visited, depth+1)
+			collectReactorModules(ctx, filepath.Dir(childPomPath), m2Dir, child, reactorRootVersion, reactorRootCoord, queue, visited, depth+1)
 		}
 	}
 }

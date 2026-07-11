@@ -1,0 +1,37 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      express:
+        specifier: ^4.18.0
+        version: 4.18.2
+
+packages:
+
+  express@4.18.2:
+    resolution: {integrity: sha512-express}
+
+  fsevents@2.3.3:
+    resolution: {integrity: sha512-fsevents}
+    os: [darwin]
+
+  node-gyp-build@4.6.0:
+    resolution: {integrity: sha512-ngb}
+
+snapshots:
+
+  express@4.18.2:
+    optionalDependencies:
+      fsevents: 2.3.3
+
+  fsevents@2.3.3:
+    dependencies:
+      node-gyp-build: 4.6.0
+
+  node-gyp-build@4.6.0: {}

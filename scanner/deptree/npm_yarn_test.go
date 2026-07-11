@@ -74,6 +74,86 @@ func TestParseYarnLock_direct_and_transitive(t *testing.T) {
 	}
 }
 
+// TestParseYarnLock_multiParentSharedTransitive proves each transitive
+// edge's introduced_by_path is resolved PER EMITTING PARENT, not from a
+// single child-keyed global BFS result.
+//
+// Fixture: root depends on both `a` and `c`; a→shared@1.0.0 and
+// c→shared@1.0.0, where `shared` is NOT a root dependency. BFS stores
+// shared's path once (via whichever parent it reached first). The buggy
+// parser emitted the c→shared edge with that stored path [root,a,shared]
+// — a chain that never traverses c, violating path[len-2]==parent. The
+// fix anchors every edge on its own parent's path, so a→shared carries
+// [root,a,shared] and c→shared carries [root,c,shared].
+func TestParseYarnLock_multiParentSharedTransitive(t *testing.T) {
+	dir := t.TempDir()
+	yarnPath := filepath.Join(dir, "yarn.lock")
+	pjPath := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(yarnPath, []byte(`# yarn lockfile v1
+
+a@^1.0.0:
+  version "1.0.0"
+  dependencies:
+    shared "^1.0.0"
+
+c@^1.0.0:
+  version "1.0.0"
+  dependencies:
+    shared "^1.0.0"
+
+shared@^1.0.0:
+  version "1.0.0"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pjPath, []byte(`{"name":"multiparent-fixture","version":"1.0.0","dependencies":{"a":"^1.0.0","c":"^1.0.0"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	edges, err := ParseYarnLock(yarnPath, pjPath)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	// Every edge must satisfy the shared contract invariants, including
+	// path[len-2]==parent for BOTH shared edges.
+	assertEdgeContractInvariants(t, edges, "yarn-multiparent")
+
+	type key struct{ parent, child string }
+	byEdge := map[key]DepEdge{}
+	for _, e := range edges {
+		byEdge[key{e.ParentName, e.ChildName}] = e
+	}
+	root := "multiparent-fixture"
+
+	pathEq := func(got, want []string) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	aShared, ok := byEdge[key{"a", "shared"}]
+	if !ok {
+		t.Fatalf("a->shared edge missing; edges=%+v", edges)
+	}
+	if aShared.Type != "transitive" || aShared.Depth != 2 || !pathEq(aShared.IntroducedByPath, []string{root, "a", "shared"}) {
+		t.Errorf("a->shared edge wrong: %+v (want path [%s a shared] depth 2)", aShared, root)
+	}
+
+	cShared, ok := byEdge[key{"c", "shared"}]
+	if !ok {
+		t.Fatalf("c->shared edge missing; edges=%+v", edges)
+	}
+	if cShared.Type != "transitive" || cShared.Depth != 2 || !pathEq(cShared.IntroducedByPath, []string{root, "c", "shared"}) {
+		t.Errorf("c->shared edge wrong: %+v (want path [%s c shared] depth 2)", cShared, root)
+	}
+}
+
 func TestYarnSpecName(t *testing.T) {
 	cases := map[string]string{
 		"lodash@^4.17.0":    "lodash",

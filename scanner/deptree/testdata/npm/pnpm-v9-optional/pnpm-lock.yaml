@@ -1,0 +1,38 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      express:
+        specifier: ^4.18.0
+        version: 4.18.2
+    optionalDependencies:
+      sharp:
+        specifier: ^0.32.0
+        version: 0.32.6
+
+packages:
+
+  express@4.18.2:
+    resolution: {integrity: sha512-express}
+
+  sharp@0.32.6:
+    resolution: {integrity: sha512-sharp}
+
+  detect-libc@2.0.2:
+    resolution: {integrity: sha512-dl}
+
+snapshots:
+
+  express@4.18.2: {}
+
+  sharp@0.32.6:
+    dependencies:
+      detect-libc: 2.0.2
+
+  detect-libc@2.0.2: {}

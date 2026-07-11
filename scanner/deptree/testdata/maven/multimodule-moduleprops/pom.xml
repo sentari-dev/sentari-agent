@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example.reactor</groupId>
+    <artifactId>my-reactor</artifactId>
+    <version>3.0.0</version>
+    <packaging>pom</packaging>
+
+    <!--
+        Reactor root with NO <properties> of its own.  The property that
+        pins a module's dependency version (jackson.version) lives ONLY in
+        the module's own <properties> below.  Pre-fix collectReactorModules
+        interpolated only ${project.version}, so the module dep leaked the
+        verbatim ${jackson.version} placeholder with Resolved=false.
+    -->
+    <modules>
+        <module>svc</module>
+    </modules>
+</project>

@@ -29,7 +29,15 @@ func ParseNuGetProjectAssets(path string) ([]DepEdge, error) {
 	rootVersion := assets.Project.Version
 
 	var edges []DepEdge
-	for tfm, target := range assets.Targets {
+	for targetKey, target := range assets.Targets {
+		// `dotnet restore` keys `targets` by the LONG framework moniker
+		// (".NETCoreApp,Version=v6.0", optionally with a "/<rid>" suffix)
+		// while `project.frameworks` is keyed by the SHORT TFM ("net6.0").
+		// Normalize before correlating so directs actually resolve — an
+		// un-normalized lookup misses, leaving directs empty, which seeds
+		// the BFS with nothing and drops every edge as unreachable.
+		tfm := normalizeTFM(targetKey)
+
 		// Build directs per TFM from project.frameworks[tfm].dependencies.
 		directs := map[string]bool{}
 		if fw, ok := assets.Project.Frameworks[tfm]; ok {
@@ -136,13 +144,28 @@ func ParseNuGetProjectAssets(path string) ([]DepEdge, error) {
 				Resolved:         true,
 			})
 		}
-		// Emit transitive edges from the dep graph.
+		// Emit transitive edges from the dep graph.  The path/depth is
+		// computed PER EDGE from the emitting parent's BFS resolution path
+		// (path = parentPath + [child], depth = len(path)-1), so a child
+		// with several parents carries a distinct parent-anchored path on
+		// each edge instead of the parent-agnostic per-child value the
+		// earlier code reused.  A parent unreachable from the synthetic
+		// root is dropped rather than emitted with a fabricated depth-0
+		// path.  The old child-keyed skip ("child is a direct at depth 1")
+		// wrongly dropped legitimate transitive edges into packages that
+		// are also root directs; the synthetic root is never a parent in
+		// depGraph, so no root→direct edge can be duplicated here and no
+		// skip is needed.
 		parents := make([]string, 0, len(depGraph))
 		for p := range depGraph {
 			parents = append(parents, p)
 		}
 		sort.Strings(parents)
 		for _, parent := range parents {
+			parentPath, reached := pathByName[parent]
+			if !reached {
+				continue // parent unreachable from root — drop its edges
+			}
 			children := depGraph[parent]
 			childKeys := make([]string, 0, len(children))
 			for c := range children {
@@ -151,9 +174,7 @@ func ParseNuGetProjectAssets(path string) ([]DepEdge, error) {
 			sort.Strings(childKeys)
 			for _, child := range childKeys {
 				childVer := children[child]
-				if _, isDirect := directs[child]; isDirect && depthByName[child] == 1 {
-					continue
-				}
+				childPath := append(append([]string{}, parentPath...), nameToOriginalCase[child])
 				edges = append(edges, DepEdge{
 					ParentName:       nameToOriginalCase[parent],
 					ParentVersion:    nameToVersion[parent],
@@ -162,8 +183,8 @@ func ParseNuGetProjectAssets(path string) ([]DepEdge, error) {
 					Ecosystem:        "nuget",
 					Type:             "transitive",
 					Scope:            tfm,
-					Depth:            depthByName[child],
-					IntroducedByPath: SafePath(pathByName[child], nameToOriginalCase[parent], nameToOriginalCase[child]),
+					Depth:            len(childPath) - 1,
+					IntroducedByPath: childPath,
 					Resolved:         true,
 				})
 			}
@@ -183,6 +204,46 @@ func ParseNuGetProjectAssets(path string) ([]DepEdge, error) {
 		return edges[i].ChildName < edges[j].ChildName
 	})
 	return edges, nil
+}
+
+// normalizeTFM converts a project.assets.json `targets` key into the
+// short target-framework moniker used as keys in `project.frameworks`.
+// `dotnet restore` writes `targets` keyed by the LONG framework moniker
+// (".NETCoreApp,Version=v6.0", ".NETFramework,Version=v4.7.2",
+// ".NETStandard,Version=v2.0"), optionally with a "/<rid>" runtime
+// identifier suffix (".NETCoreApp,Version=v6.0/win-x64"), whereas
+// `project.frameworks` is keyed by the short TFM ("net6.0", "net472",
+// "netstandard2.0"). Correlating targets→frameworks requires this
+// normalization or the direct-dependency lookup silently misses.
+//
+// Mapping:
+//   - ".NETCoreApp,Version=vX.Y"          -> "netX.Y"        (net6.0, net8.0)
+//   - ".NETFramework,Version=vX.Y[.Z]"    -> "netXY[Z]"      (net472, net48)
+//   - ".NETStandard,Version=vX.Y"         -> "netstandardX.Y"
+//
+// A key already in short form (or otherwise unrecognized) is returned
+// unchanged, so short-keyed assets files keep working.
+func normalizeTFM(targetKey string) string {
+	// Strip any "/<rid>" runtime-identifier suffix first.
+	if i := strings.IndexByte(targetKey, '/'); i >= 0 {
+		targetKey = targetKey[:i]
+	}
+	const (
+		coreAppPrefix   = ".NETCoreApp,Version=v"
+		frameworkPrefix = ".NETFramework,Version=v"
+		standardPrefix  = ".NETStandard,Version=v"
+	)
+	switch {
+	case strings.HasPrefix(targetKey, coreAppPrefix):
+		return "net" + strings.TrimPrefix(targetKey, coreAppPrefix)
+	case strings.HasPrefix(targetKey, standardPrefix):
+		return "netstandard" + strings.TrimPrefix(targetKey, standardPrefix)
+	case strings.HasPrefix(targetKey, frameworkPrefix):
+		v := strings.TrimPrefix(targetKey, frameworkPrefix)
+		return "net" + strings.ReplaceAll(v, ".", "")
+	default:
+		return targetKey
+	}
 }
 
 // ParseNuGetPackagesLock is the fallback for projects that have
