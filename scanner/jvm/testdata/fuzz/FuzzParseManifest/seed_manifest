@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("Manifest-Version: 1.0\r\nImplementation-Title: demo\r\nImplementation-Version: 1.2.3\r\nBundle-SymbolicName: com.example.demo\r\n")

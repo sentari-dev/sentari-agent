@@ -59,7 +59,7 @@ func FuzzExtractFromJar(f *testing.F) {
 
 	// Seed 2 — uber-jar with a valid nested JAR, so the fuzzer gets to
 	// exercise the recursion path without having to re-discover the
-	// ``entry ends in .jar → decompress → recurse`` chain from scratch.
+	// `entry ends in .jar → decompress → recurse` chain from scratch.
 	var inner bytes.Buffer
 	izw := zip.NewWriter(&inner)
 	iw, _ := izw.Create("META-INF/maven/n/inner/pom.properties")

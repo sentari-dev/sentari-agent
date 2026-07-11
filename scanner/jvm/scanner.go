@@ -9,7 +9,7 @@
 // first-class records.
 //
 // The plugin registers itself with the scanner registry at init()
-// time; ``scanner/scanner.go`` discovers it via the same
+// time; `scanner/scanner.go` discovers it via the same
 // mechanism as every other ecosystem.  No explicit wiring is
 // required in the orchestrator.
 //
@@ -21,6 +21,7 @@ package jvm
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,10 +37,10 @@ func init() {
 
 // Layout tags carried on Environment.Name so Scan() can dispatch to
 // the right walker without introducing separate env_types for every
-// JVM discovery surface (the ecosystem string ``maven`` belongs in
+// JVM discovery surface (the ecosystem string `maven` belongs in
 // one place, but a Maven cache and a Tomcat install have different
 // walk strategies).  Adding a new surface = new constant here +
-// new case in Scan() + new ``discover*`` function.
+// new case in Scan() + new `discover*` function.
 const (
 	layoutMavenCache  = "maven-cache"
 	layoutGradleCache = "gradle-cache"
@@ -59,10 +60,10 @@ const (
 type Scanner struct{}
 
 // EnvType reports the ecosystem this plugin represents on every
-// PackageRecord it emits.  See ADR 0008 for the ``jvm`` vs
-// ``maven`` vs ``java`` naming decision: the scanner identifier is
-// ``jvm`` (what we're scanning), the server-side ecosystem string
-// is ``maven`` (what OSV's schema calls it).  The mapping lives
+// PackageRecord it emits.  See ADR 0008 for the `jvm` vs
+// `maven` vs `java` naming decision: the scanner identifier is
+// `jvm` (what we're scanning), the server-side ecosystem string
+// is `maven` (what OSV's schema calls it).  The mapping lives
 // server-side; records emitted here carry EnvType=EnvJVM.
 func (Scanner) EnvType() string { return EnvJVM }
 
@@ -107,15 +108,14 @@ func (Scanner) DiscoverAll(ctx context.Context) ([]scanner.Environment, []scanne
 // layouts produce a ScanError rather than silent nothing so wiring
 // bugs are loud.
 func (Scanner) Scan(ctx context.Context, env scanner.Environment) ([]scanner.PackageRecord, []scanner.ScanError) {
-	_ = ctx // reserved for cancellation
 	switch env.Name {
 	case layoutMavenCache, layoutGradleCache,
 		layoutTomcat, layoutJBoss, layoutWebLogic,
 		layoutWebSphere, layoutJetty, layoutGlassFish,
 		layoutGeneric:
-		return scanDirTree(env.Path)
+		return scanDirTree(ctx, env.Path)
 	case layoutJDKRuntime:
-		return scanJDKRuntime(env.Path)
+		return scanJDKRuntime(ctx, env.Path)
 	default:
 		return nil, []scanner.ScanError{{
 			Path:      env.Path,
@@ -131,13 +131,27 @@ func (Scanner) Scan(ctx context.Context, env scanner.Environment) ([]scanner.Pac
 // (permission denied, broken symlinks, walk-level oddities) are
 // collected into ScanError rather than propagated; one unreadable
 // subdirectory must not stop the rest of the scan.
-func scanDirTree(root string) ([]scanner.PackageRecord, []scanner.ScanError) {
+func scanDirTree(ctx context.Context, root string) ([]scanner.PackageRecord, []scanner.ScanError) {
 	var (
 		records []scanner.PackageRecord
 		errs    []scanner.ScanError
 	)
 
 	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		// Cancellation: a timed-out container sub-scan or an operator
+		// Ctrl-C must stop this walk within one directory step rather
+		// than churning through a multi-GB ~/.m2 or app-server tree.
+		// Surface it as a typed ScanError so the partial result is
+		// self-describing, then stop the walk cleanly via fs.SkipAll.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			errs = append(errs, scanner.ScanError{
+				Path:      path,
+				EnvType:   EnvJVM,
+				Error:     fmt.Sprintf("scan cancelled: %v", ctxErr),
+				Timestamp: time.Now().UTC(),
+			})
+			return fs.SkipAll
+		}
 		if err != nil {
 			errs = append(errs, scanner.ScanError{
 				Path:      path,
@@ -161,16 +175,34 @@ func scanDirTree(root string) ([]scanner.PackageRecord, []scanner.ScanError) {
 		if !isJARLike(d.Name()) {
 			return nil
 		}
-		// Oversize guard — avoid opening a 10 GB "fake JAR" into
-		// archive/zip and letting it chew memory.  Matches the
-		// maxJARBytes invariant enforced inside extractFromJar's
-		// own paths.
-		info, statErr := d.Info()
-		if statErr == nil && info.Size() > int64(maxJARBytes) {
+		// Oversize / special-file guard.  We Lstat the path ourselves
+		// rather than trust d.Info(): WalkDir hands us the *symlink's*
+		// own (tiny) Lstat for a `*.jar` symlink, so the size cap below
+		// would pass and extractFromJar would then follow the link to a
+		// multi-GB target — the cap-bypass.  A FIFO named `*.jar` is the
+		// other hazard: opening it blocks the scan forever.  Skip
+		// anything that is not a plain regular file, then apply
+		// maxJARBytes to the real on-disk size.
+		li, lerr := os.Lstat(path)
+		if lerr != nil {
 			errs = append(errs, scanner.ScanError{
 				Path:      path,
 				EnvType:   EnvJVM,
-				Error:     fmt.Sprintf("JAR exceeds size cap: %d > %d bytes; skipped", info.Size(), maxJARBytes),
+				Error:     fmt.Sprintf("lstat: %v", lerr),
+				Timestamp: time.Now().UTC(),
+			})
+			return nil
+		}
+		if mode := li.Mode(); mode&os.ModeSymlink != 0 || !mode.IsRegular() {
+			// Symlink (cap-bypass vector) or FIFO / device / socket
+			// (hang / unbounded-read vector) — never open it.
+			return nil
+		}
+		if li.Size() > int64(maxJARBytes) {
+			errs = append(errs, scanner.ScanError{
+				Path:      path,
+				EnvType:   EnvJVM,
+				Error:     fmt.Sprintf("JAR exceeds size cap: %d > %d bytes; skipped", li.Size(), maxJARBytes),
 				Timestamp: time.Now().UTC(),
 			})
 			return nil
@@ -205,7 +237,7 @@ func scanDirTree(root string) ([]scanner.PackageRecord, []scanner.ScanError) {
 // userHome returns the user's home directory using the platform-
 // appropriate env var.  Returns "" when no home can be determined
 // (unusual on real deployments; happens in minimal CI containers).
-// We deliberately don't fall back to ``os.UserHomeDir`` because that
+// We deliberately don't fall back to `os.UserHomeDir` because that
 // masks env-var mis-configuration behind a system lookup that might
 // resolve the caller's UID to an unexpected home.
 func userHome() string {
@@ -231,7 +263,7 @@ func isDir(path string) bool {
 // whose Path equals candidate after canonicalisation.  Guards against
 // double-discovery when two env-var paths resolve to the same directory
 // via symlinks, differing casing on case-insensitive FSes, or trailing-
-// slash variance (``$MAVEN_HOME/repository`` vs ``$HOME/.m2/repository``
+// slash variance (`$MAVEN_HOME/repository` vs `$HOME/.m2/repository`
 // pointing at the same physical dir through a symlink is the motivating
 // case).  Falls back to filepath.Clean when EvalSymlinks errors (e.g.
 // path doesn't exist yet), which still catches the trailing-slash case.

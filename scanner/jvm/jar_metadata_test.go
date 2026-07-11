@@ -160,7 +160,7 @@ func TestParseManifest_ExceedsSizeCap(t *testing.T) {
 
 func TestParseFilename(t *testing.T) {
 	cases := []struct {
-		in                 string
+		in                  string
 		wantArtifact, wantV string
 	}{
 		// Simple happy path.
@@ -323,8 +323,8 @@ func TestExtractFromJar_ZipSlipAttackIgnored(t *testing.T) {
 	// filename doesn't hand us bogus metadata from an unrelated host
 	// file, and doesn't cause the parser to misbehave.
 	jar := buildJAR(t, map[string][]byte{
-		"../../../etc/passwd":                         []byte("root:x:0:0:root:/root:/bin/bash\n"),
-		"META-INF/maven/o/a/pom.properties":           []byte("groupId=o\nartifactId=a\nversion=1\n"),
+		"../../../etc/passwd":               []byte("root:x:0:0:root:/root:/bin/bash\n"),
+		"META-INF/maven/o/a/pom.properties": []byte("groupId=o\nartifactId=a\nversion=1\n"),
 	})
 	records, _ := extractFromJar(jar)
 	// The pom.properties we planted must parse; the zip-slip entry
@@ -334,4 +334,3 @@ func TestExtractFromJar_ZipSlipAttackIgnored(t *testing.T) {
 		t.Errorf("zip-slip attack may have corrupted extraction: %+v", records)
 	}
 }
-

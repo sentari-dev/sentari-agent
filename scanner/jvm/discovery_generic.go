@@ -23,12 +23,12 @@ import (
 //
 // Package-level root lists are variables (not consts) so tests can
 // substitute fixture trees.  Matches the pattern from
-// ``jdkWellKnownRoots`` in discovery_jdk.go.
+// `jdkWellKnownRoots` in discovery_jdk.go.
 
 var (
 	// genericOptRoots are the one-level parents under which we scan
 	// each child's lib/libs subdir.  A typical customer install
-	// named ``/opt/acme-tool`` is caught via /opt → acme-tool → lib.
+	// named `/opt/acme-tool` is caught via /opt → acme-tool → lib.
 	genericOptRoots = initGenericOptRoots()
 
 	// genericDirectRoots are absolute directories we scan as-is.
@@ -65,7 +65,7 @@ func initGenericDirectRoots() []string {
 }
 
 // discoverGeneric walks the genericOptRoots + genericDirectRoots and
-// emits one Environment per lib/libs directory found.  ``exclude``
+// emits one Environment per lib/libs directory found.  `exclude`
 // contains the paths of Environments already emitted by specialised
 // discoverers (Tomcat install root, WildFly install root, …); we
 // skip any generic candidate that lives inside one of those so we
@@ -119,8 +119,8 @@ func discoverGeneric(exclude []string) []scanner.Environment {
 	return out
 }
 
-// isDescendantOfAny reports whether ``child`` is the same path as, or
-// is nested under, any path in ``parents``.  Used to skip generic
+// isDescendantOfAny reports whether `child` is the same path as, or
+// is nested under, any path in `parents`.  Used to skip generic
 // candidates that are already covered by specialised discoverers
 // (e.g. /opt/tomcat/lib under an already-emitted /opt/tomcat).
 func isDescendantOfAny(child string, parents []string) bool {
