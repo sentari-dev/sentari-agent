@@ -2,6 +2,7 @@ package update
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -205,7 +206,7 @@ func TestApply_downloadAndAtomicReplaceWithRollback(t *testing.T) {
 	// environment, so we expect the binary swap to succeed but the
 	// restart to surface as a wrapped error.  Either way we verify
 	// the install path holds the new bytes.
-	applyErr := c.Apply(plan, installPath, filepath.Join(tmp, "staged"))
+	applyErr := c.Apply(context.Background(), plan, installPath, filepath.Join(tmp, "staged"))
 	// applyErr might be nil (linux/CI sometimes), or the wrapped
 	// "service restart failed" — accept both.  What MUST be true is
 	// the binary swap completed before the restart attempt.
@@ -267,7 +268,7 @@ func TestApply_sha256MismatchAborts(t *testing.T) {
 	// binary in the release dir between hash and serve.
 	plan.Platform.SHA256 = strings.Repeat("00", 32)
 
-	err = c.Apply(plan, installPath, filepath.Join(tmp, "staged"))
+	err = c.Apply(context.Background(), plan, installPath, filepath.Join(tmp, "staged"))
 	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("expected sha256 mismatch error, got %v", err)
 	}

@@ -1,6 +1,7 @@
 package update
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -108,7 +109,7 @@ func TestApply_singleFlightPreservesRollbackBinary(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			errs[idx] = c.Apply(mkPlan(), installPath, stagedDir)
+			errs[idx] = c.Apply(context.Background(), mkPlan(), installPath, stagedDir)
 		}(i)
 	}
 	wg.Wait()

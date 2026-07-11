@@ -2,6 +2,7 @@ package update
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -156,7 +157,7 @@ func TestApply_refusesDowngrade(t *testing.T) {
 	plan.Platform.SHA256 = hex.EncodeToString(sum[:])
 	plan.LatestVersion = "0.1.0"
 
-	err = c.Apply(plan, installPath, filepath.Join(tmp, "staged"))
+	err = c.Apply(context.Background(), plan, installPath, filepath.Join(tmp, "staged"))
 	if err == nil || !strings.Contains(err.Error(), "downgrade") {
 		t.Fatalf("Apply must refuse downgrade, got %v", err)
 	}

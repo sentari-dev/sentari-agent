@@ -1,6 +1,7 @@
 package update
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -29,7 +30,7 @@ func applyPlanFromServer(t *testing.T, c *Client, version, servedAt string, body
 	plan.Platform.URL = "/api/v1/agent/release/binary/" + runtime.GOOS + "/" + runtime.GOARCH
 	sum := sha256.Sum256(body)
 	plan.Platform.SHA256 = hex.EncodeToString(sum[:])
-	return c.Apply(plan, installPath, stagedDir)
+	return c.Apply(context.Background(), plan, installPath, stagedDir)
 }
 
 func TestApply_recordsAndEnforcesHighWaterMark(t *testing.T) {

@@ -2,6 +2,7 @@ package aiagents
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // layoutMCPConfig tags every Environment produced by the MCP-config
@@ -27,8 +29,8 @@ type mcpConfigShape struct {
 	MCPServers map[string]mcpServerEntry `json:"mcpServers"`
 }
 
-// mcpServerEntry is one configured MCP server.  The ``command`` +
-// ``args`` pair is what gets launched; for attribution we capture
+// mcpServerEntry is one configured MCP server.  The `command` +
+// `args` pair is what gets launched; for attribution we capture
 // both so operators can tell "this is the github-mcp-server" apart
 // from "this is a custom Python script calling itself github".
 type mcpServerEntry struct {
@@ -52,7 +54,7 @@ func discoverMCPConfigs() ([]scanner.Environment, []scanner.ScanError) {
 	for _, path := range mcpConfigPaths() {
 		info, err := os.Stat(path)
 		if err != nil {
-			if isNotExist(err) {
+			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			errs = append(errs, scanner.ScanError{
@@ -77,7 +79,7 @@ func discoverMCPConfigs() ([]scanner.Environment, []scanner.ScanError) {
 
 // mcpConfigPaths returns every known MCP config location for the
 // current OS + user.  Deliberately conservative: only well-known
-// paths from the vendors' own docs, not a glob over ``~``.
+// paths from the vendors' own docs, not a glob over `~`.
 func mcpConfigPaths() []string {
 	home := userHome()
 	if home == "" {
@@ -114,19 +116,20 @@ func mcpConfigPaths() []string {
 }
 
 // scanMCPConfig reads one mcp.json-shaped file and emits one
-// PackageRecord per configured MCP server.  The record's ``Name``
-// is the server key (``filesystem``, ``github``, ...); ``Version``
+// PackageRecord per configured MCP server.  The record's `Name`
+// is the server key (`filesystem`, `github`, ...); `Version`
 // is derived from the command/args when we can parse a version
-// hint (``@modelcontextprotocol/server-filesystem@1.2.3`` → 1.2.3),
+// hint (`@modelcontextprotocol/server-filesystem@1.2.3` → 1.2.3),
 // otherwise left empty — many MCP configs don't pin a version.
 //
-// Read + mtime go through ``readFileWithMTime`` which opens the
-// file once via ``safeio.Open`` and derives both the content and
-// the mtime from the same file descriptor — no path-based TOCTOU
-// window between the read and the install-date proxy stamp.  A
-// symlinked mcp.json is refused at open time.
+// Read + mtime go through `safeio.ReadFileWithMTime` which opens
+// the file once (refusing symlinks and non-regular files) and
+// derives both the content and the mtime from the same file
+// descriptor — no path-based TOCTOU window between the read and the
+// install-date proxy stamp.  A symlinked mcp.json is refused at
+// open time.
 func scanMCPConfig(path string) ([]scanner.PackageRecord, []scanner.ScanError) {
-	data, mtime, err := readFileWithMTime(path, maxMCPConfigBytes)
+	data, mtime, err := safeio.ReadFileWithMTime(path, maxMCPConfigBytes)
 	if err != nil {
 		return nil, []scanner.ScanError{{
 			Path:      path,
@@ -171,17 +174,17 @@ func scanMCPConfig(path string) ([]scanner.PackageRecord, []scanner.ScanError) {
 // extractMCPVersion pulls a version hint out of the command/args
 // when one is present in a well-known shape.  Supports:
 //
-//   - ``npx -y @modelcontextprotocol/server-filesystem@1.2.3 …``
-//   - ``docker run ghcr.io/github/github-mcp-server:1.4.0 …``
-//   - ``uvx mcp-server-sqlite==0.2.1``
+//   - `npx -y @modelcontextprotocol/server-filesystem@1.2.3 …`
+//   - `docker run ghcr.io/github/github-mcp-server:1.4.0 …`
+//   - `uvx mcp-server-sqlite==0.2.1`
 //
 // Returns "" when nothing matches — we'd rather emit a versionless
 // record than a made-up one.  CVE correlation gracefully treats
 // empty-version as "any version" which is usually the right call
 // for untagged MCP server configs.
 func extractMCPVersion(entry mcpServerEntry) string {
-	// Inspect each arg for a ``@<ver>`` suffix (npm/yarn style)
-	// or ``==<ver>`` (pip/uv style) or ``:<ver>`` (docker).
+	// Inspect each arg for a `@<ver>` suffix (npm/yarn style)
+	// or `==<ver>` (pip/uv style) or `:<ver>` (docker).
 	for _, arg := range entry.Args {
 		if v := parseVersionSuffix(arg); v != "" {
 			return v
@@ -198,12 +201,12 @@ func extractMCPVersion(entry mcpServerEntry) string {
 	return ""
 }
 
-// parseVersionSuffix tries ``pkg@1.2.3`` and ``pkg==1.2.3`` patterns.
+// parseVersionSuffix tries `pkg@1.2.3` and `pkg==1.2.3` patterns.
 // Returns the version portion if the suffix looks like a semver /
 // PEP 440 version; otherwise "".
 func parseVersionSuffix(s string) string {
-	// ``==`` takes precedence because ``a==b`` also has an ``@`` if
-	// the package name is ``@scope/pkg==1.2.3``.
+	// `==` takes precedence because `a==b` also has an `@` if
+	// the package name is `@scope/pkg==1.2.3`.
 	if i := indexOf(s, "=="); i >= 0 {
 		v := s[i+2:]
 		if isVersionish(v) {
@@ -211,8 +214,8 @@ func parseVersionSuffix(s string) string {
 		}
 	}
 	if i := lastIndex(s, "@"); i > 0 {
-		// ``@scope/pkg@1.2.3`` — first ``@`` is the scope sigil,
-		// last ``@`` is the version delimiter.  We use lastIndex
+		// `@scope/pkg@1.2.3` — first `@` is the scope sigil,
+		// last `@` is the version delimiter.  We use lastIndex
 		// to skip the scope.
 		v := s[i+1:]
 		if isVersionish(v) {
@@ -224,15 +227,15 @@ func parseVersionSuffix(s string) string {
 
 // isVersionish returns true if s looks like a version string
 // (digit-leading, contains only digits / dots / dashes / letters).
-// Deliberately loose — accepts ``1.2.3``, ``1.2.3-beta``, ``v1.0``.
-// Rejects empty and non-digit-leading so ``@modelcontextprotocol``
+// Deliberately loose — accepts `1.2.3`, `1.2.3-beta`, `v1.0`.
+// Rejects empty and non-digit-leading so `@modelcontextprotocol`
 // (the scope) doesn't pass.
 func isVersionish(s string) bool {
 	if s == "" {
 		return false
 	}
 	first := s[0]
-	// Allow leading 'v' as in ``v1.2.3``.
+	// Allow leading 'v' as in `v1.2.3`.
 	if first == 'v' || first == 'V' {
 		if len(s) < 2 {
 			return false
