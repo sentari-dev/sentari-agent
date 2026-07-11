@@ -13,6 +13,7 @@ package licenses
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -32,9 +33,12 @@ const maxMETADATABytes = 1 << 20 // 1 MiB
 // for one of: PEP 639 License-Expression (preferred, conf 0.95),
 // License: header (mid, conf 0.7), Classifier: License :: ... (fallback,
 // conf 0.6).
-func ExtractPyPI(sitePackagesDir string) ([]deptree.LicenseEvidence, error) {
+func ExtractPyPI(ctx context.Context, sitePackagesDir string) ([]deptree.LicenseEvidence, error) {
 	var out []deptree.LicenseEvidence
 	walkErr := filepath.WalkDir(sitePackagesDir, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return fs.SkipAll
+		}
 		if err != nil {
 			return nil
 		}
@@ -95,6 +99,14 @@ func parsePyPIMetadata(raw []byte) (name, version, licenseExpr, licenseHdr strin
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
+		// RFC822 header/body boundary: METADATA headers end at the first
+		// blank line. The long-description body that follows (often an
+		// embedded README) can itself contain "License:" / "Classifier:"
+		// text — stop here so a body line can't override the real header
+		// field. Mirrors scanner/license.go's ExtractLicenseFromMetadata.
+		if line == "" {
+			break
+		}
 		switch {
 		case strings.HasPrefix(line, "Name:"):
 			name = strings.TrimSpace(strings.TrimPrefix(line, "Name:"))

@@ -1,6 +1,7 @@
 package supplychain
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io/fs"
@@ -25,10 +26,13 @@ const maxNuspecBytes = 1 << 20 // 1 MiB
 //
 //	<root>/<lowercased-id>/<version>/<id>.<version>.nupkg
 //	<root>/<lowercased-id>/<version>/.signature.p7s   (if signed)
-func DetectInNuGetCache(cacheRoot string) ([]deptree.SupplyChainSignal, error) {
+func DetectInNuGetCache(ctx context.Context, cacheRoot string) ([]deptree.SupplyChainSignal, error) {
 	var signals []deptree.SupplyChainSignal
 
 	walkErr := filepath.WalkDir(cacheRoot, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return fs.SkipAll
+		}
 		if err != nil {
 			return nil
 		}

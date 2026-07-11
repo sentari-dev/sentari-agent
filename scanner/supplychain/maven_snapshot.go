@@ -1,6 +1,7 @@
 package supplychain
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io/fs"
@@ -38,10 +39,13 @@ type snapshotPom struct {
 //
 // The signal is per root artifact (not per SNAPSHOT dep) to keep signal
 // volume manageable on large ~/.m2 caches.
-func DetectSnapshotInRelease(m2Dir string) ([]deptree.SupplyChainSignal, error) {
+func DetectSnapshotInRelease(ctx context.Context, m2Dir string) ([]deptree.SupplyChainSignal, error) {
 	var signals []deptree.SupplyChainSignal
 
 	walkErr := filepath.WalkDir(m2Dir, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return fs.SkipAll
+		}
 		if err != nil {
 			return nil
 		}

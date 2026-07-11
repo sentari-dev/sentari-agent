@@ -1,6 +1,7 @@
 package licenses
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -18,7 +19,7 @@ func TestExtractMaven_singleLicense(t *testing.T) {
     <license><name>Apache License 2.0</name><url>https://...</url></license>
   </licenses>
 </project>`)
-	out, err := ExtractMaven(m2)
+	out, err := ExtractMaven(context.Background(), m2)
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}
@@ -41,7 +42,7 @@ func TestExtractMaven_dualLicensed(t *testing.T) {
     <license><name>Apache-2.0</name></license>
   </licenses>
 </project>`)
-	out, err := ExtractMaven(m2)
+	out, err := ExtractMaven(context.Background(), m2)
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestExtractMaven_emptyGroupIdSkipped(t *testing.T) {
     <license><name>MIT</name></license>
   </licenses>
 </project>`)
-	out, err := ExtractMaven(m2)
+	out, err := ExtractMaven(context.Background(), m2)
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}

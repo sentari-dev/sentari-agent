@@ -1,6 +1,7 @@
 package supplychain
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -38,11 +39,14 @@ type unsignedJar struct {
 // suppressed.
 //
 // `m2Dir` should be the path to `~/.m2/repository`.
-func DetectInM2(m2Dir string) ([]deptree.SupplyChainSignal, error) {
+func DetectInM2(ctx context.Context, m2Dir string) ([]deptree.SupplyChainSignal, error) {
 	var unsigned []unsignedJar
 	signingInUse := false
 
 	walkErr := filepath.WalkDir(m2Dir, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return fs.SkipAll
+		}
 		if err != nil {
 			return nil
 		}

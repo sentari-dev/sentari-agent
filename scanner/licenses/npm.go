@@ -1,6 +1,8 @@
 package licenses
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -16,6 +18,20 @@ import (
 // maxPackageJSONBytes caps a single “package.json“ read in
 // node_modules.  Mirrors scanner/npm/parser.go's local constant.
 const maxPackageJSONBytes = 4 << 20 // 4 MiB
+
+// utf8BOM is the UTF-8 byte-order mark (EF BB BF). npm and NuGet tooling
+// tolerate a BOM-prefixed manifest, but encoding/json and encoding/xml
+// reject the leading U+FEFF — so a BOM'd package.json / .nuspec / .pom
+// would otherwise parse-fail and drop the license silently.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// stripBOM removes a leading UTF-8 BOM if present, so file-level
+// Unmarshal sites in this package accept BOM'd manifests the same way the
+// ecosystem's own tooling does. Applied consistently across npm (JSON),
+// NuGet and Maven (XML) file parsers.
+func stripBOM(b []byte) []byte {
+	return bytes.TrimPrefix(b, utf8BOM)
+}
 
 // maxLicenseFileBytes caps a single LICENSE-file read in the
 // package.json-less fallback path.  License files are tiny (the GPL is
@@ -38,9 +54,12 @@ var licenseFileNames = []string{
 // for the `license` (string SPDX) or `licenses` (array of {type,url}).
 // Confidence 0.95 for explicit SPDX, 0.7 for object-shape that's
 // non-SPDX-ish.
-func ExtractNpm(nodeModulesDir string) ([]deptree.LicenseEvidence, error) {
+func ExtractNpm(ctx context.Context, nodeModulesDir string) ([]deptree.LicenseEvidence, error) {
 	var out []deptree.LicenseEvidence
 	walkErr := filepath.WalkDir(nodeModulesDir, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return fs.SkipAll
+		}
 		if err != nil {
 			return nil
 		}
@@ -65,7 +84,7 @@ func ExtractNpm(nodeModulesDir string) ([]deptree.LicenseEvidence, error) {
 			return nil
 		}
 		var pj npmPackageJSON
-		if err := json.Unmarshal(raw, &pj); err != nil {
+		if err := json.Unmarshal(stripBOM(raw), &pj); err != nil {
 			return nil
 		}
 		if pj.Name == "" {
