@@ -1,0 +1,2 @@
+go test fuzz v1
+string("Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\nUpstream-Name: hello\n\nFiles: *\nCopyright: 2024 Example\nLicense: GPL-2+\n")
