@@ -1,21 +1,24 @@
 package containers
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
+	"sync"
 	"testing"
 )
 
 // layerFixture builds a synthetic layer directory tree for a single
-// MergedTree layer.  ``entries`` maps relative path (using forward
+// MergedTree layer.  `entries` maps relative path (using forward
 // slashes) → file content.  An entry whose content is nil creates an
 // empty directory.  Callers use this helper to express "layer 0 has
 // these paths, layer 1 has those" without boilerplate.
 //
 // Returns the absolute path of the layer root.  All layers use
-// ``t.TempDir()`` so the OS cleans up when the test exits.
+// `t.TempDir()` so the OS cleans up when the test exits.
 func layerFixture(t *testing.T, entries map[string]string) string {
 	t.Helper()
 	root := t.TempDir()
@@ -47,7 +50,7 @@ func hasTrailingSep(s string) bool {
 func collect(t *testing.T, m *MergedTree) []MergedEntry {
 	t.Helper()
 	var got []MergedEntry
-	if err := m.Walk(func(e MergedEntry) error {
+	if _, err := m.Walk(context.Background(), func(e MergedEntry) error {
 		got = append(got, e)
 		return nil
 	}); err != nil {
@@ -89,7 +92,7 @@ func TestMergedTree_TopLayerOverrides(t *testing.T) {
 	m := &MergedTree{Layers: []string{l0, l1}}
 	got := collect(t, m)
 
-	// Exactly one ``a/1.txt`` entry.
+	// Exactly one `a/1.txt` entry.
 	count := 0
 	var winner MergedEntry
 	for _, e := range got {
@@ -114,7 +117,7 @@ func TestMergedTree_TopLayerOverrides(t *testing.T) {
 	}
 }
 
-// TestMergedTree_WhiteoutHidesFile — Task 1 Step 3.  A ``.wh.<name>``
+// TestMergedTree_WhiteoutHidesFile — Task 1 Step 3.  A `.wh.<name>`
 // marker in an upper layer removes the same-named entry from every
 // lower layer.  Without this, a container that explicitly deleted a
 // file would still appear to contain it.
@@ -136,13 +139,13 @@ func TestMergedTree_WhiteoutHidesFile(t *testing.T) {
 }
 
 // TestMergedTree_OpaqueDirDropsSubtree — Task 1 Step 4.  A
-// ``.wh..wh..opq`` marker inside directory ``d`` wipes ``d``'s
+// `.wh..wh..opq` marker inside directory `d` wipes `d`'s
 // lower-layer contents even though the dir itself still exists.
-// Upper-layer entries under ``d`` survive.
+// Upper-layer entries under `d` survive.
 func TestMergedTree_OpaqueDirDropsSubtree(t *testing.T) {
 	l0 := layerFixture(t, map[string]string{
-		"a/old-1.txt":     "gone",
-		"a/old-2.txt":     "gone",
+		"a/old-1.txt":      "gone",
+		"a/old-2.txt":      "gone",
 		"a/sub/deeper.txt": "gone",
 	})
 	l1 := layerFixture(t, map[string]string{
@@ -158,18 +161,18 @@ func TestMergedTree_OpaqueDirDropsSubtree(t *testing.T) {
 		paths[e.Path] = true
 	}
 
-	// Every layer-0 path under ``a/`` is gone.
+	// Every layer-0 path under `a/` is gone.
 	forbidden := []string{"a/old-1.txt", "a/old-2.txt", "a/sub", "a/sub/deeper.txt"}
 	for _, p := range forbidden {
 		if paths[p] {
 			t.Errorf("path %q should be dropped by opaque-dir marker; got emitted", p)
 		}
 	}
-	// Layer-1's own additions under ``a/`` survive.
+	// Layer-1's own additions under `a/` survive.
 	if !paths["a/new.txt"] {
 		t.Errorf("a/new.txt should survive (added by top layer); not in merged view: %+v", got)
 	}
-	// ``a/`` itself still exists (layer 1 contributes it).
+	// `a/` itself still exists (layer 1 contributes it).
 	if !paths["a"] {
 		t.Errorf("a/ dir should still be present; not in merged view: %+v", got)
 	}
@@ -179,7 +182,7 @@ func TestMergedTree_OpaqueDirDropsSubtree(t *testing.T) {
 // symlink planted in a layer (pointing at the host's /etc/shadow, or
 // anywhere else outside the layer root) must NOT be emitted in the
 // merged view.  The escape vector is: "attacker builds an image
-// whose upper layer has a symlink ``/etc/passwd → /etc/passwd``;
+// whose upper layer has a symlink `/etc/passwd → /etc/passwd`;
 // when the agent later reads the merged view, safeio reads from the
 // host's /etc/passwd and tags it as container inventory."  We block
 // this by refusing to emit symlinks at all.
@@ -195,7 +198,7 @@ func TestMergedTree_SymlinkRefusalAcrossLayers(t *testing.T) {
 	l0 := layerFixture(t, map[string]string{"safe/file.txt": "ok"})
 
 	l1 := t.TempDir()
-	// Planted: layer 1 has a symlink at ``etc/passwd`` that points
+	// Planted: layer 1 has a symlink at `etc/passwd` that points
 	// at the host's real /etc/passwd.  If the merged walker followed
 	// it, the abs path would leak /etc/passwd into a container scan.
 	if err := os.MkdirAll(filepath.Join(l1, "etc"), 0o755); err != nil {
@@ -232,7 +235,7 @@ func TestMergedTree_SymlinkRefusalAcrossLayers(t *testing.T) {
 func TestMergedTree_NoLayers(t *testing.T) {
 	m := &MergedTree{}
 	calls := 0
-	err := m.Walk(func(MergedEntry) error { calls++; return nil })
+	_, err := m.Walk(context.Background(), func(MergedEntry) error { calls++; return nil })
 	if err != nil {
 		t.Errorf("unexpected error on empty tree: %v", err)
 	}
@@ -264,5 +267,134 @@ func TestMergedTree_LayerIdxAttribution(t *testing.T) {
 	}
 	if byPath["shared.txt"].LayerIdx != 1 {
 		t.Errorf("shared.txt LayerIdx: got %d, want 1 (top wins)", byPath["shared.txt"].LayerIdx)
+	}
+}
+
+// flipCtx is a context whose Err() reports "not cancelled" for the
+// first `trip-1` polls and context.Canceled thereafter, letting a test
+// cancel a walk deterministically *after* it has made progress rather
+// than racing a timer.  Done()/Deadline()/Value() delegate to the
+// embedded context.
+type flipCtx struct {
+	context.Context
+	mu    sync.Mutex
+	calls int
+	trip  int
+}
+
+func (c *flipCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	if c.calls >= c.trip {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestMergedTree_WalkCancelledMidFlight — MAJOR concurrency-1.  The
+// per-container deadline must bound the layer-collection walks, not just
+// Materialize's copy loop.  We lower walkCtxCheckInterval to 1 so every
+// walkLayer callback polls ctx, hand Walk a context that flips to
+// Canceled after a handful of polls, and confirm the walk aborts
+// mid-collection with ctx.Err() (not a truncation).
+func TestMergedTree_WalkCancelledMidFlight(t *testing.T) {
+	orig := walkCtxCheckInterval
+	walkCtxCheckInterval = 1
+	defer func() { walkCtxCheckInterval = orig }()
+
+	// A layer with many files so collection makes far more than `trip`
+	// ctx polls before it would finish on its own.
+	files := map[string]string{}
+	for i := 0; i < 200; i++ {
+		files[filepath.Join("dir", "f"+strconv.Itoa(i)+".txt")] = "x"
+	}
+	l0 := layerFixture(t, files)
+	l1 := layerFixture(t, map[string]string{"top.txt": "y"})
+	m := &MergedTree{Layers: []string{l0, l1}}
+
+	// trip low enough to land inside the first layer's collection.
+	ctx := &flipCtx{Context: context.Background(), trip: 5}
+
+	emitted := 0
+	truncated, err := m.Walk(ctx, func(MergedEntry) error { emitted++; return nil })
+	if err != context.Canceled {
+		t.Fatalf("Walk err: got %v, want context.Canceled", err)
+	}
+	if truncated {
+		t.Errorf("cancellation must be distinct from truncation; got truncated=true")
+	}
+	if emitted != 0 {
+		t.Errorf("walk should abort during collection, before emission; emitted %d", emitted)
+	}
+}
+
+// TestMergedTree_WalkPreCancelled — a context already cancelled before
+// Walk starts must abort immediately without touching the filesystem.
+func TestMergedTree_WalkPreCancelled(t *testing.T) {
+	l0 := layerFixture(t, map[string]string{"a.txt": "x"})
+	m := &MergedTree{Layers: []string{l0}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	calls := 0
+	truncated, err := m.Walk(ctx, func(MergedEntry) error { calls++; return nil })
+	if err != context.Canceled {
+		t.Fatalf("Walk err: got %v, want context.Canceled", err)
+	}
+	if truncated {
+		t.Errorf("got truncated=true, want false for cancellation")
+	}
+	if calls != 0 {
+		t.Errorf("fn invoked %d times on a pre-cancelled walk, want 0", calls)
+	}
+}
+
+// TestUnderAnyOpaque_Boundaries — MINOR concurrency-4.  Proves the
+// ancestor-decomposition lookup respects path boundaries: a path is
+// under an opaque dir on an exact match or a true slash-delimited
+// ancestor, but a sibling sharing a string prefix ("a/bc" vs opaque
+// "a/b") is NOT under it.
+func TestUnderAnyOpaque_Boundaries(t *testing.T) {
+	opaque := map[string]struct{}{
+		"a/b":   {},
+		"x/y/z": {},
+		"lib":   {},
+	}
+	cases := []struct {
+		rel  string
+		want bool
+		why  string
+	}{
+		{"a/b", true, "exact match"},
+		{"a/b/c", true, "descendant under a/b"},
+		{"a/b/c/d/e", true, "deep descendant under a/b"},
+		{"a/bc", false, "sibling prefix — NOT under a/b"},
+		{"a/bcd/e", false, "sibling-prefix subtree — NOT under a/b"},
+		{"a", false, "ancestor of opaque dir is not itself under it"},
+		{"a/x", false, "sibling of opaque dir"},
+		{"x/y/z/inner", true, "descendant under deep opaque x/y/z"},
+		{"x/y", false, "ancestor of x/y/z is not under it"},
+		{"x/y/zz", false, "sibling prefix of x/y/z"},
+		{"lib", true, "single-component exact match"},
+		{"lib/python3.12", true, "descendant under single-component opaque"},
+		{"library", false, "single-component sibling prefix — NOT under lib"},
+		{"other/lib", false, "opaque key must match from the root, not mid-path"},
+	}
+	for _, c := range cases {
+		if got := underAnyOpaque(c.rel, opaque); got != c.want {
+			t.Errorf("underAnyOpaque(%q): got %v, want %v (%s)", c.rel, got, c.want, c.why)
+		}
+	}
+
+	// Root-opaque ("") drops every lower-layer path.
+	rootOpaque := map[string]struct{}{"": {}}
+	if !underAnyOpaque("anything/at/all", rootOpaque) {
+		t.Errorf("root-opaque should hide every path")
+	}
+	// Empty opaque set matches nothing.
+	if underAnyOpaque("a/b", map[string]struct{}{}) {
+		t.Errorf("empty opaque set must match nothing")
 	}
 }

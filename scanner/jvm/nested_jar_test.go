@@ -9,7 +9,7 @@ import (
 
 // TestExtractFromJar_SpringBootNested reproduces the Spring Boot
 // uber-jar shape: an outer JAR whose own pom.properties describes the
-// application, plus multiple nested JARs under ``BOOT-INF/lib/`` —
+// application, plus multiple nested JARs under `BOOT-INF/lib/` —
 // each of which is a dependency with its own Maven coordinates.
 //
 // The product invariant: we emit **every** coordinate we can find,
@@ -33,8 +33,8 @@ func TestExtractFromJar_SpringBootNested(t *testing.T) {
 			"groupId=com.customer\nartifactId=myapp\nversion=1.0.0\n",
 		),
 		// Spring Boot convention.
-		"BOOT-INF/lib/spring-core-6.1.0.jar":    innerA,
-		"BOOT-INF/lib/jackson-core-2.15.3.jar":  innerB,
+		"BOOT-INF/lib/spring-core-6.1.0.jar":   innerA,
+		"BOOT-INF/lib/jackson-core-2.15.3.jar": innerB,
 		// Non-jar file in the same directory is ignored (defensive).
 		"BOOT-INF/lib/LICENSE.txt": []byte("Apache 2.0\n"),
 	})
@@ -50,7 +50,7 @@ func TestExtractFromJar_SpringBootNested(t *testing.T) {
 	}
 
 	// The outer app record carries the physical path only.
-	// The nested deps carry ``<outer>!/BOOT-INF/lib/<inner>.jar`` so an
+	// The nested deps carry `<outer>!/BOOT-INF/lib/<inner>.jar` so an
 	// operator can tell at a glance which uber-jar the dep came from.
 	names := map[string]scanner.PackageRecord{}
 	for _, r := range records {
@@ -81,9 +81,9 @@ func TestExtractFromJar_SpringBootNested(t *testing.T) {
 }
 
 // TestExtractFromJar_QuarkusNested covers the Quarkus uber-jar shape,
-// which uses ``quarkus-app/lib/main/`` and ``quarkus-app/lib/boot/``
-// rather than Spring Boot's ``BOOT-INF/lib/``.  The scanner is
-// deliberately path-agnostic — it descends into any ``.jar`` entry it
+// which uses `quarkus-app/lib/main/` and `quarkus-app/lib/boot/`
+// rather than Spring Boot's `BOOT-INF/lib/`.  The scanner is
+// deliberately path-agnostic — it descends into any `.jar` entry it
 // finds — so both layouts Just Work without per-framework code.
 func TestExtractFromJar_QuarkusNested(t *testing.T) {
 	inner := buildJARBytes(t, map[string][]byte{

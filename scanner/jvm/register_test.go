@@ -6,9 +6,9 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
-// TestJVMPluginIsRegistered verifies that the ``init()`` call in
-// scanner.go actually lands ``jvm`` in the global registry by checking
-// ``scanner.RegisteredScanners()``.  Whether production binaries
+// TestJVMPluginIsRegistered verifies that the `init()` call in
+// scanner.go actually lands `jvm` in the global registry by checking
+// `scanner.RegisteredScanners()`.  Whether production binaries
 // include the blank import is a build-tag / main.go concern — this
 // test can only assert that *if* the package is linked in, init()
 // registers it.  A regression where init() disappears (refactor

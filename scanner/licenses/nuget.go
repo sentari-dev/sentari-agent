@@ -1,6 +1,7 @@
 package licenses
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io/fs"
@@ -20,9 +21,12 @@ const maxNuspecBytes = 1 << 20 // 1 MiB
 // ExtractNuGet walks the NuGet packages cache for *.nuspec files. The
 // modern nuspec uses <license type="expression">SPDX</license> (conf
 // 0.9); older nuspec used <licenseUrl> as a free-text URL (conf 0.5).
-func ExtractNuGet(cacheRoot string) ([]deptree.LicenseEvidence, error) {
+func ExtractNuGet(ctx context.Context, cacheRoot string) ([]deptree.LicenseEvidence, error) {
 	var out []deptree.LicenseEvidence
 	walkErr := filepath.WalkDir(cacheRoot, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return fs.SkipAll
+		}
 		if err != nil {
 			return nil
 		}
@@ -46,7 +50,7 @@ func ExtractNuGet(cacheRoot string) ([]deptree.LicenseEvidence, error) {
 			return nil
 		}
 		var ns nugetNuspec
-		if err := xml.Unmarshal(raw, &ns); err != nil {
+		if err := xml.Unmarshal(stripBOM(raw), &ns); err != nil {
 			return nil
 		}
 		md := ns.Metadata

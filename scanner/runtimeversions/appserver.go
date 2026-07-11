@@ -2,7 +2,8 @@ package runtimeversions
 
 import (
 	"archive/zip"
-	"errors"
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,7 +29,7 @@ var _envHomeVars = []string{
 // child directory by marker, and also classifies explicit env-var homes.
 // Returns one InstalledRuntime per identified install. Best-effort: an
 // unreadable candidate is skipped, never fatal.
-func DetectAllAppServers(parents []string) []InstalledRuntime {
+func DetectAllAppServers(ctx context.Context, parents []string) []InstalledRuntime {
 	seen := map[string]struct{}{}
 	var out []InstalledRuntime
 
@@ -49,6 +50,9 @@ func DetectAllAppServers(parents []string) []InstalledRuntime {
 		}
 	}
 	for _, parent := range parents {
+		if ctx.Err() != nil {
+			return out
+		}
 		entries, err := os.ReadDir(parent)
 		if err != nil {
 			continue
@@ -92,8 +96,18 @@ func classify(dir string) (InstalledRuntime, bool) {
 		return mk("jetty", ver, "Eclipse", dir), true
 
 	case isFile(filepath.Join(dir, "glassfish/config/branding/glassfish-version.properties")):
-		ver := parseVersionToken(readText(filepath.Join(dir, "glassfish/config/branding/glassfish-version.properties")))
-		return mk("payara", ver, "Payara", dir), true
+		// Payara is a fork of Eclipse GlassFish and ships the SAME branding
+		// file, so its presence alone cannot tell the two apart — keying
+		// "payara" off it mislabels a stock Eclipse GlassFish install. Read
+		// the product name from the branding file (Payara sets a "Payara …"
+		// product name; upstream sets "Eclipse GlassFish") and fall back to a
+		// Payara-only module jar before assigning the Payara identity.
+		branding := readText(filepath.Join(dir, "glassfish/config/branding/glassfish-version.properties"))
+		ver := parseVersionToken(branding)
+		if isPayaraInstall(dir, branding) {
+			return mk("payara", ver, "Payara", dir), true
+		}
+		return mk("glassfish", ver, "Eclipse GlassFish", dir), true
 
 	// WebLogic / WebSphere — presence-only (no public EOL feed). Markers mirror
 	// the jvm package's discovery. Version is best-effort: WebLogic exposes it in
@@ -110,6 +124,32 @@ func classify(dir string) (InstalledRuntime, bool) {
 		return mk("websphere", "", "IBM", dir), true
 	}
 	return InstalledRuntime{}, false
+}
+
+// isPayaraInstall distinguishes a Payara install from an upstream Eclipse
+// GlassFish install. Both ship glassfish/config/branding/glassfish-version.
+// properties (Payara is a GlassFish fork), so the branding file's presence is
+// not sufficient. Two signals identify Payara: (a) a Payara-specific product
+// name in the branding properties — upstream sets product_name/
+// abbrev_product_name to "Eclipse GlassFish"/"GlassFish", Payara sets a
+// "Payara …" value; or (b) a Payara-only module jar under glassfish/modules
+// (e.g. payara-micro-*.jar, payara-boot-*.jar). Reads files only — never runs
+// a binary.
+func isPayaraInstall(dir, branding string) bool {
+	for _, line := range strings.Split(branding, "\n") {
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(strings.ToLower(key)) {
+		case "product_name", "abbrev_product_name":
+			if strings.Contains(strings.ToLower(val), "payara") {
+				return true
+			}
+		}
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "glassfish", "modules", "payara-*.jar"))
+	return len(matches) > 0
 }
 
 func mk(name, version, distro, dir string) InstalledRuntime {
@@ -171,33 +211,44 @@ func jettyVersionFromLib(dir string) string {
 }
 
 // jarImplementationVersion reads META-INF/MANIFEST.MF Implementation-Version
-// from a JAR without executing anything. safeio guards the open against
-// symlinks; archive/zip reads entries lazily.
+// from a JAR without executing anything. The path is opened exactly once via
+// safeio.Open (which refuses a symlink or non-regular leaf at the fd), and the
+// zip is read through that same fd with zip.NewReader — no path re-open — so a
+// symlink/FIFO can't be swapped in between a probe and the open (TOCTOU).
 func jarImplementationVersion(jarPath string) string {
-	if _, err := safeio.ReadFile(jarPath, 1); err != nil && errors.Is(err, safeio.ErrSymlink) {
-		return ""
-	}
-	zr, err := zip.OpenReader(jarPath)
+	f, err := safeio.Open(jarPath)
 	if err != nil {
 		return ""
 	}
-	defer zr.Close()
-	for _, f := range zr.File {
-		if f.Name != "META-INF/MANIFEST.MF" {
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	zr, err := zip.NewReader(f, info.Size())
+	if err != nil {
+		return ""
+	}
+	for _, zf := range zr.File {
+		if zf.Name != "META-INF/MANIFEST.MF" {
 			continue
 		}
-		rc, err := f.Open()
+		rc, err := zf.Open()
 		if err != nil {
 			return ""
 		}
-		defer rc.Close()
+		// io.ReadFull is short-read-safe: it returns the actual byte count
+		// even on a truncated/partial manifest (ErrUnexpectedEOF), unlike a
+		// single Read whose short reads are legal and would drop data.
 		buf := make([]byte, 16*1024)
-		n, _ := rc.Read(buf)
+		n, _ := io.ReadFull(rc, buf)
+		rc.Close()
 		for _, line := range strings.Split(string(buf[:n]), "\n") {
 			if strings.HasPrefix(line, "Implementation-Version:") {
 				return strings.TrimSpace(strings.TrimPrefix(line, "Implementation-Version:"))
 			}
 		}
+		return ""
 	}
 	return ""
 }

@@ -220,8 +220,8 @@ func TestWriteGradle_NoProxyExistingSentariConfigRemoved(t *testing.T) {
 }
 
 // Operator-curated init scripts in the same init.d directory MUST
-// be preserved.  Our writer owns ``sentari-proxy.gradle`` only;
-// other ``.gradle`` files in init.d are operator territory.
+// be preserved.  Our writer owns `sentari-proxy.gradle` only;
+// other `.gradle` files in init.d are operator territory.
 func TestWriteGradle_LeavesOtherInitScriptsAlone(t *testing.T) {
 	dir := t.TempDir()
 	path := gradleHomeOverride(t, dir)
@@ -328,8 +328,8 @@ allprojects {
 
 // Regression for the Copilot finding on PR #28: a legitimate
 // endpoint URL that happens to contain a Groovy-primitive
-// substring (e.g. ``eval-proxy``, ``execute-mirror``,
-// ``runtime-cache``) must NOT trip the forbidden-primitive
+// substring (e.g. `eval-proxy`, `execute-mirror`,
+// `runtime-cache`) must NOT trip the forbidden-primitive
 // scan.  The fix is that the scan runs over the body AFTER the
 // def line, not over the def line itself.
 func TestValidateRenderedGradle_AllowsKeywordSubstringsInURL(t *testing.T) {
@@ -355,7 +355,7 @@ func TestValidateRenderedGradle_AllowsKeywordSubstringsInURL(t *testing.T) {
 
 // Same regression for KeyID — operator can use a KeyID that
 // contains a keyword-collision substring (e.g. for key-rotation
-// naming conventions like ``runtime-2026q2``).
+// naming conventions like `runtime-2026q2`).
 func TestValidateRenderedGradle_AllowsKeywordSubstringsInKeyID(t *testing.T) {
 	cases := []string{"runtime", "execute2026", "evaluator", "shell-key"}
 	for _, kid := range cases {

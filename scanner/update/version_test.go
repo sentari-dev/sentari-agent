@@ -9,12 +9,12 @@ func TestCompareVersions(t *testing.T) {
 		ok   bool
 	}{
 		{"1.0.0", "1.0.0", 0, true},
-		{"v1.0.0", "1.0.0", 0, true},   // leading v ignored
-		{"1.2.0", "1.10.0", -1, true},  // numeric, not lexical
-		{"2.0.0", "1.9.9", 1, true},    // major dominates
-		{"0.2.0", "0.1.3", 1, true},    // patch/minor
-		{"0.1.3", "0.2.0", -1, true},   // reverse
-		{"1.0.1", "1.0.0", 1, true},    // patch bump
+		{"v1.0.0", "1.0.0", 0, true},    // leading v ignored
+		{"1.2.0", "1.10.0", -1, true},   // numeric, not lexical
+		{"2.0.0", "1.9.9", 1, true},     // major dominates
+		{"0.2.0", "0.1.3", 1, true},     // patch/minor
+		{"0.1.3", "0.2.0", -1, true},    // reverse
+		{"1.0.1", "1.0.0", 1, true},     // patch bump
 		{"1.0.0-rc1", "1.0.0", 0, true}, // pre-release suffix ignored on core triple
 		{"1.0.0+build5", "1.0.0", 0, true},
 		{"1.2", "1.2.0", 0, true}, // missing patch treated as 0

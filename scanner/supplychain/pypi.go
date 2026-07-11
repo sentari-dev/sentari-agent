@@ -1,6 +1,7 @@
 package supplychain
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -34,10 +35,13 @@ const maxMETADATABytes = 1 << 20 // 1 MiB
 //
 // Out of scope for Phase 3: querying PyPI's JSON API for current yank
 // status (that's the server-side enrichment path).
-func DetectInPipCache(sitePackagesDir string) ([]deptree.SupplyChainSignal, error) {
+func DetectInPipCache(ctx context.Context, sitePackagesDir string) ([]deptree.SupplyChainSignal, error) {
 	var signals []deptree.SupplyChainSignal
 
 	walkErr := filepath.WalkDir(sitePackagesDir, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return fs.SkipAll
+		}
 		if err != nil {
 			return nil
 		}

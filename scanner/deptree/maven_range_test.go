@@ -1,6 +1,7 @@
 package deptree
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,7 +55,7 @@ func TestVersionRange(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		edges, err := ParseMavenPom(filepath.Join(pomDir, "pom.xml"), m2)
+		edges, err := ParseMavenPom(context.Background(), filepath.Join(pomDir, "pom.xml"), m2)
 		if err != nil {
 			t.Fatalf("ParseMavenPom failed: %v", err)
 		}
@@ -102,7 +103,7 @@ func TestVersionRange(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		edges, err := ParseMavenPom(filepath.Join(pomDir, "pom.xml"), m2)
+		edges, err := ParseMavenPom(context.Background(), filepath.Join(pomDir, "pom.xml"), m2)
 		if err != nil {
 			t.Fatalf("ParseMavenPom should not error: %v", err)
 		}
@@ -161,7 +162,7 @@ func TestVersionRange(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		edges, err := ParseMavenPom(filepath.Join(pomDir, "pom.xml"), m2)
+		edges, err := ParseMavenPom(context.Background(), filepath.Join(pomDir, "pom.xml"), m2)
 		if err != nil {
 			t.Fatalf("ParseMavenPom failed: %v", err)
 		}
@@ -181,4 +182,149 @@ func TestVersionRange(t *testing.T) {
 			t.Errorf("com.acme:exact should be Resolved=true")
 		}
 	})
+
+	// TestResolveVersionRange_malformedNoPanic guards against a panic on a
+	// 1-char '[' or '(' (or empty) version. isVersionRange accepts these
+	// because it only checks the first byte, but slicing s[1:len(s)-1] on a
+	// 1-char string panics on the bounds. resolveVersionRange must bail out
+	// (return "" / verbatim, Resolved=false) instead of crashing.
+	t.Run("malformed_1char_range_no_panic", func(t *testing.T) {
+		for _, bad := range []string{"[", "(", ""} {
+			got := resolveVersionRange(t.TempDir(), "com.acme", "widget", bad)
+			if got != "" {
+				t.Errorf("resolveVersionRange(%q) = %q; want \"\" (clean skip)", bad, got)
+			}
+		}
+	})
+
+	// A pom whose dep carries a malformed 1-char range must not panic the
+	// whole parse, and well-formed deps in the same pom must still emit.
+	t.Run("malformed_range_in_pom_wellformed_still_emits", func(t *testing.T) {
+		dir := t.TempDir()
+		m2 := filepath.Join(dir, ".m2", "repository")
+
+		// A real installed artifact for the well-formed dep.
+		goodDir := filepath.Join(m2, "com", "acme", "good", "1.0")
+		if err := os.MkdirAll(goodDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(goodDir, "good-1.0.pom"), []byte(`<?xml version="1.0"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <groupId>com.acme</groupId><artifactId>good</artifactId><version>1.0</version>
+</project>`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		pomDir := filepath.Join(dir, "project")
+		if err := os.MkdirAll(pomDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		pom := `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example</groupId>
+    <artifactId>myapp</artifactId>
+    <version>1.0</version>
+    <dependencies>
+        <dependency>
+            <groupId>com.acme</groupId>
+            <artifactId>broken</artifactId>
+            <version>[</version>
+        </dependency>
+        <dependency>
+            <groupId>com.acme</groupId>
+            <artifactId>good</artifactId>
+            <version>1.0</version>
+        </dependency>
+    </dependencies>
+</project>`
+		if err := os.WriteFile(filepath.Join(pomDir, "pom.xml"), []byte(pom), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		edges, err := ParseMavenPom(context.Background(), filepath.Join(pomDir, "pom.xml"), m2)
+		if err != nil {
+			t.Fatalf("ParseMavenPom should not error on malformed range: %v", err)
+		}
+
+		var good *DepEdge
+		for i := range edges {
+			if edges[i].ChildName == "com.acme:good" {
+				good = &edges[i]
+			}
+		}
+		if good == nil {
+			t.Fatalf("well-formed com.acme:good dep must still emit alongside malformed dep; edges=%+v", edges)
+		}
+		if good.ChildVersion != "1.0" || !good.Resolved {
+			t.Errorf("com.acme:good wrong (want 1.0 Resolved=true): %+v", good)
+		}
+	})
+}
+
+// TestVersionRange_picksHighestNumericSegment covers the tie-break
+// comparator (mavenVersionLess / mavenVersionCompare) that selects the
+// highest satisfying installed version. With 1.2.0, 1.9.0 and 1.10.0 all
+// installed and all satisfying [1.0,2.0), the resolver must pick 1.10.0.
+// This forces numeric-segment ordering: a lexicographic sort would rank
+// "1.9.0" above "1.10.0" (because "9" > "1") and pick the wrong version.
+func TestVersionRange_picksHighestNumericSegment(t *testing.T) {
+	dir := t.TempDir()
+	m2 := filepath.Join(dir, ".m2", "repository")
+
+	// Install three satisfying versions of com.acme/multi.
+	for _, v := range []string{"1.2.0", "1.9.0", "1.10.0"} {
+		vDir := filepath.Join(m2, "com", "acme", "multi", v)
+		if err := os.MkdirAll(vDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		pom := "<?xml version=\"1.0\"?>\n<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n" +
+			"    <groupId>com.acme</groupId><artifactId>multi</artifactId><version>" + v + "</version>\n</project>"
+		if err := os.WriteFile(filepath.Join(vDir, "multi-"+v+".pom"), []byte(pom), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pomDir := filepath.Join(dir, "project")
+	if err := os.MkdirAll(pomDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pom := `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example</groupId>
+    <artifactId>myapp</artifactId>
+    <version>1.0</version>
+    <dependencies>
+        <dependency>
+            <groupId>com.acme</groupId>
+            <artifactId>multi</artifactId>
+            <version>[1.0,2.0)</version>
+        </dependency>
+    </dependencies>
+</project>`
+	if err := os.WriteFile(filepath.Join(pomDir, "pom.xml"), []byte(pom), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(pomDir, "pom.xml"), m2)
+	if err != nil {
+		t.Fatalf("ParseMavenPom failed: %v", err)
+	}
+
+	var multi *DepEdge
+	for i := range edges {
+		if edges[i].ChildName == "com.acme:multi" {
+			multi = &edges[i]
+		}
+	}
+	if multi == nil {
+		t.Fatalf("expected edge to com.acme:multi; edges=%+v", edges)
+	}
+	if multi.ChildVersion != "1.10.0" {
+		t.Errorf("com.acme:multi version=%q; want 1.10.0 (highest satisfying, numeric-segment ordering)", multi.ChildVersion)
+	}
+	if !multi.Resolved {
+		t.Errorf("com.acme:multi should be Resolved=true after range resolution")
+	}
 }

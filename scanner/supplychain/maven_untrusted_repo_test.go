@@ -1,6 +1,7 @@
 package supplychain
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -29,7 +30,7 @@ func TestUntrustedRepo_emitsSignal(t *testing.T) {
 	mustMkdir(t, versionDir)
 	mustWrite(t, filepath.Join(versionDir, "_remote.repositories"), remoteRepoUntrusted)
 
-	signals, err := DetectUntrustedRepos(m2)
+	signals, err := DetectUntrustedRepos(context.Background(), m2)
 	if err != nil {
 		t.Fatalf("DetectUntrustedRepos failed: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestUntrustedRepo_centralTrusted(t *testing.T) {
 	mustMkdir(t, versionDir)
 	mustWrite(t, filepath.Join(versionDir, "_remote.repositories"), remoteRepoCentralEmpty)
 
-	signals, err := DetectUntrustedRepos(m2)
+	signals, err := DetectUntrustedRepos(context.Background(), m2)
 	if err != nil {
 		t.Fatalf("DetectUntrustedRepos failed: %v", err)
 	}
@@ -96,7 +97,7 @@ func TestUntrustedRepo_centralUrlTrusted(t *testing.T) {
 	mustMkdir(t, versionDir)
 	mustWrite(t, filepath.Join(versionDir, "_remote.repositories"), remoteRepoCentralURL)
 
-	signals, err := DetectUntrustedRepos(m2)
+	signals, err := DetectUntrustedRepos(context.Background(), m2)
 	if err != nil {
 		t.Fatalf("DetectUntrustedRepos failed: %v", err)
 	}

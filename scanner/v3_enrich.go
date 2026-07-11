@@ -41,9 +41,11 @@
 package scanner
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -51,6 +53,7 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner/licenses"
 	"github.com/sentari-dev/sentari-agent/scanner/lockfiles"
 	"github.com/sentari-dev/sentari-agent/scanner/runtimeversions"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 	"github.com/sentari-dev/sentari-agent/scanner/supplychain"
 )
 
@@ -88,6 +91,41 @@ func v3DiscoveryRoots(scanRoot string) []string {
 	return []string{scanRoot}
 }
 
+// hostGlobalCachesInScope reports whether the host user-global package
+// caches (~/.m2, ~/.nuget) are within the scan's scope and should
+// therefore be walked during Phase-4 enrichment.
+//
+// They are in scope when:
+//   - the scan is a full-system scan (“/“ on POSIX, drive root on
+//     Windows), which covers the host home by definition, or
+//   - the scan root is the host home directory, or an ancestor of it
+//     (so the host ~/.m2 physically lives inside the scanned tree).
+//
+// They are NOT in scope for a container sub-scan — whose ScanRoot is a
+// materialised temp tree (os.MkdirTemp) unrelated to the host home — nor
+// for a scoped scan of an unrelated directory (e.g. --scan /opt/app).
+// A container's pom.xml must not trigger a re-hash of the host cache:
+// the host artefacts don't belong to the container, and each timed-out
+// container would otherwise re-walk the entire host .m2.
+func hostGlobalCachesInScope(scanRoot string) bool {
+	clean := filepath.Clean(scanRoot)
+	if clean == "/" || (runtime.GOOS == "windows" && len(clean) <= 3) {
+		return true
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	homeClean := filepath.Clean(home)
+	// In scope when homeClean is at or below clean — i.e. the relative
+	// path from the scan root to the home dir does not escape upward.
+	rel, err := filepath.Rel(clean, homeClean)
+	if err != nil {
+		return false
+	}
+	return rel == "." || !strings.HasPrefix(rel, "..")
+}
+
 // enrichWithV3 augments result with the four v3 payload sections.
 //
 // roots is the list of filesystem trees to discover lockfiles under
@@ -95,10 +133,23 @@ func v3DiscoveryRoots(scanRoot string) []string {
 // the caller knows about).  The function is best-effort: per-module
 // failures are logged and the scan continues.
 //
+// ctx cancellation is honoured throughout: every enrichment walker
+// checks ctx.Err() per directory and bails, and the phase boundaries
+// below short-circuit on a cancelled ctx.  Run invokes enrichWithV3
+// inline (no detached goroutine), so a cancelled scan stops the
+// enrichment walk promptly rather than leaking a walker that races the
+// caller's cleanup (notably a container sub-scan's os.RemoveAll).
+//
+// scanRoot is the Runner's configured ScanRoot.  It gates the Phase-4
+// host-global cache walks (~/.m2, ~/.nuget): those caches belong to the
+// host user, so a container sub-scan — whose ScanRoot is a materialised
+// temp tree — must NOT re-hash the host cache just because the
+// container shipped a pom.xml.  See hostGlobalCachesInScope.
+//
 // This function does NOT mutate the v2-shape ScanResult fields
 // (Packages, Errors, etc.) — those have already been populated by
 // Runner.Run before enrichWithV3 is invoked.
-func enrichWithV3(result *ScanResult, roots []string) {
+func enrichWithV3(ctx context.Context, result *ScanResult, roots []string, scanRoot string) {
 	if result == nil {
 		return
 	}
@@ -114,13 +165,16 @@ func enrichWithV3(result *ScanResult, roots []string) {
 
 	// Phase 1: per-root lockfile discovery + per-lockfile dep-tree parsing.
 	for _, root := range roots {
+		if ctx.Err() != nil {
+			return
+		}
 		if root == "" {
 			continue
 		}
 		var metas []deptree.LockfileMeta
 		safeCall("lockfiles.DiscoverInRoot", func() {
 			var derr error
-			metas, derr = lockfiles.DiscoverInRoot(root)
+			metas, derr = lockfiles.DiscoverInRoot(ctx, root)
 			if derr != nil {
 				slog.Warn("v3 lockfile discovery encountered errors", "root", root, "err", derr.Error())
 				// Non-fatal — metas may still contain partial results.
@@ -164,7 +218,7 @@ func enrichWithV3(result *ScanResult, roots []string) {
 				safeCall("deptree.ParseMavenPom", func() {
 					if home, herr := os.UserHomeDir(); herr == nil {
 						m2 := filepath.Join(home, ".m2", "repository")
-						if edges, err := deptree.ParseMavenPom(meta.Path, m2); err != nil {
+						if edges, err := deptree.ParseMavenPom(ctx, meta.Path, m2); err != nil {
 							slog.Warn("v3 maven pom parse failed", "path", meta.Path, "err", err.Error())
 						} else {
 							result.DepEdges = append(result.DepEdges, edges...)
@@ -243,12 +297,12 @@ func enrichWithV3(result *ScanResult, roots []string) {
 	// Phase 2: npm node_modules — per-project supply-chain + license extraction.
 	//
 	// Build the set of node_modules trees to walk from TWO sources:
-	//   1. Lockfile-anchored project dirs (``npmProjectDirs`` above) — the
+	//   1. Lockfile-anchored project dirs (`npmProjectDirs` above) — the
 	//      canonical case for user projects.
 	//   2. node_modules ancestors derived from the v2 detector's
-	//      ``result.Packages``. IDE extensions (Cursor / VSCode) ship a
-	//      bundled ``dist/node_modules`` *without* a lockfile, so they
-	//      never appear in ``npmProjectDirs`` — but the v2 detector still
+	//      `result.Packages`. IDE extensions (Cursor / VSCode) ship a
+	//      bundled `dist/node_modules` *without* a lockfile, so they
+	//      never appear in `npmProjectDirs` — but the v2 detector still
 	//      enumerated their packages. Without this second source the
 	//      licenses + supply-chain extractors silently skipped those trees,
 	//      leaving the packages with no license evidence even though their
@@ -270,16 +324,19 @@ func enrichWithV3(result *ScanResult, roots []string) {
 	}
 
 	for nm := range npmNodeModulesDirs {
+		if ctx.Err() != nil {
+			return
+		}
 		nm := nm
 		safeCall("supplychain.DetectInNodeModules", func() {
-			if signals, err := supplychain.DetectInNodeModules(nm); err != nil {
+			if signals, err := supplychain.DetectInNodeModules(ctx, nm); err != nil {
 				slog.Warn("v3 npm supply-chain detection failed", "node_modules", nm, "err", err.Error())
 			} else {
 				result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
 			}
 		})
 		safeCall("licenses.ExtractNpm", func() {
-			if evidence, err := licenses.ExtractNpm(nm); err != nil {
+			if evidence, err := licenses.ExtractNpm(ctx, nm); err != nil {
 				slog.Warn("v3 npm license extraction failed", "node_modules", nm, "err", err.Error())
 			} else {
 				result.LicenseEvidence = append(result.LicenseEvidence, evidence...)
@@ -289,23 +346,30 @@ func enrichWithV3(result *ScanResult, roots []string) {
 
 	// Phase 3: PyPI venv site-packages — best-effort under each project dir.
 	for dir := range pypiProjectDirs {
+		if ctx.Err() != nil {
+			return
+		}
 		for _, sp := range candidateSitePackages(dir) {
 			sp := sp
 			safeCall("supplychain.DetectInPipCache", func() {
-				if signals, err := supplychain.DetectInPipCache(sp); err != nil {
+				if signals, err := supplychain.DetectInPipCache(ctx, sp); err != nil {
 					slog.Warn("v3 pypi supply-chain detection failed", "site_packages", sp, "err", err.Error())
 				} else {
 					result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
 				}
 			})
 			safeCall("licenses.ExtractPyPI", func() {
-				if evidence, err := licenses.ExtractPyPI(sp); err != nil {
+				if evidence, err := licenses.ExtractPyPI(ctx, sp); err != nil {
 					slog.Warn("v3 pypi license extraction failed", "site_packages", sp, "err", err.Error())
 				} else {
 					result.LicenseEvidence = append(result.LicenseEvidence, evidence...)
 				}
 			})
 		}
+	}
+
+	if ctx.Err() != nil {
+		return
 	}
 
 	// Phase 4: user-global Maven + NuGet caches — once per scan run,
@@ -315,6 +379,15 @@ func enrichWithV3(result *ScanResult, roots []string) {
 	// the scanner enumerating package caches under $HOME violates that
 	// scope unless we have a concrete reason (a discovered pom.xml /
 	// NuGet lockfile) to believe the operator cares.
+	//
+	// Additionally gated on hostGlobalCachesInScope: a container
+	// sub-scan runs against a materialised temp tree, and a pom.xml
+	// found *inside the container* says nothing about the HOST's
+	// ~/.m2 cache.  Without this gate every timed-out container
+	// re-hashed the entire host .m2 — both wrong (host artefacts
+	// attributed to the container) and a perf sink (repeated per
+	// target).  The host caches are only consulted when the scan
+	// actually covers the host home.
 	hasMaven, hasNuget := false, false
 	for _, lf := range result.Lockfiles {
 		switch lf.Ecosystem {
@@ -325,41 +398,41 @@ func enrichWithV3(result *ScanResult, roots []string) {
 		}
 	}
 
-	if hasMaven || hasNuget {
+	if (hasMaven || hasNuget) && hostGlobalCachesInScope(scanRoot) {
 		if home, err := os.UserHomeDir(); err == nil {
 			if hasMaven {
 				m2 := filepath.Join(home, ".m2", "repository")
 				if st, err := os.Stat(m2); err == nil && st.IsDir() {
 					safeCall("supplychain.DetectInM2", func() {
-						if signals, err := supplychain.DetectInM2(m2); err != nil {
+						if signals, err := supplychain.DetectInM2(ctx, m2); err != nil {
 							slog.Warn("v3 maven supply-chain detection failed", "m2", m2, "err", err.Error())
 						} else {
 							result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
 						}
 					})
 					safeCall("supplychain.DetectChecksumMismatches", func() {
-						if signals, err := supplychain.DetectChecksumMismatches(m2); err != nil {
+						if signals, err := supplychain.DetectChecksumMismatches(ctx, m2); err != nil {
 							slog.Warn("v3 maven checksum mismatch detection failed", "m2", m2, "err", err.Error())
 						} else {
 							result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
 						}
 					})
 					safeCall("supplychain.DetectSnapshotInRelease", func() {
-						if signals, err := supplychain.DetectSnapshotInRelease(m2); err != nil {
+						if signals, err := supplychain.DetectSnapshotInRelease(ctx, m2); err != nil {
 							slog.Warn("v3 maven snapshot-in-release detection failed", "m2", m2, "err", err.Error())
 						} else {
 							result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
 						}
 					})
 					safeCall("supplychain.DetectUntrustedRepos", func() {
-						if signals, err := supplychain.DetectUntrustedRepos(m2); err != nil {
+						if signals, err := supplychain.DetectUntrustedRepos(ctx, m2); err != nil {
 							slog.Warn("v3 maven untrusted-repo detection failed", "m2", m2, "err", err.Error())
 						} else {
 							result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
 						}
 					})
 					safeCall("licenses.ExtractMaven", func() {
-						if evidence, err := licenses.ExtractMaven(m2); err != nil {
+						if evidence, err := licenses.ExtractMaven(ctx, m2); err != nil {
 							slog.Warn("v3 maven license extraction failed", "m2", m2, "err", err.Error())
 						} else {
 							result.LicenseEvidence = append(result.LicenseEvidence, evidence...)
@@ -371,14 +444,14 @@ func enrichWithV3(result *ScanResult, roots []string) {
 				nuget := filepath.Join(home, ".nuget", "packages")
 				if st, err := os.Stat(nuget); err == nil && st.IsDir() {
 					safeCall("supplychain.DetectInNuGetCache", func() {
-						if signals, err := supplychain.DetectInNuGetCache(nuget); err != nil {
+						if signals, err := supplychain.DetectInNuGetCache(ctx, nuget); err != nil {
 							slog.Warn("v3 nuget supply-chain detection failed", "cache", nuget, "err", err.Error())
 						} else {
 							result.SupplyChainSignals = append(result.SupplyChainSignals, signals...)
 						}
 					})
 					safeCall("licenses.ExtractNuGet", func() {
-						if evidence, err := licenses.ExtractNuGet(nuget); err != nil {
+						if evidence, err := licenses.ExtractNuGet(ctx, nuget); err != nil {
 							slog.Warn("v3 nuget license extraction failed", "cache", nuget, "err", err.Error())
 						} else {
 							result.LicenseEvidence = append(result.LicenseEvidence, evidence...)
@@ -404,14 +477,14 @@ func enrichWithV3(result *ScanResult, roots []string) {
 	safeCall("runtimeversions.JDK", func() {
 		roots := jdkCandidateRoots()
 		if len(roots) > 0 {
-			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllJDKs(roots)...)
+			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllJDKs(ctx, roots)...)
 		}
 	})
 
 	safeCall("runtimeversions.Python", func() {
 		roots := pythonCandidateRoots()
 		if len(roots) > 0 {
-			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllPythons(roots)...)
+			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllPythons(ctx, roots)...)
 		}
 	})
 
@@ -425,14 +498,26 @@ func enrichWithV3(result *ScanResult, roots []string) {
 	safeCall("runtimeversions.SystemPython", func() {
 		roots := systemPythonCandidateRoots()
 		if len(roots) > 0 {
-			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllSystemPythons(roots)...)
+			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllSystemPythons(ctx, roots)...)
+		}
+		// Microsoft Store Python (Win 11 default when a fresh host types
+		// `python`) lives behind the app-execution alias under
+		// %LOCALAPPDATA%\Packages\PythonSoftwareFoundation.Python.<X.Y>_*\
+		// — a non-standard layout none of the DetectAllSystemPythons
+		// on-disk shape readers recognise.  It is frequently the primary
+		// (or only) interpreter on such a host, so detect it here and
+		// feed the result into the same InstalledRuntimes stream.
+		if runtime.GOOS == "windows" {
+			if local := os.Getenv("LOCALAPPDATA"); local != "" {
+				result.InstalledRuntimes = append(result.InstalledRuntimes, detectWindowsStorePythons(local)...)
+			}
 		}
 	})
 
 	safeCall("runtimeversions.Node", func() {
 		paths := nodeCandidateBinaries()
 		if len(paths) > 0 {
-			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllNodes(paths)...)
+			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllNodes(ctx, paths)...)
 		}
 	})
 
@@ -442,7 +527,7 @@ func enrichWithV3(result *ScanResult, roots []string) {
 	safeCall("runtimeversions.AppServers", func() {
 		result.InstalledRuntimes = append(
 			result.InstalledRuntimes,
-			runtimeversions.DetectAllAppServers(appServerCandidateRoots())...,
+			runtimeversions.DetectAllAppServers(ctx, appServerCandidateRoots())...,
 		)
 	})
 }
@@ -546,12 +631,81 @@ func appServerCandidateRoots() []string {
 func pythonCandidateRoots() []string {
 	candidates := []string{"/opt", "/srv"}
 	if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(home, ".virtualenvs"),
-			filepath.Join(home, ".pyenv", "versions"),
-		)
+		candidates = append(candidates, virtualenvwrapperRoot(home))
+		candidates = append(candidates, pyenvVersionRoots(home)...)
 	}
 	return existingDirs(candidates)
+}
+
+// virtualenvwrapperRoot returns the directory virtualenvwrapper stores its
+// managed venvs in.  A relocated WORKON_HOME (honoured by both POSIX
+// virtualenvwrapper and virtualenvwrapper-win) wins; otherwise the per-platform
+// default applies — ~/.virtualenvs on POSIX, %USERPROFILE%\Envs on Windows (the
+// virtualenvwrapper-win default).  This mirrors how pyenvVersionRootsFor honours
+// PYENV_ROOT / PYENV over the built-in default.
+func virtualenvwrapperRoot(home string) string {
+	return virtualenvwrapperRootFor(home, runtime.GOOS, os.Getenv("WORKON_HOME"))
+}
+
+// virtualenvwrapperRootFor is the goos/env-parameterised core of
+// virtualenvwrapperRoot, split out so the Windows default and the WORKON_HOME
+// override are testable on any host (runtime.GOOS is a build constant).
+func virtualenvwrapperRootFor(home, goos, workonHome string) string {
+	if wh := strings.TrimSpace(workonHome); wh != "" {
+		return wh
+	}
+	if goos == "windows" {
+		return filepath.Join(home, "Envs")
+	}
+	return filepath.Join(home, ".virtualenvs")
+}
+
+// pyenvVersionRoots returns the directories that hold pyenv-managed
+// interpreter installs, spanning POSIX pyenv, pyenv-win, and an explicit
+// PYENV_ROOT / PYENV override.  Raw candidates (unfiltered) — callers pass the
+// result through existingDirs so layouts absent on a given host drop out.
+func pyenvVersionRoots(home string) []string {
+	return pyenvVersionRootsFor(home, runtime.GOOS)
+}
+
+// pyenvVersionRootsFor is the goos-parameterised core of pyenvVersionRoots,
+// split out so the Windows / PYENV-override branches are testable on any host
+// (runtime.GOOS is a build constant).  Duplicates are collapsed because a
+// PYENV_ROOT pointing at ~/.pyenv would otherwise yield the POSIX path twice.
+func pyenvVersionRootsFor(home, goos string) []string {
+	var roots []string
+	seen := make(map[string]struct{})
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, dup := seen[p]; dup {
+			return
+		}
+		seen[p] = struct{}{}
+		roots = append(roots, p)
+	}
+
+	// POSIX pyenv: ~/.pyenv/versions/<ver>.  Kept on every platform.
+	add(filepath.Join(home, ".pyenv", "versions"))
+
+	// pyenv-win keeps versions under ~/.pyenv/pyenv-win/versions; the POSIX
+	// path above never exists on Windows, so without this entry pyenv-managed
+	// interpreters would be missed entirely there.
+	if goos == "windows" {
+		add(filepath.Join(home, ".pyenv", "pyenv-win", "versions"))
+	}
+
+	// Honour an explicit relocation via PYENV_ROOT (POSIX pyenv) or PYENV
+	// (pyenv-win) on all platforms: a relocated install keeps its interpreters
+	// under <root>/versions.
+	for _, envVar := range []string{"PYENV_ROOT", "PYENV"} {
+		if root := os.Getenv(envVar); root != "" {
+			add(filepath.Join(root, "versions"))
+		}
+	}
+
+	return roots
 }
 
 // systemPythonCandidateRoots returns directories that hold *interpreter*
@@ -577,12 +731,12 @@ func systemPythonCandidateRoots() []string {
 		}
 	case "windows":
 		// Per-machine: each interpreter installs at
-		// ``<ProgramFiles>\Python<XY>\`` (e.g.
-		// ``C:\Program Files\Python311\``).  There is no umbrella
-		// ``<ProgramFiles>\Python\`` parent — every Python<XY>/ is a
+		// `<ProgramFiles>\Python<XY>\` (e.g.
+		// `C:\Program Files\Python311\`).  There is no umbrella
+		// `<ProgramFiles>\Python\` parent — every Python<XY>/ is a
 		// sibling under ProgramFiles itself.  Enumerate them here so
-		// the detector's ``HasPrefix(base, "Python")`` case can read
-		// each one directly.  Also include the umbrella ``\Python\``
+		// the detector's `HasPrefix(base, "Python")` case can read
+		// each one directly.  Also include the umbrella `\Python\`
 		// path as a defensive fallback in case a future installer
 		// changes the layout.
 		if pf := os.Getenv("ProgramFiles"); pf != "" {
@@ -593,13 +747,13 @@ func systemPythonCandidateRoots() []string {
 		}
 		// Per-user: %LOCALAPPDATA%\Programs\Python\Python<XY>\ is
 		// the canonical 'pip install for current user' layout —
-		// the detector's ``base == "Programs"`` branch walks the
+		// the detector's `base == "Programs"` branch walks the
 		// parent for Python<XY> children.
 		if local := os.Getenv("LOCALAPPDATA"); local != "" {
 			candidates = append(candidates, filepath.Join(local, "Programs", "Python"))
 		}
 		// Chocolatey (and older all-users python.org installers) drop the
-		// interpreter at ``C:\Python<XY>\`` — a "Python"-prefixed dir the
+		// interpreter at `C:\Python<XY>\` — a "Python"-prefixed dir the
 		// detector reads directly, same as the ProgramFiles siblings above.
 		if matches, _ := filepath.Glob(`C:\Python*`); len(matches) > 0 {
 			candidates = append(candidates, matches...)
@@ -609,7 +763,66 @@ func systemPythonCandidateRoots() []string {
 		// app-execution alias; its non-standard layout needs a dedicated
 		// detector branch and remains a known coverage gap.
 	}
+	// pyenv / asdf version-manager interpreter installs — home-relative,
+	// so cross-platform.  Package scanning already walks these dirs via
+	// extraScanRoots; the DetectAllSystemPythons `.pyenv` / `.asdf`
+	// branches read the version-named child dirs as interpreters, keeping
+	// the runtime and package views symmetric.
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, pyenvVersionRoots(home)...)
+		candidates = append(candidates, filepath.Join(home, ".asdf", "installs", "python"))
+	}
 	return existingDirs(candidates)
+}
+
+// storePythonPkgRe extracts the X.Y series embedded in a Microsoft Store
+// Python package-family directory name.  Store installs place the
+// interpreter under %LOCALAPPDATA%\Packages\<PackageFamilyName>\, where
+// the family name is `PythonSoftwareFoundation.Python.<X.Y>_<publisherId>`
+// (e.g. `PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0`).  The X.Y
+// series is authoritative — endoflife.date keys on it — so we read it
+// straight from the directory name rather than opening the interpreter
+// (CLAUDE.md: no binary invocation).  Requiring the trailing `_` before
+// the publisher id excludes the non-versioned sibling packages the Store
+// also drops here (e.g. `PythonSoftwareFoundation.Python.Launcher_*`).
+var storePythonPkgRe = regexp.MustCompile(`^PythonSoftwareFoundation\.Python\.(\d+\.\d+)_`)
+
+// detectWindowsStorePythons enumerates Microsoft Store Python installs
+// under <localAppData>\Packages and emits one InstalledRuntime per
+// recognised PythonSoftwareFoundation.Python.<X.Y>_* package dir.  It
+// takes localAppData as a parameter (rather than reading the env or
+// guarding on runtime.GOOS internally) so the detection is exercisable
+// cross-platform in tests with a faked %LOCALAPPDATA% layout; the
+// GOOS/env guard lives at the single production call site.
+//
+// The Packages directory is never legitimately a symlink, so it is read
+// through safeio.ReadDir (which refuses a swapped-in reparse point); the
+// version is taken from the entry name only, so no per-package file is
+// opened.
+func detectWindowsStorePythons(localAppData string) []runtimeversions.InstalledRuntime {
+	pkgRoot := filepath.Join(localAppData, "Packages")
+	entries, err := safeio.ReadDir(pkgRoot)
+	if err != nil {
+		return nil
+	}
+	var out []runtimeversions.InstalledRuntime
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		m := storePythonPkgRe.FindStringSubmatch(e.Name())
+		if m == nil {
+			continue
+		}
+		version := m[1]
+		out = append(out, runtimeversions.InstalledRuntime{
+			Name:        runtimeversions.RuntimePython,
+			Version:     version,
+			Cycle:       runtimeversions.CycleFor(runtimeversions.RuntimePython, version),
+			InstallPath: filepath.Join(pkgRoot, e.Name()),
+		})
+	}
+	return out
 }
 
 // nodeCandidateBinaries returns concrete `node` binary paths the
@@ -620,6 +833,8 @@ func nodeCandidateBinaries() []string {
 		"/opt/homebrew/bin/node", // Apple Silicon Homebrew
 		"/usr/local/bin/node",    // Intel Homebrew / generic
 		"/usr/bin/node",
+		"/usr/bin/nodejs",       // Debian/Ubuntu apt package names it `nodejs`
+		"/usr/local/bin/nodejs", // Debian/Ubuntu source/alt install
 		"/opt/node/bin/node",
 	}
 	if home, err := os.UserHomeDir(); err == nil {
@@ -628,6 +843,54 @@ func nodeCandidateBinaries() []string {
 			for _, e := range entries {
 				if e.IsDir() {
 					candidates = append(candidates, filepath.Join(nvmDir, e.Name(), "bin", "node"))
+				}
+			}
+		}
+		// asdf: ~/.asdf/installs/nodejs/<ver>/bin/node — one real interpreter
+		// per installed version, mirroring how the python asdf install root is
+		// picked up in systemPythonCandidateRoots.  ~/.asdf/shims holds wrapper
+		// scripts (not real binaries), so it is deliberately NOT probed.
+		asdfNodeDir := filepath.Join(home, ".asdf", "installs", "nodejs")
+		if entries, err := os.ReadDir(asdfNodeDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() {
+					candidates = append(candidates, filepath.Join(asdfNodeDir, e.Name(), "bin", "node"))
+				}
+			}
+		}
+		// fnm: <$FNM_DIR else ~/.local/share/fnm else ~/.fnm>/node-versions/
+		// <ver>/installation/bin/node — one real interpreter per installed
+		// version, mirroring the Windows fnm layout in
+		// windowsNodeCandidateBinaries.  $FNM_DIR, when set, is authoritative;
+		// otherwise both default roots are probed (fnm's location moved from
+		// ~/.fnm to ~/.local/share/fnm across releases).
+		var fnmRoots []string
+		if fnmDir := os.Getenv("FNM_DIR"); fnmDir != "" {
+			fnmRoots = []string{fnmDir}
+		} else {
+			fnmRoots = []string{
+				filepath.Join(home, ".local", "share", "fnm"),
+				filepath.Join(home, ".fnm"),
+			}
+		}
+		for _, root := range fnmRoots {
+			fnmNodeDir := filepath.Join(root, "node-versions")
+			if entries, err := os.ReadDir(fnmNodeDir); err == nil {
+				for _, e := range entries {
+					if e.IsDir() {
+						candidates = append(candidates, filepath.Join(fnmNodeDir, e.Name(), "installation", "bin", "node"))
+					}
+				}
+			}
+		}
+		// Volta: ~/.volta/tools/image/node/<ver>/bin/node — one real
+		// interpreter per installed version.  Volta's shims (~/.volta/bin) are
+		// wrappers, not real binaries, so they are deliberately NOT probed.
+		voltaNodeDir := filepath.Join(home, ".volta", "tools", "image", "node")
+		if entries, err := os.ReadDir(voltaNodeDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() {
+					candidates = append(candidates, filepath.Join(voltaNodeDir, e.Name(), "bin", "node"))
 				}
 			}
 		}

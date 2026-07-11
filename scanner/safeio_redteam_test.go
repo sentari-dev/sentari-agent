@@ -12,7 +12,7 @@ import (
 // TestRedTeam_PipMetadataSymlinkRefused models the attack we actually
 // saw in the audit: a malicious site-packages entry ships its METADATA
 // as a symlink to a sensitive file on the host.  Pre-safeio the scanner
-// would ``os.ReadFile`` the symlink, follow it, and surface the target's
+// would `os.ReadFile` the symlink, follow it, and surface the target's
 // contents in the license-raw field (which is uploaded to the server).
 //
 // With safeio in place, parseDistInfo must refuse to read the symlink

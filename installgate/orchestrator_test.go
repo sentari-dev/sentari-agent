@@ -34,7 +34,7 @@ func TestApply_NilMap(t *testing.T) {
 func TestApply_PipChanged(t *testing.T) {
 	// Reuse the per-OS env override from pip_test.go so this test
 	// passes on Windows (APPDATA-based path) as well as on
-	// Linux/macOS (XDG_CONFIG_HOME / HOME).  ``want`` comes back
+	// Linux/macOS (XDG_CONFIG_HOME / HOME).  `want` comes back
 	// already adjusted to the platform.
 	want := userHomeOverride(t, t.TempDir())
 

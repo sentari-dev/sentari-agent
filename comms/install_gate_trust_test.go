@@ -3,6 +3,7 @@ package comms
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -28,8 +29,14 @@ func TestSaveAndLoadInstallGateTrust_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if mode := info.Mode().Perm(); mode&0o077 != 0 {
-		t.Errorf("trust file too permissive: %v", mode)
+	// Unix perm bits aren't representable on NTFS — os.Stat reports
+	// 0666 on Windows regardless of the 0600 we requested, so the
+	// too-permissive check is Unix-only.  The round-trip below still
+	// runs on Windows.
+	if runtime.GOOS != "windows" {
+		if mode := info.Mode().Perm(); mode&0o077 != 0 {
+			t.Errorf("trust file too permissive: %v", mode)
+		}
 	}
 
 	got, err := LoadInstallGateTrust(dir)
@@ -75,7 +82,7 @@ func TestLoadInstallGateTrust_MissingReturnsNil(t *testing.T) {
 }
 
 // TestLoadInstallGateTrust_RejectsPartialRecord: a trust file missing
-// either ``key_id`` or ``pubkey_b64`` is corrupt; loading must fail
+// either `key_id` or `pubkey_b64` is corrupt; loading must fail
 // rather than returning a record the caller would misuse.
 func TestLoadInstallGateTrust_RejectsPartialRecord(t *testing.T) {
 	dir := t.TempDir()

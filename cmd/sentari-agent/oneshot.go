@@ -1,8 +1,8 @@
 // Shared one-shot-scan orchestration used by both the community
-// (`!enterprise`) and enterprise builds.  Under the
-// OSS ⊆ Enterprise principle, every output format available in the
+// (`!enterprise`) and enterprise builds.  Per the 2026-04-24 roadmap
+// decision (OSS ⊆ Enterprise), every output format available in the
 // community build is also available in the enterprise build when the
-// operator invokes ``--scan`` for a local inventory without an upload
+// operator invokes `--scan` for a local inventory without an upload
 // round-trip.  Extracting the logic here prevents the two mains from
 // drifting as new formatters are added.
 //
@@ -37,7 +37,7 @@ type oneShotOptions struct {
 // The scan config is the caller's responsibility — it encodes the
 // scan root, depth, worker count, and container-scan opt-in.
 func runOneShot(ctx context.Context, cfg scanner.Config, opts oneShotOptions) int {
-	s := scanner.NewScanner(cfg)
+	s := scanner.NewRunner(cfg)
 	result, err := s.Run(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Scan failed: %v\n", err)
@@ -113,4 +113,3 @@ func resolveOneShotFormat(opts oneShotOptions) string {
 	}
 	return output.FormatPretty
 }
-

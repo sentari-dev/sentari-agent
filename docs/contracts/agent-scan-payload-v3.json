@@ -9,11 +9,16 @@
     "lockfiles": { "type": "array", "items": { "$ref": "#/definitions/LockfileMeta" } },
     "supply_chain_signals": { "type": "array", "items": { "$ref": "#/definitions/SupplyChainSignal" } },
     "license_evidence": { "type": "array", "items": { "$ref": "#/definitions/LicenseEvidence" } },
-    "installed_runtimes": { "type": "array", "items": { "$ref": "#/definitions/InstalledRuntime" } }
+    "installed_runtimes": { "type": "array", "items": { "$ref": "#/definitions/InstalledRuntime" } },
+    "os_release": { "$ref": "#/definitions/OsRelease" },
+    "container_targets": { "type": "array", "items": { "$ref": "#/definitions/ContainerTargetSummary" } },
+    "tags": { "type": ["array", "null"], "items": { "type": "string" } },
+    "runtime": { "type": "string", "enum": ["bare_metal", "container", "k8s", "unknown"] }
   },
   "definitions": {
     "DepEdge": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["parent_name", "parent_version", "child_name", "child_version", "ecosystem", "type", "scope", "depth", "introduced_by_path", "resolved"],
       "properties": {
         "parent_name": { "type": "string" },
@@ -30,6 +35,7 @@
     },
     "LockfileMeta": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["path", "format", "ecosystem", "sha256", "last_modified", "declared_packages_count", "drift_status"],
       "properties": {
         "path": { "type": "string" },
@@ -43,6 +49,7 @@
     },
     "SupplyChainSignal": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["package_name", "package_version", "ecosystem", "signal_type", "severity", "source"],
       "properties": {
         "package_name": { "type": "string" },
@@ -56,6 +63,7 @@
     },
     "LicenseEvidence": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["package_name", "package_version", "ecosystem", "source", "confidence"],
       "properties": {
         "package_name": { "type": "string" },
@@ -69,13 +77,36 @@
     },
     "InstalledRuntime": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["name", "version", "cycle", "install_path"],
       "properties": {
-        "name": { "type": "string", "enum": ["python", "node", "jdk", "wildfly", "jboss-eap", "tomcat", "jetty", "payara", "weblogic", "websphere"] },
+        "name": { "type": "string", "enum": ["python", "node", "jdk", "wildfly", "jboss-eap", "tomcat", "jetty", "payara", "glassfish", "weblogic", "websphere"] },
         "version": { "type": "string" },
         "cycle": { "type": "string" },
         "distro": { "type": ["string", "null"] },
         "install_path": { "type": "string" }
+      }
+    },
+    "OsRelease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version_id"],
+      "properties": {
+        "id": { "type": "string" },
+        "version_id": { "type": "string" }
+      }
+    },
+    "ContainerTargetSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "image_id", "layer_count"],
+      "properties": {
+        "runtime": { "type": "string" },
+        "image_id": { "type": "string" },
+        "image_tags": { "type": "array", "items": { "type": "string" } },
+        "container_id": { "type": "string" },
+        "container_name": { "type": "string" },
+        "layer_count": { "type": "integer" }
       }
     }
   }

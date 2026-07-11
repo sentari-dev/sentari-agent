@@ -1,0 +1,19 @@
+lockfileVersion: 5.4
+
+specifiers:
+  express: ^4.18.0
+
+dependencies:
+  express: 4.18.2
+
+packages:
+
+  /express/4.18.2:
+    resolution: {integrity: sha512-express}
+    dependencies:
+      qs: 6.11.0
+    dev: false
+
+  /qs/6.11.0:
+    resolution: {integrity: sha512-qs}
+    dev: false

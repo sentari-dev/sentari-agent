@@ -10,11 +10,11 @@ import (
 // discoverMavenCache returns Environments pointing at Maven-style
 // repositories reachable from this host.  Two locations are checked:
 //
-//   1. ``$MAVEN_HOME/repository`` — explicit configuration, typical
-//      on shared build agents where MAVEN_HOME points at a
-//      writable group directory.
-//   2. ``$HOME/.m2/repository`` — developer workstations.  On
-//      Windows we read $USERPROFILE as the HOME fallback.
+//  1. `$MAVEN_HOME/repository` — explicit configuration, typical
+//     on shared build agents where MAVEN_HOME points at a
+//     writable group directory.
+//  2. `$HOME/.m2/repository` — developer workstations.  On
+//     Windows we read $USERPROFILE as the HOME fallback.
 //
 // Both may exist on one host (CI runner with a system-wide Maven +
 // per-user cache); we emit a distinct Environment for each so they

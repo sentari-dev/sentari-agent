@@ -2,10 +2,10 @@
 
 // syncDir POSIX implementation.
 //
-// On ext4 / xfs / btrfs, an atomic-replace's ``os.Rename`` only
+// On ext4 / xfs / btrfs, an atomic-replace's `os.Rename` only
 // updates the parent directory's metadata in the page cache; a
 // power-cut before the journal flushes loses the rename even
-// though the file's data was fsynced.  Calling ``Sync`` on the
+// though the file's data was fsynced.  Calling `Sync` on the
 // directory's file descriptor is the documented way to make the
 // metadata change durable.
 //

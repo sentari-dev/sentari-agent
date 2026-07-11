@@ -1,11 +1,18 @@
 package lockfiles
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 func TestDiscoverInRoot_findsKnownLockfiles(t *testing.T) {
@@ -14,7 +21,7 @@ func TestDiscoverInRoot_findsKnownLockfiles(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "subproject", "pom.xml"), `<project xmlns="http://maven.apache.org/POM/4.0.0"></project>`)
 	mustWrite(t, filepath.Join(root, "requirements.txt"), "requests==2.31.0\nurllib3==2.0.7\n# comment\n")
 
-	results, err := DiscoverInRoot(root)
+	results, err := DiscoverInRoot(context.Background(), root)
 	if err != nil {
 		t.Fatalf("discover failed: %v", err)
 	}
@@ -46,7 +53,7 @@ func TestDiscoverInRoot_skipsNodeModules(t *testing.T) {
 	// node_modules contains a nested lockfile we should NOT discover.
 	mustWrite(t, filepath.Join(root, "node_modules", "some-dep", "package-lock.json"), `{"lockfileVersion":3,"packages":{}}`)
 
-	results, err := DiscoverInRoot(root)
+	results, err := DiscoverInRoot(context.Background(), root)
 	if err != nil {
 		t.Fatalf("discover failed: %v", err)
 	}
@@ -62,7 +69,7 @@ func TestDiscoverInRoot_skipsCommonNoiseDirs(t *testing.T) {
 	}
 	mustWrite(t, filepath.Join(root, "pom.xml"), `<project xmlns="http://maven.apache.org/POM/4.0.0"></project>`)
 
-	results, err := DiscoverInRoot(root)
+	results, err := DiscoverInRoot(context.Background(), root)
 	if err != nil {
 		t.Fatalf("discover failed: %v", err)
 	}
@@ -76,7 +83,7 @@ func TestDiscoverInRoot_sha256MatchesContent(t *testing.T) {
 	content := `{"lockfileVersion":3,"packages":{}}`
 	mustWrite(t, filepath.Join(root, "package-lock.json"), content)
 
-	results, err := DiscoverInRoot(root)
+	results, err := DiscoverInRoot(context.Background(), root)
 	if err != nil {
 		t.Fatalf("discover failed: %v", err)
 	}
@@ -90,8 +97,7 @@ func TestDiscoverInRoot_sha256MatchesContent(t *testing.T) {
 	}
 }
 
-func TestDetectPackageLockVersion(t *testing.T) {
-	root := t.TempDir()
+func TestPackageLockFormat(t *testing.T) {
 	cases := map[string]string{
 		`{"lockfileVersion":2,"packages":{}}`: "package_lock_v2",
 		`{"lockfileVersion":3,"packages":{}}`: "package_lock_v3",
@@ -103,11 +109,7 @@ func TestDetectPackageLockVersion(t *testing.T) {
 		`{"lockfileVersion":1,"packages":{}}`: "",
 	}
 	for content, want := range cases {
-		p := filepath.Join(root, "package-lock.json")
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		got, err := detectPackageLockVersion(p)
+		got, err := packageLockFormat([]byte(content))
 		if err != nil {
 			t.Errorf("detect failed: %v", err)
 			continue
@@ -125,7 +127,7 @@ func TestDiscoverInRoot_skipsV1PackageLock(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "package-lock.json"), `{"lockfileVersion":1,"packages":{}}`)
 
-	results, err := DiscoverInRoot(root)
+	results, err := DiscoverInRoot(context.Background(), root)
 	if err != nil {
 		t.Fatalf("discover returned error for v1 lockfile: %v", err)
 	}
@@ -151,7 +153,7 @@ __metadata:
   version: 4.17.21
   resolution: "lodash@npm:4.17.21"
 `)
-	results, err := DiscoverInRoot(root)
+	results, err := DiscoverInRoot(context.Background(), root)
 	if err != nil {
 		t.Fatalf("discover failed: %v", err)
 	}
@@ -176,12 +178,109 @@ lodash@^4.17.21:
   version "4.17.21"
   resolved "https://registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz"
 `)
-	results, err := DiscoverInRoot(root)
+	results, err := DiscoverInRoot(context.Background(), root)
 	if err != nil {
 		t.Fatalf("discover failed: %v", err)
 	}
 	if len(results) != 1 || results[0].Format != "yarn_v1" {
 		t.Fatalf("expected yarn_v1, got %+v", results)
+	}
+}
+
+// TestBuildMeta_readsFileOnce proves the single-read refactor: buildMeta
+// now reads each lockfile exactly once (kind detection, drift hash, and
+// declared-count parse all derive from that one buffer) instead of the
+// previous up-to-three reads.  A spy wrapped around the readLockfile
+// seam counts opens.
+func TestBuildMeta_readsFileOnce(t *testing.T) {
+	root := t.TempDir()
+
+	orig := readLockfile
+	t.Cleanup(func() { readLockfile = orig })
+	var mu sync.Mutex
+	counts := map[string]int{}
+	readLockfile = func(path string) ([]byte, error) {
+		mu.Lock()
+		counts[path]++
+		mu.Unlock()
+		return orig(path)
+	}
+
+	cases := []struct {
+		name    string
+		matcher filenameMatcher
+		content string
+		format  string
+	}{
+		{
+			name:    "yarn.lock",
+			matcher: filenameMatcher{"yarn.lock", "yarn_v1", "npm"},
+			content: "__metadata:\n  version: 8\n\n\"lodash@npm:^4.17.21\":\n  version: 4.17.21\n",
+			format:  "yarn_berry",
+		},
+		{
+			name:    "package-lock.json",
+			matcher: filenameMatcher{"package-lock.json", "package_lock_v3", "npm"},
+			content: `{"lockfileVersion":3,"packages":{"":{"name":"a"},"node_modules/foo":{"version":"1.0.0"}}}`,
+			format:  "package_lock_v3",
+		},
+	}
+	for _, tc := range cases {
+		p := filepath.Join(root, tc.name)
+		mustWrite(t, p, tc.content)
+		meta, err := buildMeta(p, tc.matcher)
+		if err != nil {
+			t.Fatalf("%s: buildMeta: %v", tc.name, err)
+		}
+		if meta.Format != tc.format {
+			t.Errorf("%s: format = %q, want %q", tc.name, meta.Format, tc.format)
+		}
+		if counts[p] != 1 {
+			t.Errorf("%s: read %d times, want exactly 1", tc.name, counts[p])
+		}
+	}
+}
+
+// TestIsYarnBerry_probeBounded proves the berry probe inspects only the
+// bounded head of the buffer: a `__metadata:` marker placed AFTER the
+// probe window must NOT flip classification to berry.
+func TestIsYarnBerry_probeBounded(t *testing.T) {
+	// Marker within the head → berry.
+	head := []byte("# comment\n__metadata:\n  version: 8\n")
+	if !isYarnBerry(head) {
+		t.Fatal("expected berry when __metadata: is in the head window")
+	}
+
+	// Push the marker past yarnBerryProbeBytes with leading padding that
+	// stays under the window — must be classified NOT berry.
+	padding := strings.Repeat("# pad line to fill the probe window ok\n", 20)
+	if len(padding) <= yarnBerryProbeBytes {
+		t.Fatalf("test setup: padding %d must exceed probe window %d", len(padding), yarnBerryProbeBytes)
+	}
+	buried := []byte(padding + "__metadata:\n  version: 8\n")
+	if isYarnBerry(buried) {
+		t.Fatal("marker beyond the probe window must NOT be classified as berry")
+	}
+}
+
+// TestBuildMeta_oversizedLockfileRefused proves the cap policy: a
+// lockfile the reader reports as over the size cap is refused (surfaced
+// as an error, no metadata emitted) rather than silently hashed over a
+// truncated or unbounded prefix.
+func TestBuildMeta_oversizedLockfileRefused(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "package-lock.json")
+	mustWrite(t, p, `{"lockfileVersion":3,"packages":{}}`)
+
+	orig := readLockfile
+	t.Cleanup(func() { readLockfile = orig })
+	readLockfile = func(string) ([]byte, error) {
+		return nil, fmt.Errorf("%w: simulated oversize", safeio.ErrTooLarge)
+	}
+
+	_, err := buildMeta(p, filenameMatcher{"package-lock.json", "package_lock_v3", "npm"})
+	if err == nil || !errors.Is(err, safeio.ErrTooLarge) {
+		t.Fatalf("expected ErrTooLarge to propagate, got %v", err)
 	}
 }
 

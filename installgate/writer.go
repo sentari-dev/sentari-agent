@@ -1,11 +1,11 @@
 // Package installgate writes the native package-manager config files
-// that route ``pip install``, ``npm install``, ``mvn`` etc. through
+// that route `pip install`, `npm install`, `mvn` etc. through
 // Sentari-Proxy.  Each per-ecosystem writer lives in this package and
-// the agent orchestrator calls ``Apply`` (see orchestrator.go) once
+// the agent orchestrator calls `Apply` (see orchestrator.go) once
 // per scan cycle with the verified policy-map; that single entry point
 // fans out to every writer.
 //
-// Why a top-level package and not a subdir of ``scanner/``: scanner
+// Why a top-level package and not a subdir of `scanner/`: scanner
 // is the read side of the agent (discovers installed packages).
 // installgate is the write side — it changes how the host's package
 // managers behave on the next install.  Conflating the two would
@@ -16,7 +16,7 @@
 //
 // Common writer invariants (per design doc §4):
 //
-//  1. **Atomic replace.**  Write to ``<path>.sentari-tmp``, fsync,
+//  1. **Atomic replace.**  Write to `<path>.sentari-tmp`, fsync,
 //     rename.  A crash mid-write must never leave a truncated
 //     config file.
 //  2. **Sentari-managed marker.**  Every written file begins with
@@ -25,8 +25,8 @@
 //     against hand-edits.
 //  3. **Backup on first write.**  The first time the agent writes
 //     to a path that already exists, the previous content is
-//     preserved at ``<path>.sentari-backup-<RFC3339-timestamp>``.
-//     Operators can ``mv`` the backup back to fully revert if they
+//     preserved at `<path>.sentari-backup-<RFC3339-timestamp>`.
+//     Operators can `mv` the backup back to fully revert if they
 //     decide to disable the gate.
 
 package installgate
@@ -42,6 +42,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sentari-dev/sentari-agent/common/secureperm"
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
@@ -52,7 +53,7 @@ import (
 // past the policy-map size cap.  Refuse rather than write.
 const MaxConfigFileBytes = 256 * 1024 // 256 KiB
 
-// MarkerFields is the data the ``// Managed by Sentari (...)``
+// MarkerFields is the data the `// Managed by Sentari (...)`
 // comment block embeds.  The agent uses the version + key_id to
 // confirm a config was written by *this* policy-map (not an older
 // cached one) when reasoning about drift; the timestamp is a human
@@ -63,12 +64,12 @@ type MarkerFields struct {
 	Applied time.Time
 }
 
-// WriteOptions controls one ``WriteAtomic`` call.  Constructed by
+// WriteOptions controls one `WriteAtomic` call.  Constructed by
 // the per-ecosystem writers, not directly by callers, so the
 // invariants stay consistent across pip / npm / Maven / NuGet etc.
 type WriteOptions struct {
 	// Path is the final destination of the file (e.g.
-	// ``/etc/pip.conf``).  Parent directories are created with
+	// `/etc/pip.conf`).  Parent directories are created with
 	// mode 0755 if absent — pip / npm / Maven all expect their
 	// config dirs to be world-readable so non-root tooling can
 	// inspect them, and a tighter mode would break common
@@ -76,7 +77,7 @@ type WriteOptions struct {
 	Path string
 
 	// Content is the canonical bytes to write.  Must already
-	// include the ``Managed by Sentari`` marker — RenderManagedHeader
+	// include the `Managed by Sentari` marker — RenderManagedHeader
 	// does that for the writer.
 	Content []byte
 
@@ -84,10 +85,21 @@ type WriteOptions struct {
 	// configs at 0644 (world-readable, owner-writable); apt / yum
 	// repo files the same.  The user-vs-system scope decision lives
 	// upstream in the per-ecosystem writer.
+	//
+	// An owner-only mode (no group/other bits, i.e. 0600 — used for
+	// every credential-bearing config: .npmrc auth tokens, Maven
+	// settings.xml <password>, NuGet <packageSourceCredentials>, the
+	// pip .netrc) additionally triggers a Windows DACL hardening pass
+	// (see writeAndSync → hardenIfConfidential).  Unix mode bits alone
+	// do NOT enforce confidentiality on Windows — os.Chmod there only
+	// toggles the read-only attribute and leaves the parent dir's
+	// inherited ACL intact, so a 0600 file stays world-readable via
+	// that inherited ACL.  The 0644 world-readable configs are left
+	// untouched by the hardening pass.
 	FileMode os.FileMode
 
 	// BackupSuffix lets the per-ecosystem writer override the
-	// default ``.sentari-backup-<timestamp>`` suffix when the
+	// default `.sentari-backup-<timestamp>` suffix when the
 	// upstream tool dislikes wildcards.  Empty → default.
 	BackupSuffix string
 
@@ -97,11 +109,11 @@ type WriteOptions struct {
 }
 
 // WriteAtomic implements the three writer invariants.  Returns
-// ``true`` if the file was created or updated, ``false`` when the
+// `true` if the file was created or updated, `false` when the
 // existing content already matches Content (idempotent re-write —
 // no I/O, no audit-noise).
 //
-// Errors are typed (via ``%w``-wrapping standard ``os`` errors)
+// Errors are typed (via `%w`-wrapping standard `os` errors)
 // so callers can distinguish "permission denied" (operator needs
 // root) from genuine bugs.
 func WriteAtomic(opts WriteOptions) (bool, error) {
@@ -121,7 +133,7 @@ func WriteAtomic(opts WriteOptions) (bool, error) {
 		opts.FileMode = 0o644
 	}
 
-	// Cleanup any stranded legacy ``.sentari-tmp`` from a prior run
+	// Cleanup any stranded legacy `.sentari-tmp` from a prior run
 	// of an older agent build that used the predictable fixed suffix.
 	// Best-effort — a permission error here doesn't block the normal
 	// write path.  Current builds never write to this fixed name (it
@@ -171,8 +183,8 @@ func WriteAtomic(opts WriteOptions) (bool, error) {
 	}
 
 	// Atomic write: tmpfile in same dir → fsync → rename → fsync
-	// parent.  Same dir matters: ``rename`` is atomic only inside
-	// one filesystem, and ``filepath.Dir(opts.Path)`` is the
+	// parent.  Same dir matters: `rename` is atomic only inside
+	// one filesystem, and `filepath.Dir(opts.Path)` is the
 	// filesystem we already know we have permission to write to.
 	if err := writeAndSync(tmpPath, opts.Content, opts.FileMode); err != nil {
 		// Best-effort cleanup; ignoring removal errors here is OK
@@ -205,12 +217,12 @@ func WriteAtomic(opts WriteOptions) (bool, error) {
 // validateEndpoint refuses URL strings that contain bytes which
 // would let a tampered (or pathologically misconfigured) policy-map
 // inject additional config directives into a rendered file.  The
-// per-ecosystem renderers interpolate ``endpoint`` directly into a
-// line-oriented config (pip's ``index-url = ...``, npm's
-// ``registry=...``), so a CR or LF in the endpoint produces a
+// per-ecosystem renderers interpolate `endpoint` directly into a
+// line-oriented config (pip's `index-url = ...`, npm's
+// `registry=...`), so a CR or LF in the endpoint produces a
 // well-formed file with extra lines — for npm that means an
-// attacker-chosen ``registry=`` overrides ours; for pip an
-// extra ``[section]`` could disable the proxy entirely.
+// attacker-chosen `registry=` overrides ours; for pip an
+// extra `[section]` could disable the proxy entirely.
 //
 // Defence-in-depth: the policy-map signature has already been
 // verified upstream and the operator vetted the URL via the
@@ -236,32 +248,32 @@ func validateEndpoint(endpoint string) error {
 }
 
 // sentariManagedSentinel is the byte sequence every rendered config
-// begins with.  Per design §4 every writer prepends a ``Managed by
-// Sentari`` comment block; matching the literal bytes here keeps
+// begins with.  Per design §4 every writer prepends a `Managed by
+// Sentari` comment block; matching the literal bytes here keeps
 // the marker check syntax-agnostic across the # / <!-- variants
 // because both share this prefix.
 var sentariManagedSentinel = []byte("# Managed by Sentari")
 var sentariManagedSentinelXML = []byte("<!-- Managed by Sentari")
 var sentariManagedSentinelSlash = []byte("// Managed by Sentari")
 
-// isSentariManaged reports whether ``path`` exists AND carries
-// the Sentari-managed marker within its first ``markerSearchBytes``
+// isSentariManaged reports whether `path` exists AND carries
+// the Sentari-managed marker within its first `markerSearchBytes`
 // bytes.  Returns:
 //
-//   - ``(false, nil)`` for absent files (the writer treats this as
+//   - `(false, nil)` for absent files (the writer treats this as
 //     "no Sentari ownership claim", same as the operator-curated
 //     case below).
-//   - ``(false, nil)`` for files that exist but lack the marker
+//   - `(false, nil)` for files that exist but lack the marker
 //     (operator-curated pre-Sentari config, or hand-edited).
-//   - ``(true, nil)`` when the marker is present.
-//   - ``(false, err)`` on permission/IO errors so the caller can
+//   - `(true, nil)` when the marker is present.
+//   - `(false, err)` on permission/IO errors so the caller can
 //     refuse to act under uncertainty.
 //
 // 1 KiB is enough to decide.  The hash-marker variant (pip / npm /
 // apt / yum) sits at offset zero, so a tiny prefix-check would be
 // fine for those — but the XML-marker variant (Maven, NuGet) sits
-// AFTER the ``<?xml ...?>`` declaration on line 2, so we need a
-// substring scan rather than a prefix match.  ``bytes.Contains``
+// AFTER the `<?xml ...?>` declaration on line 2, so we need a
+// substring scan rather than a prefix match.  `bytes.Contains`
 // is fine; the read is bounded, the search is linear.
 const markerSearchBytes = 1024
 
@@ -281,9 +293,9 @@ func isSentariManaged(path string) (bool, error) {
 	defer f.Close()
 	head := make([]byte, markerSearchBytes)
 	// io.ReadFull guarantees we get either a full buffer or an
-	// ``io.ErrUnexpectedEOF`` (file shorter than buffer — fine,
-	// scan what we got).  Plain ``f.Read`` is allowed to short-
-	// read with ``err == nil`` on POSIX, which on a slow disk
+	// `io.ErrUnexpectedEOF` (file shorter than buffer — fine,
+	// scan what we got).  Plain `f.Read` is allowed to short-
+	// read with `err == nil` on POSIX, which on a slow disk
 	// could truncate the marker scan window mid-marker and
 	// misclassify a Sentari-managed file as operator-curated.
 	n, err := io.ReadFull(f, head)
@@ -299,10 +311,10 @@ func isSentariManaged(path string) (bool, error) {
 	return false, nil
 }
 
-// bytesContains returns true iff ``needle`` appears anywhere in
-// ``haystack``.  We hand-roll this rather than importing ``bytes``
+// bytesContains returns true iff `needle` appears anywhere in
+// `haystack`.  We hand-roll this rather than importing `bytes`
 // to keep this package's import surface auditable — same
-// minimalist trade-off as the local ``bytesEqual`` helper above.
+// minimalist trade-off as the local `bytesEqual` helper above.
 func bytesContains(haystack, needle []byte) bool {
 	if len(needle) == 0 {
 		return true
@@ -330,10 +342,10 @@ func bytesContains(haystack, needle []byte) bool {
 // the server (or the agent has been told to disable install-gate)
 // the writer reverts the host to "no Sentari proxy" state by
 // removing the file.  No backup is produced — callers that wanted
-// to preserve the pre-Sentari state already have ``.sentari-backup-*``
+// to preserve the pre-Sentari state already have `.sentari-backup-*`
 // from the original write.
 //
-// Returns ``(false, nil)`` if the path doesn't exist (fresh host or
+// Returns `(false, nil)` if the path doesn't exist (fresh host or
 // already removed) so the caller can no-op idempotently.
 func Remove(path string) (bool, error) {
 	if path == "" {
@@ -356,8 +368,8 @@ func Remove(path string) (bool, error) {
 	return true, nil
 }
 
-// findBackupCandidate returns the path of a ``.sentari-backup-*``
-// sibling for ``path`` if one exists, else "".  When several backups
+// findBackupCandidate returns the path of a `.sentari-backup-*`
+// sibling for `path` if one exists, else "".  When several backups
 // exist (multiple operator→Sentari transitions over time) the
 // lexically-greatest name is returned — the suffix is an RFC3339-ish
 // timestamp, so lexical max is the most recent backup, the one an
@@ -378,7 +390,7 @@ func findBackupCandidate(path string) string {
 }
 
 // readBoundedIfExists returns the file contents capped at
-// ``MaxConfigFileBytes+1``.  A ``nil`` return paired with a ``nil``
+// `MaxConfigFileBytes+1`.  A `nil` return paired with a `nil`
 // error means the file does not exist (caller's idempotency branch
 // short-circuits to "first write").
 func readBoundedIfExists(path string) ([]byte, error) {
@@ -400,7 +412,7 @@ func readBoundedIfExists(path string) ([]byte, error) {
 }
 
 // bytesEqual returns true iff two byte slices carry the same bytes.
-// Replaces ``bytes.Equal`` only because we want one less import in
+// Replaces `bytes.Equal` only because we want one less import in
 // the public API surface of this package — nothing fancy.
 func bytesEqual(a, b []byte) bool {
 	if len(a) != len(b) {
@@ -435,12 +447,12 @@ func randomNonceHex() (string, error) {
 // The open is O_CREATE|O_EXCL|O_WRONLY (+O_NOFOLLOW on unix) — never
 // O_TRUNC through a pre-existing inode.  The temp file lives in the
 // final config's directory, which pip / npm / Maven keep world-
-// writable (0755), so a local attacker can pre-plant ``path`` as a
+// writable (0755), so a local attacker can pre-plant `path` as a
 // symlink to a root-owned file; O_EXCL refuses to open any existing
 // inode (incl. a symlink) so the root-running agent can never be
 // tricked into truncating the symlink's target (LPE).  Callers
-// generate ``path`` with a random nonce so the name itself cannot be
-// pre-planted either.  ``backupOriginal`` uses the same O_EXCL guard.
+// generate `path` with a random nonce so the name itself cannot be
+// pre-planted either.  `backupOriginal` uses the same O_EXCL guard.
 func writeAndSync(path string, data []byte, mode os.FileMode) error {
 	f, err := openExclNoFollow(path, mode)
 	if err != nil {
@@ -459,23 +471,69 @@ func writeAndSync(path string, data []byte, mode os.FileMode) error {
 	}
 	// Tighten the mode after the file exists — OpenFile honours
 	// umask, so the explicit Chmod ensures the rendered config
-	// matches ``opts.FileMode`` regardless of the agent's umask
+	// matches `opts.FileMode` regardless of the agent's umask
 	// (root-installed agents typically inherit umask 022, which
 	// happens to match 0644, but we don't rely on that).
 	if err := os.Chmod(path, mode); err != nil {
 		return fmt.Errorf("chmod tmp %s: %w", path, err)
 	}
+	// Confidentiality: os.Chmod above is authoritative on unix but a
+	// near-no-op on Windows (it only flips FILE_ATTRIBUTE_READONLY and
+	// never touches the DACL), so a credential-bearing config would keep
+	// the parent dir's inherited "Users: read" ACE — world/group-readable
+	// registry credentials.  Harden the temp file BEFORE the rename so the
+	// well-known final path only ever appears already-restricted (rename
+	// within one volume preserves the explicit, inheritance-protected
+	// DACL — see hardenIfConfidential).
+	if err := hardenIfConfidential(path, mode); err != nil {
+		return err
+	}
+	return nil
+}
+
+// hardenIfConfidential applies an owner-only restrictive DACL (Windows)
+// / re-asserts 0600 (unix) to `path` when `mode` denies all group and
+// other access — the marker install-gate uses for a credential-bearing
+// config (0600).  World/group-readable configs (0644: pip.conf, apt/yum
+// repo files) are intentionally left untouched: hardening them would
+// break the debugging flows that expect a non-root user to read them.
+//
+// It routes through secureperm.HardenFile, the same helper that protects
+// the agent's mTLS device key.  That helper's DACL grants GENERIC_ALL to
+// exactly three principals — LocalSystem, the Builtin Administrators
+// group, and the CURRENT PROCESS USER — and sets PROTECTED_DACL, which
+// strips the inherited "Users: read" ACE.  The current-process-user grant
+// is what keeps install-gate working: the agent writes a user-scoped
+// config (e.g. ~/.npmrc, %APPDATA%\pip\pip.ini) as the same account that
+// later runs pip/npm/dotnet, so that account remains able to read its own
+// config — matching the unix 0600 "owner + admins only" intent while
+// preserving owner-read.
+//
+// Fail-CLOSED: unlike the device key (which has mTLS / short-lived-cert
+// defence-in-depth), a leaked registry credential in a pip/.netrc/.npmrc
+// has no secondary protection, so a hardening failure aborts the write
+// rather than landing a world-readable credential file.  On unix the
+// re-chmod cannot newly fail here (we just chmod'd the same path to the
+// same 0600), so this fail-closed path is effectively Windows-only.
+func hardenIfConfidential(path string, mode os.FileMode) error {
+	if mode.Perm()&0o077 != 0 {
+		// Grants some group/other access → world-readable by design.
+		return nil
+	}
+	if err := secureperm.HardenFile(path); err != nil {
+		return fmt.Errorf("harden credential file %s: %w", path, err)
+	}
 	return nil
 }
 
 // backupOriginal copies the existing file to
-// ``<path>.sentari-backup-<RFC3339-timestamp>`` (or to
-// ``<path><customSuffix>`` when supplied).  Mode is preserved from
-// the source via an explicit ``os.Chmod`` after create — relying
-// on ``os.OpenFile``'s perm argument alone is umask-subject and
+// `<path>.sentari-backup-<RFC3339-timestamp>` (or to
+// `<path><customSuffix>` when supplied).  Mode is preserved from
+// the source via an explicit `os.Chmod` after create — relying
+// on `os.OpenFile`'s perm argument alone is umask-subject and
 // would quietly drop bits the operator had set on the original.
 //
-// The copy is bounded by ``MaxConfigFileBytes``: a pre-existing
+// The copy is bounded by `MaxConfigFileBytes`: a pre-existing
 // pip.conf bigger than that is almost certainly malicious or
 // pathological, and copying it to a backup would (a) waste disk
 // proportional to the attacker's input and (b) recur every time we
@@ -503,7 +561,7 @@ func backupOriginal(path string, now time.Time, customSuffix string) error {
 	// safeio.Open refuses to follow a symlink leaf — without this the
 	// backup step would copy the contents of whatever a symlinked
 	// config path points at (e.g. /etc/shadow) into a world-
-	// discoverable ``.sentari-backup-*`` file.  Refuse and let the
+	// discoverable `.sentari-backup-*` file.  Refuse and let the
 	// caller surface the warning instead of acting.
 	src, err := safeio.Open(path)
 	if err != nil {
@@ -548,6 +606,18 @@ func backupOriginal(path string, now time.Time, customSuffix string) error {
 	// source's permission bits regardless.
 	if err := os.Chmod(dest, srcInfo.Mode().Perm()); err != nil {
 		return fmt.Errorf("chmod backup %s: %w", dest, err)
+	}
+	// The backup is a verbatim copy, so an owner-only source (an
+	// operator-curated .npmrc / settings.xml carrying credentials)
+	// yields a backup that carries those same credentials.  The Chmod
+	// above preserves 0600 on unix but is a near-no-op on Windows, so
+	// harden the backup with the same DACL as the live config — else the
+	// `.sentari-backup-*` sibling becomes the world-readable copy of the
+	// secret.  Fail-closed: drop the just-written backup rather than
+	// leave an exposed credential copy behind.
+	if err := hardenIfConfidential(dest, srcInfo.Mode().Perm()); err != nil {
+		_ = os.Remove(dest)
+		return err
 	}
 	return nil
 }

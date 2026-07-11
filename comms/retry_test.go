@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -32,6 +34,74 @@ func newTestClient(t *testing.T, serverURL string) *Client {
 		},
 	}
 	return c
+}
+
+// dnsDialErr wraps a *net.DNSError in the same url.Error→net.OpError
+// dial chain http.Client.Do produces when name resolution fails, so the
+// classification tests exercise the real errors.As traversal.
+func dnsDialErr(dnsErr *net.DNSError) error {
+	return &url.Error{
+		Op:  "Post",
+		URL: "https://server.example/scan",
+		Err: &net.OpError{
+			Op:  "dial",
+			Net: "tcp",
+			Err: dnsErr,
+		},
+	}
+}
+
+func TestIsRetryable_TransientDNSIsRetryable(t *testing.T) {
+	// Air-gap link recovery: DNS commonly fails transiently (SERVFAIL,
+	// resolver timeout, resolver not yet reachable) for a beat after the
+	// link returns.  Those must be retried, not dropped after one attempt.
+	cases := []struct {
+		name string
+		err  *net.DNSError
+	}{
+		{
+			name: "temporary SERVFAIL",
+			err:  &net.DNSError{Err: "server misbehaving", Name: "server.example", IsTemporary: true},
+		},
+		{
+			name: "resolver timeout",
+			err:  &net.DNSError{Err: "i/o timeout", Name: "server.example", IsTimeout: true},
+		},
+		{
+			name: "resolver-not-found-but-temporary (link recovering)",
+			err:  &net.DNSError{Err: "no such host", Name: "server.example", IsNotFound: true, IsTemporary: true},
+		},
+		{
+			name: "generic resolution failure, no flags set",
+			err:  &net.DNSError{Err: "lookup failed", Name: "server.example"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !isRetryable(dnsDialErr(tc.err)) {
+				t.Fatalf("transient DNS error %q must be retryable", tc.name)
+			}
+		})
+	}
+}
+
+func TestIsRetryable_PermanentNXDOMAINIsNotRetryable(t *testing.T) {
+	// A definitive NXDOMAIN (IsNotFound, not flagged temporary) is a
+	// misconfiguration — the name will not start existing on a retry, so
+	// the caller must surface it rather than burn the backoff budget.
+	nx := &net.DNSError{
+		Err:        "no such host",
+		Name:       "typo.server.exmaple",
+		IsNotFound: true,
+	}
+	if isRetryable(dnsDialErr(nx)) {
+		t.Fatal("permanent NXDOMAIN must NOT be retryable")
+	}
+	// Also assert the bare (unwrapped) DNSError classifies the same way,
+	// since errors.As should reach it either way.
+	if isRetryable(nx) {
+		t.Fatal("bare permanent NXDOMAIN must NOT be retryable")
+	}
 }
 
 func TestDoRequest_RetriesOn503ThenSucceeds(t *testing.T) {
@@ -202,6 +272,72 @@ func TestClampWaitHint(t *testing.T) {
 	}
 }
 
+func TestNextBackoff_ZeroConfigUsesDefaults(t *testing.T) {
+	// Finding offline-2: a RetryConfig with a non-positive BaseDelay or
+	// MaxDelay (e.g. the bare zero value) must NOT collapse the backoff
+	// into a zero-delay retry burst that hammers the server.  Every wait
+	// falls back to the package defaults, so it is strictly positive and
+	// bounded by the default MaxDelay.
+	zero := RetryConfig{} // BaseDelay=0, MaxDelay=0, JitterFactor=0
+	for n := 1; n <= 6; n++ {
+		got := nextBackoff(n, zero)
+		if got <= 0 {
+			t.Fatalf("nextBackoff(%d, zero) = %v, want > 0 (no zero-delay burst)", n, got)
+		}
+		if got > defaultRetryConfig.MaxDelay {
+			t.Fatalf("nextBackoff(%d, zero) = %v, exceeds default MaxDelay %v", n, got, defaultRetryConfig.MaxDelay)
+		}
+	}
+	// The first wait uses the default BaseDelay exactly (no jitter here).
+	if got := nextBackoff(1, zero); got != defaultRetryConfig.BaseDelay {
+		t.Fatalf("nextBackoff(1, zero) = %v, want default BaseDelay %v", got, defaultRetryConfig.BaseDelay)
+	}
+	// A negative MaxDelay/BaseDelay is treated the same as unbounded/zero.
+	neg := RetryConfig{BaseDelay: -1, MaxDelay: -1}
+	if got := nextBackoff(3, neg); got <= 0 || got > defaultRetryConfig.MaxDelay {
+		t.Fatalf("nextBackoff(3, neg) = %v, want in (0, %v]", got, defaultRetryConfig.MaxDelay)
+	}
+}
+
+func TestParseRetryAfter_HTTPDate(t *testing.T) {
+	// Finding tests-2: the Retry-After: <HTTP-date> form (RFC 7231) is
+	// what an air-gap gateway or hardened server emits instead of
+	// delta-seconds.  A future date yields a positive wait; a past date
+	// (clock skew / stale header) must yield zero, never a negative
+	// duration that would blow past the backoff/clamp logic.
+	now := time.Now()
+	cases := []struct {
+		name    string
+		when    time.Time
+		wantPos bool // true → positive duration expected; false → zero
+	}{
+		{"future date yields positive wait", now.Add(45 * time.Second), true},
+		{"past date yields zero, never negative", now.Add(-45 * time.Second), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// http.TimeFormat is the RFC1123 GMT form http.ParseTime reads.
+			hdr := tc.when.UTC().Format(http.TimeFormat)
+			got := parseRetryAfter(hdr)
+			if got < 0 {
+				t.Fatalf("parseRetryAfter(%q) = %v, must never be negative", hdr, got)
+			}
+			if tc.wantPos {
+				if got <= 0 {
+					t.Fatalf("future date %q: got %v, want positive", hdr, got)
+				}
+				// Whatever the header says, clampWaitHint bounds it to MaxDelay.
+				const maxDelay = 10 * time.Second
+				if clamped := clampWaitHint(got, RetryConfig{MaxDelay: maxDelay}); clamped > maxDelay {
+					t.Fatalf("clamped wait %v exceeds MaxDelay %v", clamped, maxDelay)
+				}
+			} else if got != 0 {
+				t.Fatalf("past date %q: got %v, want 0", hdr, got)
+			}
+		})
+	}
+}
+
 func TestDoRequest_GivesUpAfterMaxAttempts(t *testing.T) {
 	// Perma-503 → caller sees a wrapped error that says which op
 	// and how many attempts happened.  The original lastErr stays
@@ -310,7 +446,7 @@ func TestDoRequest_OmitsXRequestIDWhenUnbound(t *testing.T) {
 }
 
 // TestUploadScan_SetsV3PayloadVersionHeader asserts that every
-// /scan upload carries ``X-Sentari-Payload-Version: 3``.  The
+// /scan upload carries `X-Sentari-Payload-Version: 3`.  The
 // server's v3 ingest path relies on the header to distinguish
 // "agent looked and found nothing" from "agent doesn't speak v3";
 // if this regresses, v2 agents and v3 agents become

@@ -132,7 +132,7 @@ func TestWriteNpm_BasicCredentialBase64Auth(t *testing.T) {
 		t.Errorf("missing always-auth line\nfull body:\n%s", got)
 	}
 	// The cleartext password MUST NOT be on any line — it should only
-	// appear via the base64-encoded ``_auth=`` value.
+	// appear via the base64-encoded `_auth=` value.
 	if strings.Contains(got, "ACME-pw-123") {
 		t.Errorf("password leaked as cleartext:\n%s", got)
 	}

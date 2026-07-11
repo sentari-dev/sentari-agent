@@ -9,8 +9,8 @@
 // container count and in CSV/JSON output, but Explain does not
 // (yet) carve out a dedicated per-container block.
 //
-// Per the ``OSS ⊆ Enterprise`` principle, every formatter here is
-// reachable from both cmd/sentari-agent/main.go
+// Per the 2026-04-24 roadmap decision (`OSS ⊆ Enterprise`),
+// every formatter here is reachable from both cmd/sentari-agent/main.go
 // (community build) and cmd/sentari-agent/main_enterprise.go
 // (enterprise build).  Enterprise adds additional *modes* on top
 // (upload, serve, cache-drain) but every output format the community
@@ -35,7 +35,7 @@ import (
 // ErrUnknownFormat is the sentinel Write returns when the caller
 // asks for a format name this package doesn't implement.  Callers
 // that want to distinguish "bad CLI flag" from "write failed"
-// use ``errors.Is(err, ErrUnknownFormat)``.
+// use `errors.Is(err, ErrUnknownFormat)`.
 var ErrUnknownFormat = errors.New("output: unknown format")
 
 // Format names the output modes callers can request.  Kept as
@@ -50,11 +50,11 @@ const (
 
 // recentInstallCutoff is the age threshold below which a package
 // counts as "recently installed" for the Explain formatter's
-// highlight block.  Matches the common 48h recent-install heuristic
-// and the default max_days the install_age policy rule uses.
+// highlight block.  A 48h window matching the default max_days
+// the install_age policy rule uses.
 const recentInstallCutoff = 48 * time.Hour
 
-// Write formats ``result`` into ``w`` in the named ``format``.
+// Write formats `result` into `w` in the named `format`.
 // An unknown format name returns a typed error rather than falling
 // back silently — callers should surface this at the CLI level.
 func Write(w io.Writer, result *scanner.ScanResult, format string) error {
@@ -119,42 +119,66 @@ func writeCSV(w io.Writer, result *scanner.ScanResult) error {
 	return err
 }
 
+// errWriter wraps an io.Writer and latches the first write error.
+// Once an error is recorded every subsequent Write is a no-op that
+// re-returns it, so the human-readable formatters can stay linear
+// (no per-line error check) while still surfacing a failed write —
+// a full disk or broken pipe no longer reports success and drops
+// output silently.  Read the latched error from `.err` after the
+// formatter finishes.
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (ew *errWriter) Write(p []byte) (int, error) {
+	if ew.err != nil {
+		return 0, ew.err
+	}
+	n, err := ew.w.Write(p)
+	ew.err = err
+	return n, err
+}
+
 // writeSummary is the short human-readable format — what a
-// developer running ``sentari --scan`` on their laptop sees by
+// developer running `sentari --scan` on their laptop sees by
 // default.  Aimed at under 15 lines for a typical host so the
 // output fits in a single terminal screen.
 func writeSummary(w io.Writer, result *scanner.ScanResult) error {
-	fmt.Fprintf(w, "Sentari scan — %s (%s/%s)\n", result.Hostname, result.OS, result.Arch)
-	fmt.Fprintf(w, "  scanned at %s\n", result.ScannedAt.Format(time.RFC3339))
-	fmt.Fprintf(w, "  agent     %s\n\n", result.AgentVersion)
+	ew := &errWriter{w: w}
+	fmt.Fprintf(ew, "Sentari scan — %s (%s/%s)\n", result.Hostname, result.OS, result.Arch)
+	fmt.Fprintf(ew, "  scanned at %s\n", result.ScannedAt.Format(time.RFC3339))
+	fmt.Fprintf(ew, "  agent     %s\n\n", result.AgentVersion)
 
-	fmt.Fprintf(w, "Packages: %d    Errors: %d\n", len(result.Packages), len(result.Errors))
+	fmt.Fprintf(ew, "Packages: %d    Errors: %d\n", len(result.Packages), len(result.Errors))
 
 	if byEnv := countByEnv(result.Packages); len(byEnv) > 0 {
-		fmt.Fprintln(w, "\nBy ecosystem:")
+		fmt.Fprintln(ew, "\nBy ecosystem:")
 		for _, k := range sortedKeys(byEnv) {
-			fmt.Fprintf(w, "  %-15s %d\n", k, byEnv[k])
+			fmt.Fprintf(ew, "  %-15s %d\n", k, byEnv[k])
 		}
 	}
 	if len(result.ContainerTargets) > 0 {
-		fmt.Fprintf(w, "\nContainers: %d discovered\n", len(result.ContainerTargets))
+		fmt.Fprintf(ew, "\nContainers: %d discovered\n", len(result.ContainerTargets))
 	}
-	return nil
+	return ew.err
 }
 
 // writeExplain is the verbose human-readable format for
-// ``sentari --scan --explain``.  Adds highlights on top of the
-// summary: recent installs (packages landed in the last 48h),
-// AI-agent surfaces (shadow-AI inventory), and per-error detail
-// so developers debugging a scan see what went wrong without
-// reaching for ``--format=json``.
+// `sentari --scan --explain`.  Adds zeitgeist highlights on top
+// of the summary: recent installs (a 48h recent-install window),
+// AI-agent surfaces (shadow-AI inventory),
+// and per-error detail so developers debugging a scan see what
+// went wrong without reaching for `--format=json`.
 func writeExplain(w io.Writer, result *scanner.ScanResult) error {
 	if err := writeSummary(w, result); err != nil {
 		return err
 	}
 
-	// Recent installs — an install-age detective rule exposed at the
-	// CLI so developers can see what landed on their laptop without
+	ew := &errWriter{w: w}
+
+	// Recent installs — an install-age heuristic exposed at the CLI
+	// so developers can see what landed on their laptop without
 	// needing the server.
 	recent := filterRecentInstalls(result.Packages, recentInstallCutoff)
 	if len(recent) > 0 {
@@ -162,17 +186,17 @@ func writeExplain(w io.Writer, result *scanner.ScanResult) error {
 		// doesn't flood the terminal.  The "and N more" footer
 		// points the operator at --format=json for the full set.
 		const recentDisplayCap = 20
-		fmt.Fprintf(w, "\nRecent installs (≤ %s):\n", recentInstallCutoff)
+		fmt.Fprintf(ew, "\nRecent installs (≤ %s):\n", recentInstallCutoff)
 		limit := len(recent)
 		if limit > recentDisplayCap {
 			limit = recentDisplayCap
 		}
 		for _, p := range recent[:limit] {
-			fmt.Fprintf(w, "  %-40s %s    [%s]\n",
+			fmt.Fprintf(ew, "  %-40s %s    [%s]\n",
 				p.Name, p.Version, p.InstallDate)
 		}
 		if len(recent) > recentDisplayCap {
-			fmt.Fprintf(w, "  ... and %d more; use --format=json for the full list\n",
+			fmt.Fprintf(ew, "  ... and %d more; use --format=json for the full list\n",
 				len(recent)-recentDisplayCap)
 		}
 	}
@@ -182,9 +206,9 @@ func writeExplain(w io.Writer, result *scanner.ScanResult) error {
 	// configured" without scrolling through the full package list.
 	ai := filterByEnv(result.Packages, "ai_agent")
 	if len(ai) > 0 {
-		fmt.Fprintf(w, "\nAI-agent surface: %d artefacts\n", len(ai))
+		fmt.Fprintf(ew, "\nAI-agent surface: %d artefacts\n", len(ai))
 		for _, p := range ai {
-			fmt.Fprintf(w, "  %-40s %s\n", p.Name, p.Version)
+			fmt.Fprintf(ew, "  %-40s %s\n", p.Name, p.Version)
 		}
 	}
 
@@ -192,20 +216,20 @@ func writeExplain(w io.Writer, result *scanner.ScanResult) error {
 	// developer sees what the scanner couldn't read.  JSON format
 	// is the right path for parsing them; here we just list.
 	if len(result.Errors) > 0 {
-		fmt.Fprintln(w, "\nScan errors:")
+		fmt.Fprintln(ew, "\nScan errors:")
 		for i, e := range result.Errors {
 			if i >= 10 {
-				fmt.Fprintf(w, "  ... and %d more\n", len(result.Errors)-i)
+				fmt.Fprintf(ew, "  ... and %d more\n", len(result.Errors)-i)
 				break
 			}
-			fmt.Fprintf(w, "  [%s] %s: %s\n", e.EnvType, e.Path, e.Error)
+			fmt.Fprintf(ew, "  [%s] %s: %s\n", e.EnvType, e.Path, e.Error)
 		}
 	}
-	return nil
+	return ew.err
 }
 
 // countByEnv returns env_type → count for the given package slice.
-// Case-folded so ``pip`` / ``PIP`` would collapse (shouldn't happen
+// Case-folded so `pip` / `PIP` would collapse (shouldn't happen
 // in practice but keeps the output clean).
 func countByEnv(pkgs []scanner.PackageRecord) map[string]int {
 	out := map[string]int{}
@@ -238,7 +262,7 @@ func filterByEnv(pkgs []scanner.PackageRecord, env string) []scanner.PackageReco
 }
 
 // filterRecentInstalls returns every package whose InstallDate is
-// within ``within`` of now.  InstallDate is an RFC3339 string on
+// within `within` of now.  InstallDate is an RFC3339 string on
 // the wire; unparseable values are silently skipped (not all
 // plugins populate it).  The returned slice is capped at 100
 // items — anything more is noise in a human output.

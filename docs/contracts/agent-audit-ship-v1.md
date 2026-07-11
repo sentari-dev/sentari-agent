@@ -55,18 +55,85 @@ POST /api/v1/agent/audit-log
       "entry_id": 1,                   // agent-local row id (>= 1, monotonic)
       "event_type": "scan_started",
       "detail": "envs=3",
-      "content_hash": "<64 hex>",      // sha256(event_type+detail+prev_hash+created_at)
+      "content_hash": "<64 hex>",      // see "Hash encodings" below
       "prev_hash": "",                 // previous entry's content_hash; "" for genesis
-      "created_at": "2026-05-23T10:00:00.000000001Z"  // EXACT RFC3339Nano string hashed
+      "created_at": "2026-05-23T10:00:00.000000001Z", // EXACT RFC3339Nano string hashed
+      "hash_version": 2                // encoding of content_hash; optional, default 1
     }
   ]
 }
 ```
 
 **Critical:** `created_at` must be the *exact* string the agent fed into
-the hash. The server recomputes `content_hash` byte-for-byte from
-`event_type + detail + prev_hash + created_at`; any reformatting (e.g.
-truncating nanoseconds) breaks verification.
+the hash. The server recomputes `content_hash` byte-for-byte; any
+reformatting (e.g. truncating nanoseconds) breaks verification.
+
+### Hash encodings (`hash_version`)
+
+`hash_version` names the encoding of `content_hash`. It is **optional and
+additive**: entries shipped by a pre-v2 agent omit it and the server defaults
+to **1**. New agents send **2**. Values are constrained to `1..2`. Linkage
+(`prev_hash` chaining) is scheme-independent, so a single chain may mix v1 and
+v2 rows and still verify.
+
+- **v1 — legacy plain concatenation** (default when absent):
+
+  ```
+  content_hash = sha256(event_type + detail + prev_hash + created_at)
+  ```
+
+  The fields are concatenated with **no delimiters**, so the field boundaries
+  are ambiguous: moving trailing bytes from the end of one field to the start
+  of the next (e.g. `event_type="scan"`,`detail="started"` →
+  `event_type="sca"`,`detail="nstarted"`) yields byte-identical hash input and
+  therefore the **same** digest — a forgery by construction. Retained only so
+  entries written by older agents keep verifying.
+
+- **v2 — length-prefixed** (current):
+
+  For each field in the fixed order `event_type, detail, prev_hash,
+  created_at`, the hash input is an **8-byte big-endian unsigned integer**
+  giving the byte-length of that field's UTF-8 encoding, immediately followed
+  by those bytes:
+
+  ```
+  content_hash = sha256(
+      u64be(len(event_type)) || event_type ||
+      u64be(len(detail))     || detail     ||
+      u64be(len(prev_hash))  || prev_hash  ||
+      u64be(len(created_at)) || created_at
+  )
+  ```
+
+  Prefixing every field with its exact byte length makes the boundaries
+  unambiguous — no rearrangement of bytes across fields can reproduce the same
+  digest — which closes the v1 field-shift forgery. This mirrors the
+  multi-scheme approach the server's own `audit_log` took (migrations
+  034/051): each row records the scheme it was written with and is re-derived
+  under that scheme.
+
+### Rollout / version compatibility
+
+**The server MUST be upgraded to a `hash_version`-aware release before any
+agent that writes v2 (length-prefixed) rows is rolled out.** The two halves are
+independent binaries and a mixed-version fleet is expected during a rollout, so
+ordering matters:
+
+- A `hash_version`-aware server recomputes each entry under the scheme named by
+  its `hash_version` field (absent → v1), so it verifies v1 and v2 rows alike.
+- A **pre-`hash_version`** server ignores the field and recomputes **every**
+  entry with the v1 plain-concat recipe. A v2 row's `content_hash` will not
+  match that recomputation, so the server raises a false
+  `alert_type = "audit_integrity"` (severity `high`) alert **on every shipped
+  batch** for the duration of the rollout — noise that masks genuine tampering.
+
+Upgrade the server first. This mirrors the install-gate contract's rollout note
+(`install-gate-policy-map-v1.md`, "Compatibility rules": roll out the consuming
+half before the producing half changes what it emits). The field is deliberately
+additive (optional, default 1) so that once the server is `hash_version`-aware
+the ordering constraint is one-directional — newer servers keep verifying older
+v1-only agents indefinitely. No negotiation handshake is defined or required;
+the rollout order is the operator's responsibility.
 
 ### Response body
 
@@ -83,8 +150,9 @@ truncating nanoseconds) breaks verification.
 
 For each batch (entries sorted by `entry_id`):
 
-1. **Per-entry hash** — recompute `sha256(event_type+detail+prev_hash+created_at)`;
-   must equal `content_hash`.
+1. **Per-entry hash** — recompute `content_hash` using the entry's own
+   `hash_version` encoding (see "Hash encodings" above; absent → v1); must
+   equal `content_hash`.
 2. **Intra-batch linkage** — each entry's `prev_hash` must equal the
    previous entry's `content_hash`.
 3. **Tamper-after-ship** — if an `(device_id, entry_id)` was already

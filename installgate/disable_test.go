@@ -3,6 +3,7 @@ package installgate
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -32,12 +33,15 @@ func TestServerDisabledMarker_RoundTrip(t *testing.T) {
 	// File mode should be 0600 — the marker carries no secrets but
 	// we still respect the agent's broader "data files live at 0600"
 	// convention.
-	info, err := os.Stat(MarkerPath(tmp))
-	if err != nil {
-		t.Fatalf("stat marker: %v", err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("marker mode: got %o, want 0600", mode)
+	// NTFS cannot represent Unix perm bits; enforced on unix, product sets 0600 via os.Chmod.
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(MarkerPath(tmp))
+		if err != nil {
+			t.Fatalf("stat marker: %v", err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Errorf("marker mode: got %o, want 0600", mode)
+		}
 	}
 
 	if err := ClearServerDisabledMarker(tmp); err != nil {

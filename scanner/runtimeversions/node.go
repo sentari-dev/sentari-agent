@@ -1,6 +1,7 @@
 package runtimeversions
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,17 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 
-	"github.com/sentari-dev/sentari-agent/scanner/pathfilter"
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
-
-// _defaultNodeWalkDepth caps how deep DetectNodeInDir descends below the
-// search dir, mirroring _defaultJDKWalkDepth / _defaultPythonWalkDepth. An
-// unbounded WalkDir under deep container/volume mounts used to dominate
-// scan latency; a cap of 4 still finds every real-world node layout.
-const _defaultNodeWalkDepth = 4
 
 // Node binaries embed the `node-vX.Y.Z` marker in .rodata. The old detector
 // read only the first 16 MiB, but modern builds (v20+, v24) are 80–180 MiB and
@@ -33,6 +26,16 @@ const (
 	// ("node-v" + three numeric components) so a marker straddling a window
 	// boundary is reassembled in the next iteration.
 	_nodeMarkerOverlap = 64
+
+	// maxNodeSymlinkHops bounds how many symlink indirections we resolve
+	// before giving up. A single hop covers Homebrew (/usr/local/bin/node
+	// -> Cellar). Debian/Ubuntu route node through update-alternatives as a
+	// MULTI-hop chain (/usr/bin/node -> /etc/alternatives/node ->
+	// /usr/bin/nodejs, and nodejs may itself be a versioned symlink), so a
+	// 1-hop cap silently missed apt-installed Node. The bound (plus the
+	// O_NOFOLLOW safeio read at every step) is what keeps this safe against
+	// symlink cycles and attacker-planted chains — NOT the hop count itself.
+	maxNodeSymlinkHops = 8
 )
 
 var nodeVersionRe = regexp.MustCompile(`node-v(\d+\.\d+\.\d+)`)
@@ -43,12 +46,15 @@ var nodeVersionRe = regexp.MustCompile(`node-v(\d+\.\d+\.\d+)`)
 //
 // If `path` is itself a symlink (common on macOS/Homebrew where
 // /usr/local/bin/node points into the Cellar, or under
-// update-alternatives on Debian/Ubuntu), this resolves one level of
-// indirection and retries on the target. InstallPath in the returned
-// runtime is the ORIGINAL symlink path, so the dashboard shows where
-// the user thinks node lives rather than the resolved Cellar dir.
+// update-alternatives on Debian/Ubuntu), this resolves up to
+// maxNodeSymlinkHops levels of indirection and retries on each target.
+// The Debian update-alternatives layout is a genuine multi-hop chain
+// (/usr/bin/node -> /etc/alternatives/node -> /usr/bin/nodejs), so a
+// single hop is not enough. InstallPath in the returned runtime is the
+// ORIGINAL symlink path, so the dashboard shows where the user thinks
+// node lives rather than the resolved Cellar / alternatives target.
 func DetectNodeBinary(path string) (*InstalledRuntime, error) {
-	return detectNodeBinaryWithLimit(path, path, 1)
+	return detectNodeBinaryWithLimit(path, path, maxNodeSymlinkHops)
 }
 
 func detectNodeBinaryWithLimit(originalPath, path string, redirectsLeft int) (*InstalledRuntime, error) {
@@ -58,10 +64,16 @@ func detectNodeBinaryWithLimit(originalPath, path string, redirectsLeft int) (*I
 			return nil, nil
 		}
 		if errors.Is(err, safeio.ErrSymlink) && redirectsLeft > 0 {
-			// Common case: /usr/local/bin/node is a symlink into Homebrew's
-			// Cellar or a node-version-manager dir. Resolve once and try
-			// the real path. We deliberately limit to ONE indirection so
-			// we don't follow arbitrarily long chains.
+			// safeio refuses to open a symlink leaf (O_NOFOLLOW), which is
+			// the security guarantee we rely on. To reach the real binary we
+			// resolve ONE hop here with os.Readlink and retry via safeio on
+			// the target. Repeating this walks a bounded chain:
+			//   Homebrew  : /usr/local/bin/node -> Cellar/.../node (1 hop)
+			//   Debian    : /usr/bin/node -> /etc/alternatives/node
+			//               -> /usr/bin/nodejs [-> versioned] (>=2 hops)
+			// redirectsLeft bounds the walk so a symlink cycle or an
+			// attacker-planted chain terminates (no infinite loop); the
+			// eventual read is still the O_NOFOLLOW safeio.Open above.
 			resolved, rerr := os.Readlink(path)
 			if rerr != nil {
 				return nil, nil
@@ -86,9 +98,9 @@ func detectNodeBinaryWithLimit(originalPath, path string, redirectsLeft int) (*I
 		return nil, nil
 	}
 	return &InstalledRuntime{
-		Name:    "node",
+		Name:    RuntimeNode,
 		Version: version,
-		Cycle:   CycleFor("node", version),
+		Cycle:   CycleFor(RuntimeNode, version),
 		// InstallPath stays the ORIGINAL path (the caller's candidate) so
 		// the dashboard shows where the user expects node to live, not
 		// the resolved Cellar / nvm dir.
@@ -107,23 +119,50 @@ func scanNodeVersion(r io.Reader) (string, error) {
 // scanNodeVersionChunked is the testable core of scanNodeVersion with an
 // injectable window size so tests can exercise the cross-boundary overlap
 // without materializing multi-MiB inputs.
+//
+// Boundary correctness: nodeVersionRe's trailing `\d+` is greedy but can only
+// consume digits present in the current haystack. If a read boundary splits a
+// marker mid-patch-component so a window ends "…node-v20.11.5" (the trailing
+// "0" of "20.11.50" only arriving in the NEXT window), a naive
+// return-on-first-match yields a syntactically-complete but WRONG version
+// ("20.11.5"). To avoid that, when a match ends exactly at the end of the
+// current haystack AND more data may still follow, we DEFER: carry the whole
+// marker region forward and only ACCEPT the match once a non-digit terminator
+// (or EOF) confirms the final component is complete. On EOF a match ending at
+// end-of-buffer is genuinely complete and is accepted.
 func scanNodeVersionChunked(r io.Reader, chunkSize int) (string, error) {
 	chunk := make([]byte, chunkSize)
 	var carry []byte
 	for {
 		n, rerr := r.Read(chunk)
+		atEOF := errors.Is(rerr, io.EOF)
 		if n > 0 {
 			hay := append(carry, chunk[:n]...)
-			if m := nodeVersionRe.FindSubmatch(hay); m != nil {
-				return string(m[1]), nil
-			}
-			if len(hay) > _nodeMarkerOverlap {
+			if loc := nodeVersionRe.FindSubmatchIndex(hay); loc != nil {
+				// loc[0]:loc[1] = full match, loc[2]:loc[3] = version group.
+				// Defer only when the match butts against the read boundary,
+				// more data may follow, and the marker region is short enough
+				// to be a plausible (un-truncated) version — the length bound
+				// also caps carry growth and guarantees termination on
+				// pathological all-digit input.
+				if !atEOF && loc[1] == len(hay) && len(hay)-loc[0] <= _nodeMarkerOverlap {
+					carry = append(carry[:0], hay[loc[0]:]...)
+				} else {
+					return string(hay[loc[2]:loc[3]]), nil
+				}
+			} else if len(hay) > _nodeMarkerOverlap {
+				// No match: keep a small overlap so a marker straddling the
+				// boundary is reassembled in the next window.
 				carry = append(carry[:0], hay[len(hay)-_nodeMarkerOverlap:]...)
 			} else {
 				carry = append(carry[:0], hay...)
 			}
 		}
-		if errors.Is(rerr, io.EOF) {
+		if atEOF {
+			// Flush: a deferred match reaching EOF is complete and accepted.
+			if loc := nodeVersionRe.FindSubmatchIndex(carry); loc != nil {
+				return string(carry[loc[2]:loc[3]]), nil
+			}
 			return "", nil
 		}
 		if rerr != nil {
@@ -133,61 +172,17 @@ func scanNodeVersionChunked(r io.Reader, chunkSize int) (string, error) {
 }
 
 // DetectAllNodes scans candidate binary paths.
-func DetectAllNodes(paths []string) []InstalledRuntime {
+func DetectAllNodes(ctx context.Context, paths []string) []InstalledRuntime {
 	var out []InstalledRuntime
 	for _, p := range paths {
+		if ctx.Err() != nil {
+			return out
+		}
 		rt, err := DetectNodeBinary(p)
 		if err != nil || rt == nil {
 			continue
 		}
 		out = append(out, *rt)
-	}
-	return out
-}
-
-// DetectNodeInDir is a convenience for callers that have a parent
-// directory and want to probe well-known binary names.
-func DetectNodeInDir(dir string) []InstalledRuntime {
-	return detectNodeInDirWithDepth(dir, _defaultNodeWalkDepth)
-}
-
-func detectNodeInDirWithDepth(dir string, maxDepth int) []InstalledRuntime {
-	candidates := []string{"node", "node.exe"}
-	rootClean := filepath.Clean(dir)
-	var out []InstalledRuntime
-	for _, name := range candidates {
-		_ = filepath.WalkDir(rootClean, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				if pathfilter.ShouldSkipDir(path) {
-					return filepath.SkipDir
-				}
-				// Depth cap — measured in path separators below rootClean.
-				if path != rootClean {
-					rel, rerr := filepath.Rel(rootClean, path)
-					if rerr == nil {
-						if strings.Count(rel, string(filepath.Separator))+1 > maxDepth {
-							return filepath.SkipDir
-						}
-					}
-				}
-				return nil
-			}
-			if d.Type()&os.ModeSymlink != 0 {
-				return nil
-			}
-			if filepath.Base(path) != name {
-				return nil
-			}
-			rt, err := DetectNodeBinary(path)
-			if err != nil || rt == nil {
-				return nil
-			}
-			out = append(out, *rt)
-			return nil
-		})
 	}
 	return out
 }

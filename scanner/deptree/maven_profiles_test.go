@@ -1,6 +1,7 @@
 package deptree
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -76,7 +77,7 @@ func TestDefaultProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edges, err := ParseMavenPom(filepath.Join(pomDir, "pom.xml"), m2)
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(pomDir, "pom.xml"), m2)
 	if err != nil {
 		t.Fatalf("ParseMavenPom failed: %v", err)
 	}
@@ -165,7 +166,7 @@ func TestDefaultProfile_managedVersionsInheritedFromProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edges, err := ParseMavenPom(filepath.Join(pomDir, "pom.xml"), m2)
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(pomDir, "pom.xml"), m2)
 	if err != nil {
 		t.Fatalf("ParseMavenPom failed: %v", err)
 	}

@@ -1,21 +1,21 @@
 // uv writer — Astral's Python package manager.
 //
 // uv has its own configuration namespace separate from pip's: the
-// pip-compat layer (``uv pip install ...``) honours pip.conf, but
-// the modern uv-native commands (``uv add``, ``uv sync``,
-// ``uv lock``, ``uv tool install``) read ``uv.toml``.  Without a
-// dedicated writer the install-gate covers ``uv pip install`` only
+// pip-compat layer (`uv pip install ...`) honours pip.conf, but
+// the modern uv-native commands (`uv add`, `uv sync`,
+// `uv lock`, `uv tool install`) read `uv.toml`.  Without a
+// dedicated writer the install-gate covers `uv pip install` only
 // and quietly mis-routes the modern commands — worse than known
 // partial coverage because operators assume the gate works
 // uniformly.
 //
-// Reads the same ``proxy_endpoints["pypi"]`` as the pip writer
+// Reads the same `proxy_endpoints["pypi"]` as the pip writer
 // since uv consumes the PyPI ecosystem.  Blank or unknown
-// ``[install_gate] uv_scope`` values do NOT disable the uv writer;
+// `[install_gate] uv_scope` values do NOT disable the uv writer;
 // they fall back to the default user scope (same defaulting as the
 // other scope keys).  An operator who genuinely wants pip gated
 // but uv un-gated must rely on the policy-map server-side: clear
-// ``proxy_endpoints["pypi"]`` only when the host has no uv,
+// `proxy_endpoints["pypi"]` only when the host has no uv,
 // otherwise the uv writer will gate uv-using projects too.
 
 package installgate
@@ -30,22 +30,22 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
-// UvScope picks the user-level or system-level ``uv.toml``.
+// UvScope picks the user-level or system-level `uv.toml`.
 // Same shape as the other Python-ecosystem scope types.
 type UvScope int
 
 const (
-	// UvScopeUser writes the per-user ``uv.toml``:
+	// UvScopeUser writes the per-user `uv.toml`:
 	//
-	//   - ``$XDG_CONFIG_HOME/uv/uv.toml`` (Linux/macOS, falls back
-	//     to ``~/.config/uv/uv.toml`` when XDG is unset)
-	//   - ``%APPDATA%\uv\uv.toml`` (Windows)
+	//   - `$XDG_CONFIG_HOME/uv/uv.toml` (Linux/macOS, falls back
+	//     to `~/.config/uv/uv.toml` when XDG is unset)
+	//   - `%APPDATA%\uv\uv.toml` (Windows)
 	UvScopeUser UvScope = iota
 
-	// UvScopeSystem writes the system-wide ``uv.toml``:
+	// UvScopeSystem writes the system-wide `uv.toml`:
 	//
-	//   - ``/etc/uv/uv.toml`` (Linux/macOS)
-	//   - ``%PROGRAMDATA%\uv\uv.toml`` (Windows)
+	//   - `/etc/uv/uv.toml` (Linux/macOS)
+	//   - `%PROGRAMDATA%\uv\uv.toml` (Windows)
 	UvScopeSystem
 )
 
@@ -99,7 +99,7 @@ type WriteUvResult struct {
 // config.  Behaviour matrix matches the other operator-curate-
 // aware writers (Maven, NuGet): an existing uv.toml without the
 // Sentari marker is left untouched and surfaces
-// ``SkippedOperator=true``.  Operators with custom ``[[index]]``
+// `SkippedOperator=true`.  Operators with custom `[[index]]`
 // blocks (private mirrors with auth tokens, scoped registry
 // configs) keep their config.
 func WriteUv(m *scanner.InstallGateMap, scope UvScope, marker MarkerFields) (WriteUvResult, error) {
@@ -164,14 +164,14 @@ func WriteUv(m *scanner.InstallGateMap, scope UvScope, marker MarkerFields) (Wri
 }
 
 // renderUvToml produces a fresh Sentari-managed uv.toml.  Single
-// ``[[index]]`` block with ``default = true`` so uv treats this
+// `[[index]]` block with `default = true` so uv treats this
 // as the sole index and skips the upstream PyPI default — same
-// semantic as pip's ``index-url`` with no ``extra-index-url``.
+// semantic as pip's `index-url` with no `extra-index-url`.
 //
 // Note on TOML quoting: the URL is interpolated inside double-
-// quoted strings, so any embedded ``"`` would break the file.
-// validateEndpoint already refuses control bytes + spaces; ``"``
-// and ``\`` are vanishingly unlikely in a real proxy URL but we
+// quoted strings, so any embedded `"` would break the file.
+// validateEndpoint already refuses control bytes + spaces; `"`
+// and `\` are vanishingly unlikely in a real proxy URL but we
 // gate them here for defence-in-depth.
 func renderUvToml(endpoint string, marker MarkerFields) ([]byte, error) {
 	endpoint = strings.TrimSpace(endpoint)

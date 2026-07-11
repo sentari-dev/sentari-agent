@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner/osrelease"
+	"github.com/sentari-dev/sentari-agent/scanner/pathfilter"
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
@@ -44,12 +45,6 @@ func NewRunner(cfg Config) *Runner {
 	}
 	return &Runner{cfg: cfg}
 }
-
-// NewScanner is a deprecated alias for NewRunner kept for backwards-compat
-// with pre-registry callers.  New code should call NewRunner.
-//
-// Deprecated: use NewRunner.
-func NewScanner(cfg Config) *Runner { return NewRunner(cfg) }
 
 // scanJobResult collects packages and errors from a single environment scan.
 type scanJobResult struct {
@@ -147,10 +142,10 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 	// modules find nothing relevant for this host.
 	//
 	// Root selection: when the operator runs a scoped scan (e.g.
-	// ``--scan /opt/app``), we honour that scope.  When the scan
-	// root is filesystem root (``/`` on POSIX, drive root on
+	// `--scan /opt/app`), we honour that scope.  When the scan
+	// root is filesystem root (`/` on POSIX, drive root on
 	// Windows), we substitute user home directories — lockfile
-	// discovery walking ``/`` would be prohibitively expensive
+	// discovery walking `/` would be prohibitively expensive
 	// on production hosts and most lockfiles live under user
 	// home + repo trees anyway.
 	//
@@ -159,29 +154,24 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 	// (operator Ctrl-C, supervisor timeout) keeps walking $HOME, ~/.m2,
 	// node_modules, etc. to completion. We:
 	//   1. skip enrichment entirely if ctx is already cancelled, and
-	//   2. run enrichment concurrently with a ctx watch so Run returns
-	//      ctx.Err() promptly on cancellation instead of blocking on a
-	//      long walk. The enrichment goroutine only mutates `result`,
-	//      which the caller discards when Run returns an error, so an
-	//      in-flight walk completing later is harmless.
+	//   2. run enrichment inline with a ctx-aware walker (every walk
+	//      checks ctx.Err() per directory), so a cancelled scan stops
+	//      the enrichment walk promptly instead of blocking on a long
+	//      walk. We deliberately do NOT detach enrichment onto a
+	//      goroutine we abandon: a container sub-scan's deferred
+	//      os.RemoveAll would then race a still-live walker, and under
+	//      -race those leaked goroutines pile up across the target loop.
+	//      Joining here means the materialised tree is only removed once
+	//      the walk has actually stopped.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	v3Roots := v3DiscoveryRoots(r.cfg.ScanRoot)
-	enrichDone := make(chan struct{})
-	go func() {
-		enrichWithV3(result, v3Roots)
-		close(enrichDone)
-	}()
-	select {
-	case <-enrichDone:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	enrichWithV3(ctx, result, v3Roots, r.cfg.ScanRoot)
 
-	// Re-check after enrichment: a cancellation that landed just as
-	// enrichment finished must still surface as an error rather than a
-	// (now stale) successful result.
+	// Re-check after enrichment: a cancellation that landed during (or
+	// just as) enrichment finished must surface as an error rather than a
+	// (now partial / stale) successful result.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -208,6 +198,30 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 				Path:      home,
 				EnvType:   "tcc",
 				Error:     msg,
+				Timestamp: time.Now().UTC(),
+			})
+		}
+	}
+
+	// Windows multi-drive scope diagnostic: the scan walks a SINGLE root
+	// (default "C:\\"), so secondary FIXED drives (D:, E:, …) are silently
+	// unscanned — their Python/JVM/… inventory never reaches the server.  A full
+	// multi-root walk (threading a root list through the walk, depth budget, v3
+	// enrichment and ctx scan-root) is a larger change than this warrants, so we
+	// keep the single-root default and instead emit a clear ScanError naming the
+	// skipped fixed drives, so operators know to run a scoped scan (`--scan D:\`)
+	// against them.  Network/removable/optical volumes are deliberately excluded
+	// (see fixedDrivesFromBitmap).  Non-Windows: no-op.  The diagnostic is live
+	// once driveTypeOf is bound to GetDriveTypeW on a Windows build.
+	if runtime.GOOS == "windows" {
+		if skipped := fixedDrivesSkippedBy(r.cfg.ScanRoot, windowsFixedDrives()); len(skipped) > 0 {
+			result.Errors = append(result.Errors, ScanError{
+				Path:    r.cfg.ScanRoot,
+				EnvType: "scan_scope",
+				Error: fmt.Sprintf(
+					"secondary fixed drives not scanned: %s — rerun a scoped scan "+
+						"(e.g. --scan %s) to include them",
+					strings.Join(skipped, ", "), skipped[0]),
 				Timestamp: time.Now().UTC(),
 			})
 		}
@@ -391,6 +405,13 @@ func (r *Runner) discoverEnvironments(ctx context.Context) ([]Environment, []Sca
 	// version-manager directories get a full MaxDepth budget of their own.
 	rootDepth := strings.Count(filepath.Clean(r.cfg.ScanRoot), string(os.PathSeparator))
 
+	// effectiveMaxDepth is the depth budget the walk closure enforces. It
+	// starts from the configured MaxDepth and is bumped locally for the
+	// extra-root walks below, so we never mutate r.cfg (which would race a
+	// concurrent Run on the same Runner and surprise callers who reuse the
+	// config).
+	effectiveMaxDepth := r.cfg.MaxDepth
+
 	// Directories that are never useful and slow down scanning.
 	skipDirs := map[string]bool{
 		".git": true, "__pycache__": true,
@@ -400,8 +421,8 @@ func (r *Runner) discoverEnvironments(ctx context.Context) ([]Environment, []Sca
 		".ruff_cache": true,
 	}
 	// NOTE: .venv is NOT skipped — it's a valid Python virtualenv.
-	// NOTE: ``node_modules`` used to be in skipDirs for years because
-	// no plugin knew what to do with it; later work added the npm
+	// NOTE: `node_modules` used to be in skipDirs for years because
+	// no plugin knew what to do with it; Sprint-17 added the npm
 	// plugin which claims-and-terminals node_modules on Match.  The
 	// walker visits the directory, the npm plugin queues an
 	// Environment + returns Terminal=true, no further descent
@@ -410,11 +431,11 @@ func (r *Runner) discoverEnvironments(ctx context.Context) ([]Environment, []Sca
 	// negligible even on dev laptops with hundreds of them.
 	//
 	// Side-effect: a venv pathologically planted inside a
-	// node_modules directory (``node_modules/pyvenv.cfg``) is now
+	// node_modules directory (`node_modules/pyvenv.cfg`) is now
 	// visible to the venv MarkerScanner.  That's technically new
 	// behaviour but matches the semantic truth of the filesystem —
 	// if a venv is there, we should surface it.  TestScannerSkipDirs
-	// asserts ``.git`` + ``__pycache__`` stay blocked; it no longer
+	// asserts `.git` + `__pycache__` stay blocked; it no longer
 	// asserts node_modules does.
 
 	// Absolute paths to skip — prevents duplicate discovery on macOS
@@ -433,7 +454,7 @@ func (r *Runner) discoverEnvironments(ctx context.Context) ([]Environment, []Sca
 
 		// Enforce max depth.
 		currentDepth := strings.Count(filepath.Clean(path), string(os.PathSeparator)) - rootDepth
-		if currentDepth > r.cfg.MaxDepth {
+		if currentDepth > effectiveMaxDepth {
 			return nil
 		}
 
@@ -442,6 +463,16 @@ func (r *Runner) discoverEnvironments(ctx context.Context) ([]Environment, []Sca
 			return nil
 		}
 		if skipAbsPaths[path] {
+			return nil
+		}
+		// Cloud-sync / network-path exclusion, unconditional on the
+		// primary discovery walk (the agent's biggest walk).  Cloud
+		// trees (iCloud, OneDrive) stall on on-demand downloads; network
+		// mounts are skipped only when the operator passed
+		// --exclude-network-paths.  This is the same classifier the
+		// per-runtime walkers (jvm, npm, lockfiles) already consult, so
+		// coverage is consistent across every walk site.
+		if pathfilter.ShouldSkipDir(path) {
 			return nil
 		}
 
@@ -535,9 +566,9 @@ func (r *Runner) discoverEnvironments(ctx context.Context) ([]Environment, []Sca
 	// of the configured MaxDepth — the caller's shallow MaxDepth is intended
 	// to limit the main walk, not these explicit well-known paths.
 	mainRootDepth := rootDepth
-	savedMaxDepth := r.cfg.MaxDepth
-	if r.cfg.MaxDepth < 8 {
-		r.cfg.MaxDepth = 8
+	savedMaxDepth := effectiveMaxDepth
+	if effectiveMaxDepth < 8 {
+		effectiveMaxDepth = 8
 	}
 	for _, home := range extraHomes {
 		for _, extra := range extraScanRoots(home) {
@@ -546,7 +577,7 @@ func (r *Runner) discoverEnvironments(ctx context.Context) ([]Environment, []Sca
 		}
 	}
 	rootDepth = mainRootDepth
-	r.cfg.MaxDepth = savedMaxDepth
+	effectiveMaxDepth = savedMaxDepth
 
 	// Invoke every RootScanner.  System-database scanners (dpkg, rpm)
 	// gate themselves on a full-system scan inside DiscoverAll to avoid
@@ -760,4 +791,99 @@ func getHostname() string {
 		return "unknown"
 	}
 	return hostname
+}
+
+// Windows GetDriveTypeW return codes (winbase.h).  Declared locally so the
+// fixed-drive enumeration LOGIC lives in this cross-platform file and is
+// unit-testable without importing golang.org/x/sys/windows (which only builds
+// on Windows).  The real GetLogicalDrives / GetDriveTypeW syscalls are bound to
+// logicalDrivesBitmap / driveTypeOf; see their doc comments.
+const (
+	driveUnknown   uint32 = 0
+	driveNoRootDir uint32 = 1
+	driveRemovable uint32 = 2
+	driveFixed     uint32 = 3
+	driveRemote    uint32 = 4
+	driveCDROM     uint32 = 5
+	driveRAMDisk   uint32 = 6
+)
+
+// logicalDrivesBitmap returns a bitmask of present drive letters (bit i set =
+// the (A+i): volume exists).  The default probes each letter with os.Stat,
+// which is correct on every OS (and yields 0 on non-Windows, where "C:\\" is
+// not a path).  A Windows build MAY override this var with the cheaper
+// GetLogicalDrives syscall, but the os.Stat default already enumerates present
+// drives correctly.  A var so tests can inject a fake drive set.
+var logicalDrivesBitmap = func() uint32 {
+	var mask uint32
+	for i := 0; i < 26; i++ {
+		root := string(rune('A'+i)) + ":\\"
+		if _, err := os.Stat(root); err == nil {
+			mask |= 1 << uint(i)
+		}
+	}
+	return mask
+}
+
+// driveTypeOf classifies a Windows drive root like `D:\` (GetDriveTypeW).
+// Correct fixed-vs-network/removable classification REQUIRES the Windows API,
+// so the default returns driveUnknown — nothing is treated as fixed until a
+// windows-tagged file binds the real GetDriveTypeW.  Returning Unknown rather
+// than guessing avoids FALSELY flagging a mapped network share or a removable
+// volume as an un-scanned fixed drive (the diagnostic below must only name true
+// local disks).  A var so tests can inject a classifier over a faked drive set.
+var driveTypeOf = func(root string) uint32 { return driveUnknown }
+
+// fixedDrivesFromBitmap decodes a GetLogicalDrives bitmask into drive roots
+// ("C:\\", "D:\\", …) and keeps only DRIVE_FIXED volumes, classified via
+// driveType.  Removable (DRIVE_REMOVABLE), network (DRIVE_REMOTE), optical
+// (DRIVE_CDROM) and RAM-disk volumes are excluded: rescanning a mapped share or
+// a mounted ISO every cycle would be slow and semantically wrong — that
+// inventory belongs to another host or a transient medium, not this device.
+// Pure and deterministic, so it is unit-testable with a faked bitmap + driveType
+// seam.
+func fixedDrivesFromBitmap(bitmap uint32, driveType func(root string) uint32) []string {
+	var drives []string
+	for i := 0; i < 26; i++ {
+		if bitmap&(1<<uint(i)) == 0 {
+			continue
+		}
+		root := string(rune('A'+i)) + ":\\"
+		if driveType(root) == driveFixed {
+			drives = append(drives, root)
+		}
+	}
+	return drives
+}
+
+// windowsFixedDrives returns every fixed-drive root on the host via the
+// injectable syscall seams.  Empty on non-Windows and until driveTypeOf is
+// bound to the real GetDriveTypeW on a Windows build.
+func windowsFixedDrives() []string {
+	return fixedDrivesFromBitmap(logicalDrivesBitmap(), driveTypeOf)
+}
+
+// driveLetter returns the upper-case drive letter of a Windows path
+// ("C:\\" -> "C"), or "" when the path has none.
+func driveLetter(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	return strings.ToUpper(p[:1])
+}
+
+// fixedDrivesSkippedBy returns the fixed-drive roots in `fixed` that are NOT the
+// drive being scanned (scanRoot).  These are the secondary local disks a
+// single-root scan silently misses — the set the Run diagnostic reports.  Pure
+// so it is unit-testable independently of the syscall seams.
+func fixedDrivesSkippedBy(scanRoot string, fixed []string) []string {
+	scanned := driveLetter(scanRoot)
+	var skipped []string
+	for _, d := range fixed {
+		if !strings.EqualFold(driveLetter(d), scanned) {
+			skipped = append(skipped, d)
+		}
+	}
+	return skipped
 }

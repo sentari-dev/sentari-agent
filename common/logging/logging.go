@@ -7,12 +7,12 @@
 //
 // The request_id that flows end-to-end is:
 //
-//   agent scan cycle ──► X-Request-ID header ──► FastAPI middleware
-//                                              ──► Celery task header
-//                                              ──► worker logs
+//	agent scan cycle ──► X-Request-ID header ──► FastAPI middleware
+//	                                           ──► Celery task header
+//	                                           ──► worker logs
 //
 // Every cycle mints a fresh UUID-ish string; every log line emitted in
-// that cycle carries it as ``request_id`` via ``LoggerFromContext``.
+// that cycle carries it as `request_id` via `LoggerFromContext`.
 package logging
 
 import (
@@ -71,14 +71,14 @@ func parseLevel(s string) slog.Level {
 
 // WithRequestID returns a copy of ctx carrying id as the request_id.
 // Generate one per scan cycle (in main_enterprise.go) so API, server,
-// and worker logs can be joined by a single ``grep <id>``.
+// and worker logs can be joined by a single `grep <id>`.
 func WithRequestID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, requestIDKey, id)
 }
 
 // RequestIDFromContext returns the bound request_id, or "" if none.
 // The comms client reads this in every outbound request builder and
-// attaches it as ``X-Request-ID``.
+// attaches it as `X-Request-ID`.
 func RequestIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -89,7 +89,7 @@ func RequestIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// NewRequestID mints a fresh 16-byte hex ID prefixed with ``scan-`` so
+// NewRequestID mints a fresh 16-byte hex ID prefixed with `scan-` so
 // it's obvious in logs where the ID originated.  crypto/rand for
 // unpredictability — these IDs go into headers, and predictable IDs
 // invite attackers to inject their own trace annotations.
@@ -103,9 +103,9 @@ func NewRequestID() string {
 	return "scan-" + hex.EncodeToString(b[:])
 }
 
-// LoggerFromContext returns the default logger with ``request_id``
+// LoggerFromContext returns the default logger with `request_id`
 // pre-bound when ctx carries one.  Callers should prefer this over
-// ``slog.Default()`` directly so every line they emit joins the
+// `slog.Default()` directly so every line they emit joins the
 // correlation chain automatically.
 func LoggerFromContext(ctx context.Context) *slog.Logger {
 	id := RequestIDFromContext(ctx)

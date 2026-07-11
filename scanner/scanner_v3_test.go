@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,7 +41,7 @@ func TestEnrichWithV3_findsLockfileInSampleProject(t *testing.T) {
 	}
 
 	result := &ScanResult{}
-	enrichWithV3(result, []string{root})
+	enrichWithV3(context.Background(), result, []string{root}, root)
 
 	if len(result.Lockfiles) == 0 {
 		t.Fatalf("expected at least one lockfile entry, got 0 (result=%+v)", result.Lockfiles)
@@ -84,7 +85,7 @@ func TestEnrichWithV3_dispatchesNuGetPackagesLock(t *testing.T) {
 	}
 
 	result := &ScanResult{}
-	enrichWithV3(result, []string{root})
+	enrichWithV3(context.Background(), result, []string{root}, root)
 
 	if len(result.DepEdges) == 0 {
 		t.Fatalf("expected dep edges from packages.lock.json fallback, got 0 (lockfiles=%+v)", result.Lockfiles)
@@ -104,7 +105,7 @@ func TestEnrichWithV3_skipsHomeCacheWalksWhenEcosystemNotDiscovered(t *testing.T
 	}
 
 	result := &ScanResult{}
-	enrichWithV3(result, []string{root})
+	enrichWithV3(context.Background(), result, []string{root}, root)
 
 	for _, s := range result.SupplyChainSignals {
 		if s.Ecosystem == "maven" || s.Ecosystem == "nuget" {
@@ -131,7 +132,7 @@ func TestEnrichWithV3_handlesRuntimeDetectionFailureGracefully(t *testing.T) {
 	result := &ScanResult{}
 	// Must not panic; InstalledRuntimes may be empty (or non-empty if
 	// the test host happens to have a /usr/lib/jvm install).
-	enrichWithV3(result, []string{root})
+	enrichWithV3(context.Background(), result, []string{root}, root)
 
 	if len(result.InstalledRuntimes) != 0 {
 		t.Logf("note: detected %d runtimes from empty home — likely picked up /usr/lib/jvm etc on this host", len(result.InstalledRuntimes))

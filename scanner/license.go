@@ -85,18 +85,6 @@ func NormalizeLicense(raw string) (string, string) {
 	return "", "unknown"
 }
 
-// NormalizeLicenseClassifier extracts the license name from a Python trove
-// classifier string like "License :: OSI Approved :: MIT License" and
-// normalizes it.
-func NormalizeLicenseClassifier(classifier string) (string, string) {
-	parts := strings.Split(classifier, " :: ")
-	if len(parts) < 3 {
-		return "", "unknown"
-	}
-	// The last part is the license name, e.g. "MIT License".
-	return NormalizeLicense(parts[len(parts)-1])
-}
-
 // ApplyOverlay merges an overlay map on top of the defaults.
 func ApplyOverlay(overlay LicenseMap) {
 	mu.Lock()
@@ -140,14 +128,44 @@ func MapVersion() int {
 
 // ExtractLicenseFromMetadata parses a Python METADATA or PKG-INFO file content
 // and returns (rawLicense, spdxID, tier).
-// It first looks for a "License:" header; if absent, falls back to
-// "Classifier: License :: ..." trove classifiers.
+//
+// Field precedence follows PEP 639:
+//  1. "License-Expression:" — the 2025+ standard (setuptools >=77) that
+//     DEPRECATES the License: field and Trove classifiers.  Its value is a
+//     valid SPDX expression, so it maps to an SPDX id + tier directly.
+//  2. "License:" — the legacy free-text header.
+//  3. "Classifier: License :: ..." — the Trove-classifier fallback.
+//
+// When License-Expression is present it wins over both legacy sources, even
+// if a License: header or classifiers also appear (mirrors licenses/pypi.go).
 func ExtractLicenseFromMetadata(content string) (string, string, string) {
+	var licenseExpr string
 	var licenseRaw string
 	var classifierLicense string
 
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimRight(line, "\r")
+
+		// RFC822 header/body boundary: METADATA headers end at the first
+		// blank line. The long-description body that follows (often an
+		// embedded README) can itself contain "License:" /
+		// "License-Expression:" text — stop here so a body line can't
+		// override the real header field. Mirrors the early-stop in
+		// parseDistInfo's Name/Version scan.
+		if line == "" {
+			break
+		}
+
+		// PEP 639 License-Expression — checked before "License:".  Note
+		// "License-Expression:" does not share the "License:" prefix (the
+		// character after "License" differs), so the two cases are disjoint.
+		if strings.HasPrefix(line, "License-Expression:") {
+			val := strings.TrimSpace(strings.TrimPrefix(line, "License-Expression:"))
+			if val != "" {
+				licenseExpr = val
+			}
+			continue
+		}
 
 		if strings.HasPrefix(line, "License:") {
 			val := strings.TrimSpace(strings.TrimPrefix(line, "License:"))
@@ -164,6 +182,11 @@ func ExtractLicenseFromMetadata(content string) (string, string, string) {
 		}
 	}
 
+	if licenseExpr != "" {
+		spdx, tier := normalizeLicenseExpression(licenseExpr)
+		return licenseExpr, spdx, tier
+	}
+
 	if licenseRaw != "" {
 		spdx, tier := NormalizeLicense(licenseRaw)
 		return licenseRaw, spdx, tier
@@ -175,6 +198,44 @@ func ExtractLicenseFromMetadata(content string) (string, string, string) {
 	}
 
 	return "", "", "unknown"
+}
+
+// normalizeLicenseExpression maps a PEP 639 License-Expression value to an
+// (spdxID, tier) pair.  A simple single-license expression ("MIT") resolves
+// directly through NormalizeLicense.  A compound expression
+// ("Apache-2.0 OR MIT", "GPL-2.0-or-later WITH Classpath-exception-2.0") is
+// resolved by its FIRST operand — a deterministic, lossless convention: the
+// caller retains the full original expression in LicenseRaw, while LicenseSPDX
+// and LicenseTier reflect the leading license.  Mirrors licenses/pypi.go,
+// which likewise treats the expression as authoritative SPDX evidence.
+func normalizeLicenseExpression(expr string) (string, string) {
+	if spdx, tier := NormalizeLicense(expr); spdx != "" {
+		return spdx, tier
+	}
+	if first := firstSPDXOperand(expr); first != "" && first != expr {
+		return NormalizeLicense(first)
+	}
+	return "", "unknown"
+}
+
+// firstSPDXOperand returns the leading license identifier of an SPDX license
+// expression.  SPDX ids are single whitespace-free tokens (e.g. "Apache-2.0",
+// "GPL-3.0-or-later"), so the first token that is not an operator keyword
+// (OR / AND / WITH), with any surrounding parentheses stripped, is the first
+// operand.
+func firstSPDXOperand(expr string) string {
+	for _, tok := range strings.Fields(expr) {
+		t := strings.Trim(tok, "()")
+		if t == "" {
+			continue
+		}
+		switch strings.ToUpper(t) {
+		case "OR", "AND", "WITH":
+			continue
+		}
+		return t
+	}
+	return ""
 }
 
 // ExtractLicenseFromCondaJSON extracts the license field from a conda-meta
@@ -210,14 +271,17 @@ func ExtractLicenseFromDebCopyright(content string) string {
 // defaultSPDXMap maps lowercased raw license strings to SPDX identifiers.
 var defaultSPDXMap = map[string]string{
 	// Permissive
-	"mit license":                          "MIT",
-	"mit":                                  "MIT",
-	"apache software license":              "Apache-2.0",
-	"apache software license 2.0":          "Apache-2.0",
-	"apache license 2.0":                   "Apache-2.0",
-	"apache license, version 2.0":          "Apache-2.0",
-	"apache 2.0":                           "Apache-2.0",
-	"apache-2.0":                           "Apache-2.0",
+	"mit license":                 "MIT",
+	"mit":                         "MIT",
+	"apache software license":     "Apache-2.0",
+	"apache software license 2.0": "Apache-2.0",
+	"apache license 2.0":          "Apache-2.0",
+	"apache license, version 2.0": "Apache-2.0",
+	"apache 2.0":                  "Apache-2.0",
+	"apache-2.0":                  "Apache-2.0",
+	// Bare / Trove-classifier forms carrying no explicit version.
+	"apache":                               "Apache-2.0",
+	"apache license":                       "Apache-2.0",
 	"bsd license":                          "BSD-3-Clause",
 	"bsd":                                  "BSD-3-Clause",
 	"bsd 3-clause license":                 "BSD-3-Clause",
@@ -239,43 +303,52 @@ var defaultSPDXMap = map[string]string{
 	"unlicense":                            "Unlicense",
 	"creative commons zero v1.0 universal": "CC0-1.0",
 	"cc0 1.0 universal (cc0 1.0) public domain dedication": "CC0-1.0",
-	"zlib license":            "Zlib",
-	"zlib/libpng license":     "Zlib",
+	"zlib license":               "Zlib",
+	"zlib/libpng license":        "Zlib",
 	"boost software license 1.0": "BSL-1.0",
-	"artistic license 2.0":    "Artistic-2.0",
-	"unicode license v3":      "Unicode-3.0",
+	"artistic license 2.0":       "Artistic-2.0",
+	"unicode license v3":         "Unicode-3.0",
 
 	// Weak copyleft
 	"gnu lesser general public license v2 (lgplv2)":           "LGPL-2.0-only",
 	"gnu lesser general public license v2 or later (lgplv2+)": "LGPL-2.0-or-later",
 	"gnu lesser general public license v3 (lgplv3)":           "LGPL-3.0-only",
 	"gnu lesser general public license v3 or later (lgplv3+)": "LGPL-3.0-or-later",
-	"lgpl-2.1":                                "LGPL-2.1-only",
-	"lgpl-3.0":                                "LGPL-3.0-only",
-	"lgpl":                                    "LGPL-3.0-only",
-	"mozilla public license 2.0 (mpl 2.0)":    "MPL-2.0",
-	"mozilla public license 2.0":              "MPL-2.0",
-	"mpl-2.0":                                 "MPL-2.0",
-	"mpl 2.0":                                 "MPL-2.0",
-	"eclipse public license 2.0":              "EPL-2.0",
-	"eclipse public license 1.0":              "EPL-1.0",
-	"epl-2.0":                                 "EPL-2.0",
-	"common development and distribution license 1.0": "CDDL-1.0",
+	"lgpl-2.1": "LGPL-2.1-only",
+	"lgpl-3.0": "LGPL-3.0-only",
+	"lgpl":     "LGPL-3.0-only",
+	"gnu library or lesser general public license (lgpl)": "LGPL-3.0-only",
+	"gnu lesser general public license (lgpl)":            "LGPL-3.0-only",
+	"mozilla public license 2.0 (mpl 2.0)":                "MPL-2.0",
+	"mozilla public license 2.0":                          "MPL-2.0",
+	"mpl-2.0":                                             "MPL-2.0",
+	"mpl 2.0":                                             "MPL-2.0",
+	"eclipse public license 2.0":                          "EPL-2.0",
+	"eclipse public license 1.0":                          "EPL-1.0",
+	"epl-2.0":                                             "EPL-2.0",
+	"common development and distribution license 1.0":     "CDDL-1.0",
 
 	// Strong copyleft
-	"gnu general public license v2 (gplv2)":                       "GPL-2.0-only",
-	"gnu general public license v2 or later (gplv2+)":             "GPL-2.0-or-later",
-	"gnu general public license v3 (gplv3)":                       "GPL-3.0-only",
-	"gnu general public license v3 or later (gplv3+)":             "GPL-3.0-or-later",
-	"gpl-2.0":        "GPL-2.0-only",
-	"gpl-3.0":        "GPL-3.0-only",
-	"gplv2":          "GPL-2.0-only",
-	"gplv3":          "GPL-3.0-only",
-	"gpl v3":         "GPL-3.0-only",
-	"gpl v2":         "GPL-2.0-only",
-	"gnu affero general public license v3":                        "AGPL-3.0-only",
-	"gnu affero general public license v3 or later (agplv3+)":     "AGPL-3.0-or-later",
-	"agpl-3.0":       "AGPL-3.0-only",
+	"gnu general public license v2 (gplv2)":           "GPL-2.0-only",
+	"gnu general public license v2 or later (gplv2+)": "GPL-2.0-or-later",
+	"gnu general public license v3 (gplv3)":           "GPL-3.0-only",
+	"gnu general public license v3 or later (gplv3+)": "GPL-3.0-or-later",
+	"gpl-2.0":                              "GPL-2.0-only",
+	"gpl-3.0":                              "GPL-3.0-only",
+	"gplv2":                                "GPL-2.0-only",
+	"gplv3":                                "GPL-3.0-only",
+	"gpl v3":                               "GPL-3.0-only",
+	"gpl v2":                               "GPL-2.0-only",
+	"gnu affero general public license v3": "AGPL-3.0-only",
+	"gnu affero general public license v3 or later (agplv3+)": "AGPL-3.0-or-later",
+	"agpl-3.0": "AGPL-3.0-only",
+	// Bare / Trove-classifier forms carrying no explicit version.
+	// Unversioned copyleft resolves to the -3.0-only variant, matching
+	// the existing bare "lgpl" -> LGPL-3.0-only convention above.
+	"gnu general public license (gpl)": "GPL-3.0-only",
+	"gpl":                              "GPL-3.0-only",
+	"gnu affero general public license (agpl)": "AGPL-3.0-only",
+	"agpl": "AGPL-3.0-only",
 	"european union public licence 1.2 (eupl 1.2)": "EUPL-1.2",
 	"eupl-1.2": "EUPL-1.2",
 	"eupl 1.2": "EUPL-1.2",

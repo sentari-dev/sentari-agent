@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\n  \"version\": 3,\n  \"targets\": {\n    \".NETCoreApp,Version=v6.0/win-x64\": {\n      \"Newtonsoft.Json/13.0.3\": {\n        \"type\": \"package\",\n        \"dependencies\": { \"Microsoft.CSharp\": \"4.7.0\" }\n      },\n      \"Microsoft.CSharp/4.7.0\": { \"type\": \"package\" }\n    }\n  },\n  \"project\": {\n    \"version\": \"1.0.0\",\n    \"restore\": { \"projectName\": \"RealNetApp\" },\n    \"frameworks\": {\n      \"net6.0\": { \"dependencies\": { \"Newtonsoft.Json\": { \"version\": \"[13.0.3, )\" } } }\n    }\n  }\n}")

@@ -3,13 +3,21 @@ package jvm
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
+
+// maxJDKReleaseBytes caps the JDK `release` file read.  Real release
+// files are a few hundred bytes; 64 KiB mirrors the cap the
+// runtimeversions JDK detector uses and is far more than any genuine
+// release file needs.
+const maxJDKReleaseBytes = 64 * 1024
 
 // jdkWellKnownRoots is the per-OS list of directories where JDKs are
 // customarily installed system-wide.  The discoverer walks one level
@@ -92,10 +100,10 @@ func discoverJDK() []scanner.Environment {
 				continue
 			}
 			candidate := filepath.Join(root, d.Name())
-			// On macOS, ``/Library/Java/JavaVirtualMachines/<name>.jdk``
+			// On macOS, `/Library/Java/JavaVirtualMachines/<name>.jdk`
 			// is a bundle directory; the actual JDK home (with the
-			// ``release`` file and ``lib/modules``) is nested under
-			// ``Contents/Home``.  Resolve that first so looksLikeJDK
+			// `release` file and `lib/modules`) is nested under
+			// `Contents/Home`.  Resolve that first so looksLikeJDK
 			// sees the real layout.  On Linux/Windows the flat layout
 			// is the norm and this branch is a no-op.
 			if runtime.GOOS == "darwin" {
@@ -143,9 +151,9 @@ func looksLikeJDK(root string) bool {
 // Version empty.  Without this, “java.base.jmod“ would be reported
 // as (java.base, "") and CVE correlation would have nothing to
 // match against.
-func scanJDKRuntime(root string) ([]scanner.PackageRecord, []scanner.ScanError) {
+func scanJDKRuntime(ctx context.Context, root string) ([]scanner.PackageRecord, []scanner.ScanError) {
 	jdkVersion := readJDKVersion(root)
-	records, errs := scanDirTree(root)
+	records, errs := scanDirTree(ctx, root)
 	if jdkVersion == "" {
 		return records, errs
 	}
@@ -173,7 +181,12 @@ func scanJDKRuntime(root string) ([]scanner.PackageRecord, []scanner.ScanError) 
 // the quotes; the parser tolerates both.
 func readJDKVersion(root string) string {
 	path := filepath.Join(root, "release")
-	data, err := os.ReadFile(path)
+	// safeio, not os.ReadFile: a `release` file installed as a symlink
+	// (cap-bypass) or a FIFO (open() hangs forever) would otherwise be
+	// followed.  Any safeio refusal (symlink / not-regular / too-large)
+	// is treated exactly like "no release file" — the JDK version is a
+	// nice-to-have for CVE matching, never fatal to the scan.
+	data, err := safeio.ReadFile(path, maxJDKReleaseBytes)
 	if err != nil {
 		return ""
 	}

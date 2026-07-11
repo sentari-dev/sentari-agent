@@ -16,8 +16,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -41,6 +43,23 @@ const maxResponseSize = 10 << 20 // 10 MiB
 // that will be included in error messages and log output.  Prevents leaking
 // lengthy server internals (stack traces, internal IPs) to agent logs.
 const maxErrorBodyLog = 512
+
+// HTTPStatusError is returned by outbound operations (currently UploadScan)
+// when the server answers with a non-success status that doRequest declined
+// to retry — i.e. any 4xx except 429.  doRequest only retries transport
+// errors, 429, and 5xx, so a 4xx reaches the caller intact; exposing the code
+// as a typed error lets callers distinguish a PERMANENT client-side rejection
+// (400 malformed, 413 payload-too-large) from a transient failure and decide
+// whether to keep an item queued or mark it dead.  Retrieve with errors.As.
+type HTTPStatusError struct {
+	Op         string // operation label, e.g. "scan upload"
+	StatusCode int    // the HTTP status code the server returned
+	Body       string // truncated server error body, for diagnostics
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s failed (HTTP %d): %s", e.Op, e.StatusCode, e.Body)
+}
 
 // ClientConfig holds the mTLS client configuration.
 type ClientConfig struct {
@@ -94,7 +113,7 @@ type RegisterResponse struct {
 	// vuln-map signing key (older deployments, or an air-gap operator
 	// who has not yet imported the NVD bundle).  When present these are
 	// persisted via SaveVulnMapTrust so a later vuln-map consumer can
-	// verify signed envelopes; ``omitempty`` keeps the wire format
+	// verify signed envelopes; `omitempty` keeps the wire format
 	// byte-identical for older servers that don't emit these fields at
 	// all, so older agents round-trip the response unchanged.
 	VulnMapPubKey string `json:"vuln_map_pubkey,omitempty"`
@@ -116,7 +135,7 @@ type Client struct {
 	httpClient *http.Client
 	// systemTrustBootstrap records that the client was built with neither
 	// a CA cert file nor a bootstrap fingerprint, so server verification
-	// falls back to the OS trust store — a mechanism we reject as
+	// falls back to the OS trust store — a mechanism ADR 0004 rejects as
 	// the sole bootstrap anchor.  RegisterWithToken logs a warning when
 	// trust is anchored through such a client so the gap is observable.
 	systemTrustBootstrap bool
@@ -141,12 +160,34 @@ func (c *Client) HTTPClient() *http.Client {
 	return c.httpClient
 }
 
+// CloseIdleConnections closes any idle keep-alive connections held by this
+// client's transport.  The caller that swaps in a new client on cert renewal /
+// re-enroll should call this on the OLD client so its idle mTLS sockets are
+// released at once rather than lingering until IdleConnTimeout.  Safe to call
+// on a zero-request client and safe to call more than once.
+func (c *Client) CloseIdleConnections() {
+	if c.httpClient != nil {
+		c.httpClient.CloseIdleConnections()
+	}
+}
+
 // NewClient creates a new mTLS client. If cert/key files are not provided,
 // it creates a plain TLS client (no client cert) for initial registration only.
 // If ProxyConfig.HTTPSProxy is set, all requests are routed through the proxy.
 // If HTTPSProxy is empty, the default Go behavior applies (respects HTTP_PROXY/
 // HTTPS_PROXY environment variables).
 func NewClient(cfg ClientConfig) (*Client, error) {
+	// Refuse to build a cleartext client.  mTLS is a hard charter constraint:
+	// every agent->server request carries the device inventory and (once
+	// enrolled) the mTLS client certificate, so an http:// ServerURL would
+	// silently ship that material in cleartext.  Validate the scheme up front
+	// — the single construction chokepoint every caller (cmd, scanner/update)
+	// funnels through — so a misconfiguration fails loudly at startup instead
+	// of leaking on the wire.
+	if err := validateServerURL(cfg.ServerURL); err != nil {
+		return nil, err
+	}
+
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS13,
 	}
@@ -161,7 +202,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 
 	// Load CA certificate for server verification (certificate pinning).
-	// Loaded BEFORE the fingerprint block: the CA file is the
+	// Loaded BEFORE the fingerprint block: per ADR 0004 the CA file is the
 	// primary trust anchor and the fingerprint only stands alone when no
 	// CA is configured.
 	if cfg.CACertFile != "" {
@@ -180,7 +221,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	// This prevents MITM attacks when the agent has not yet received the CA
 	// certificate from the server.
 	//
-	// Trust precedence:
+	// Trust precedence (ADR 0004):
 	//   - CA configured + fingerprint: standard chain validation against the
 	//     CA pool stays ON, and the pin runs as an ADDITIONAL check —
 	//     crypto/tls invokes VerifyConnection only after normal verification
@@ -213,6 +254,18 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
+		// Bound idle-connection lifetime.  The agent is a long-lived daemon
+		// that replaces this whole client on every cert renewal / re-enroll
+		// (a fresh mTLS identity means a fresh *http.Client).  Without an idle
+		// timeout the kernel keeps the old transport's TCP connections open
+		// until the server or a firewall reaps them, so idle sockets can pile
+		// up across renewals.  IdleConnTimeout reaps them itself; the small
+		// per-host cap matches the reality that the agent talks to exactly one
+		// server.  Callers that drop a client should also call
+		// CloseIdleConnections to release its sockets immediately.
+		MaxIdleConns:        4,
+		MaxIdleConnsPerHost: 2,
+		IdleConnTimeout:     90 * time.Second,
 	}
 
 	// Configure forward proxy if specified.
@@ -239,6 +292,46 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}, nil
 }
 
+// validateServerURL enforces the mTLS charter at client construction: the
+// server URL MUST be https.  A cleartext http:// URL is rejected because agent
+// scan uploads and the mTLS client certificate would otherwise travel in the
+// clear.  The sole exception is http:// to a loopback host, which never leaves
+// the machine — the in-process httptest harness relies on this and it carries
+// no on-the-wire exposure.  A missing or unrecognised scheme is a hard error so
+// a bare "host:port" config can never degrade into a silent cleartext client.
+func validateServerURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid server URL %q: %w", raw, err)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("server URL %q uses cleartext http to a non-loopback host; mTLS requires https://", raw)
+	case "":
+		return fmt.Errorf("server URL %q is missing a scheme; expected https://", raw)
+	default:
+		return fmt.Errorf("server URL %q uses unsupported scheme %q; expected https://", raw, u.Scheme)
+	}
+}
+
+// isLoopbackHost reports whether host is "localhost" or a loopback IP literal
+// (127.0.0.0/8, ::1).  Used to permit the http:// loopback carve-out in
+// validateServerURL without opening a door to cleartext over a real network.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
 // buildProxyFunc creates an http.Transport.Proxy function from the ProxyConfig.
 // It parses the proxy URL, injects auth credentials (AuthUser + AuthPassFile
 // take precedence over credentials embedded in the URL), and respects the
@@ -246,11 +339,43 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 func buildProxyFunc(pc ProxyConfig) (func(*http.Request) (*url.URL, error), error) {
 	proxyURL, err := url.Parse(pc.HTTPSProxy)
 	if err != nil {
-		return nil, fmt.Errorf("parse proxy URL %q: %w", pc.HTTPSProxy, err)
+		// url.Parse wraps the RAW url string — credentials and all — inside a
+		// *url.Error whose Error() prints it verbatim, so we must never surface
+		// that error with %w. Unwrap to the underlying reason (which carries the
+		// bad token, never the userinfo) and pair it with a redacted URL so a
+		// proxy URL like https://user:pass@proxy:8080 can't leak its password
+		// into agent logs.
+		reason := err
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			reason = uerr.Err
+		}
+		return nil, fmt.Errorf("parse proxy URL %q: %w", redactProxyURL(pc.HTTPSProxy), reason)
 	}
 
 	if proxyURL.Scheme == "" {
-		return nil, fmt.Errorf("proxy URL %q missing scheme (expected http:// or https://)", pc.HTTPSProxy)
+		return nil, fmt.Errorf("proxy URL %q missing scheme (expected http:// or https://)", redactProxyURL(pc.HTTPSProxy))
+	}
+
+	// Fail closed on a cleartext proxy that carries credentials.  An http://
+	// proxy with basic auth makes Go send `Proxy-Authorization: Basic <base64>`
+	// inside the CONNECT request over the CLEARTEXT agent<->proxy segment, so
+	// any on-path attacker there captures the proxy credential.  Refuse at
+	// construction (this is a compliance product) — the same chokepoint as the
+	// validateServerURL cleartext check.  An http:// proxy WITHOUT auth stays
+	// allowed (no credential to leak); an https:// proxy WITH auth stays allowed
+	// (the credential rides inside TLS to the proxy).  Redact the URL so the
+	// refusal itself can never surface an embedded credential.
+	//
+	// Credentials arrive by EITHER route: separate AuthUser/AuthPassFile config
+	// OR userinfo embedded directly in the proxy URL (http://user:pass@proxy).
+	// Go sends Proxy-Authorization from URL userinfo just the same, so the guard
+	// must also refuse proxyURL.User != nil — otherwise a URL-embedded credential
+	// with no separate auth config would slip past onto the cleartext segment.
+	if proxyURL.Scheme == "http" && (pc.AuthUser != "" || pc.AuthPassFile != "" || proxyURL.User != nil) {
+		return nil, fmt.Errorf(
+			"refusing to send proxy credentials over a cleartext http:// proxy; use an https:// proxy or remove proxy auth (proxy %q)",
+			redactProxyURL(pc.HTTPSProxy))
 	}
 
 	// Inject auth credentials from AuthUser + AuthPassFile.
@@ -272,6 +397,46 @@ func buildProxyFunc(pc ProxyConfig) (func(*http.Request) (*url.URL, error), erro
 		}
 		return proxyURL, nil
 	}, nil
+}
+
+// redactProxyURL returns a proxy URL string that is safe to embed in error and
+// log messages: any embedded userinfo (user:password@) is masked so credentials
+// never leak. A proxy URL is operator-supplied config that legitimately carries
+// basic-auth credentials, and every error site that echoes it back must scrub
+// them first.
+//
+// It is deliberately lenient: when the raw value parses as a URL, Go's
+// url.URL.Redacted() masks the password (…:xxxxx@…); when it does NOT parse
+// (the exact case the parse-error site handles), it falls back to masking any
+// "user:password@" span manually so a parse failure can never be the thing that
+// surfaces the credentials.
+func redactProxyURL(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		// Redacted() is a no-op when there is no userinfo, and masks only the
+		// password when there is — matching the parse-succeeds error sites.
+		return u.Redacted()
+	}
+	// Unparseable input: strip credentials by hand. Keep an optional
+	// "scheme://" prefix, then if a "userinfo@" span is present, redact the
+	// password portion (Go's Redacted() uses the literal "xxxxx").
+	scheme := ""
+	rest := raw
+	if i := strings.Index(rest, "://"); i >= 0 {
+		scheme = rest[:i+3]
+		rest = rest[i+3:]
+	}
+	at := strings.IndexByte(rest, '@')
+	if at < 0 {
+		return raw // no userinfo to redact
+	}
+	creds, host := rest[:at], rest[at:] // host retains the leading '@'
+	if colon := strings.IndexByte(creds, ':'); colon >= 0 {
+		creds = creds[:colon] + ":xxxxx"
+	} else {
+		// Bare "user@" with no password: still mask it defensively.
+		creds = "xxxxx"
+	}
+	return scheme + creds + host
 }
 
 // readProxyPassword reads the proxy password from a file, trimming whitespace.
@@ -330,12 +495,6 @@ func shouldBypass(host string, bypassList []string) bool {
 	return false
 }
 
-// Register sends an agent registration request to the server and returns the
-// issued device certificate bundle along with the locally-generated private key.
-func (c *Client) Register(hostname string) (*RegisterResponse, []byte, error) {
-	return c.RegisterWithToken(context.Background(), hostname, "")
-}
-
 // RegisterWithToken sends a registration request including an enrollment token.
 // The agent generates its own ECDSA P-256 keypair and sends a CSR to the server.
 // The server signs the CSR and returns the device certificate + CA certificate.
@@ -348,7 +507,7 @@ func (c *Client) RegisterWithToken(ctx context.Context, hostname, enrollmentToke
 	// Registration is the moment trust is anchored: the CA cert and signing
 	// pubkeys returned here are pinned for every subsequent connection.
 	// Doing that over a connection verified only by the OS trust store is
-	// the silent-TOFU gap — make it loud.
+	// the silent-TOFU gap ADR 0004 warns about — make it loud.
 	if c.systemTrustBootstrap {
 		logging.LoggerFromContext(ctx).Warn(
 			"bootstrap trust falling back to system trust store; configure ca_cert_file or --bootstrap-ca-fingerprint")
@@ -528,34 +687,6 @@ func verifyDeviceCertChain(deviceCertPEM, caCertPEM []byte) error {
 	return nil
 }
 
-// SaveCertificates writes the CA cert, device cert, and device key to certDir.
-// File permissions: ca.crt is 0640 (CA is not secret but no need to be world-
-// readable); device.crt is 0600 (it is the agent's mTLS identity — pair it
-// with the key's secrecy); device.key is 0600.
-func SaveCertificates(certDir string, caCert, deviceCert, deviceKey []byte) error {
-	if err := os.MkdirAll(certDir, 0700); err != nil {
-		return fmt.Errorf("create cert dir: %w", err)
-	}
-
-	type certFile struct {
-		name string
-		data []byte
-		mode os.FileMode
-	}
-	for _, f := range []certFile{
-		{"ca.crt", caCert, 0640},
-		{"device.crt", deviceCert, 0600},
-		{"device.key", deviceKey, 0600},
-	} {
-		path := filepath.Join(certDir, f.name)
-		if err := os.WriteFile(path, f.data, f.mode); err != nil {
-			return fmt.Errorf("write %s: %w", f.name, err)
-		}
-	}
-
-	return nil
-}
-
 // CertFilePaths is the explicit on-disk location of the three mTLS material
 // files.  It exists because an operator can override any of them in config
 // ([server] cert_file/key_file/ca_cert_file); when that happens the renewal
@@ -636,8 +767,9 @@ func SaveCertificatesAtomicAt(p CertFilePaths, caCert, deviceCert, deviceKey []b
 }
 
 // DeviceCertNotAfterAt parses the device cert at the explicit path and returns
-// its NotAfter time.  The path-explicit twin of DeviceCertNotAfter, used when
-// the cert location is config-overridden.
+// its NotAfter time.  Used by the serve loop to decide whether the cert is
+// within the renewal window without a server round-trip; the explicit path lets
+// it honour a config-overridden cert location.
 func DeviceCertNotAfterAt(certFile string) (time.Time, error) {
 	data, err := os.ReadFile(certFile)
 	if err != nil {
@@ -655,7 +787,7 @@ func DeviceCertNotAfterAt(certFile string) (time.Time, error) {
 }
 
 // CertsExistAt returns true if all three explicit cert material files are
-// present.  The path-explicit twin of CertsExist, used by the registration
+// present, honouring config-overridden cert paths.  Used by the registration
 // gate so a custom-path deployment with valid certs does not spuriously
 // re-register.
 func CertsExistAt(p CertFilePaths) bool {
@@ -668,72 +800,20 @@ func CertsExistAt(p CertFilePaths) bool {
 }
 
 // SaveCertificatesAtomic writes the CA cert, device cert, and device key to
-// certDir using a write-temp + fsync + rename sequence so a crash mid-write can
-// never leave the agent with a new cert paired with an old key (or vice versa).
-// It is the renewal-path saver; SaveCertificates stays for the registration
-// path where there is no existing pair to protect.
-//
-// Sequence: write all three files to "name.tmp" in the same dir, fsync each,
-// then rename them into place (rename is atomic per-file on POSIX).  The key is
-// renamed before the cert so the only crash window is "new key, old cert",
-// which next-startup chain/key validation detects and re-renews — strictly
-// safer than the inverse "new cert, old key" which would silently break mTLS.
-// On any error, all temp files are removed and the existing files are left
-// untouched.
-//
-// File modes match SaveCertificates: ca.crt 0640, device.crt and device.key
-// 0600.
+// certDir under the conventional filenames (ca.crt / device.crt / device.key)
+// using the same crash-safe write-temp + fsync + rename sequence as the
+// production saver.  It is a thin convenience wrapper over
+// SaveCertificatesAtomicAt: it maps certDir + fixed filenames onto explicit
+// paths and delegates, so there is exactly ONE implementation of the atomic
+// save (previously the two had drifted — this one lacked the secureperm
+// hardening the path-explicit saver applies).  Kept for the directory-oriented
+// call sites (chiefly tests) that predate the config-overridable cert paths.
 func SaveCertificatesAtomic(certDir string, caCert, deviceCert, deviceKey []byte) error {
-	if err := os.MkdirAll(certDir, 0700); err != nil {
-		return fmt.Errorf("create cert dir: %w", err)
-	}
-
-	type certFile struct {
-		name    string
-		tmpPath string
-		data    []byte
-		mode    os.FileMode
-	}
-	// Order matters for the rename phase below: key first, then cert.  ca.crt
-	// is not paired with the key so its ordering is irrelevant; keep it last.
-	files := []certFile{
-		{name: "device.key", data: deviceKey, mode: 0600},
-		{name: "device.crt", data: deviceCert, mode: 0600},
-		{name: "ca.crt", data: caCert, mode: 0640},
-	}
-
-	// Phase 1: write + fsync every temp file.  If any write fails, unlink all
-	// temps and bail — the live files are untouched.
-	cleanup := func() {
-		for i := range files {
-			if files[i].tmpPath != "" {
-				_ = os.Remove(files[i].tmpPath)
-			}
-		}
-	}
-	for i := range files {
-		tmp := filepath.Join(certDir, files[i].name+".tmp")
-		files[i].tmpPath = tmp
-		if err := writeAndSync(tmp, files[i].data, files[i].mode); err != nil {
-			cleanup()
-			return fmt.Errorf("write %s: %w", files[i].name, err)
-		}
-	}
-
-	// Phase 2: rename each temp into place (atomic per-file).  A failure here
-	// can leave a partial swap, but each rename is itself atomic so no file is
-	// ever half-written; remaining temps are cleaned up and the error returned.
-	for i := range files {
-		dst := filepath.Join(certDir, files[i].name)
-		if err := os.Rename(files[i].tmpPath, dst); err != nil {
-			files[i].tmpPath = "" // already consumed (or attempted)
-			cleanup()
-			return fmt.Errorf("rename %s: %w", files[i].name, err)
-		}
-		files[i].tmpPath = "" // consumed; nothing to clean for this one
-	}
-
-	return nil
+	return SaveCertificatesAtomicAt(CertFilePaths{
+		CertFile: filepath.Join(certDir, "device.crt"),
+		KeyFile:  filepath.Join(certDir, "device.key"),
+		CAFile:   filepath.Join(certDir, "ca.crt"),
+	}, caCert, deviceCert, deviceKey)
 }
 
 // writeAndSync writes data to path with the given mode and fsyncs it to disk
@@ -755,33 +835,61 @@ func writeAndSync(path string, data []byte, mode os.FileMode) error {
 	return f.Close()
 }
 
-// DeviceCertNotAfter parses certDir/device.crt and returns its NotAfter time.
-// Used by the serve loop to decide whether the cert is within the renewal
-// window without a server round-trip.
-func DeviceCertNotAfter(certDir string) (time.Time, error) {
-	data, err := os.ReadFile(filepath.Join(certDir, "device.crt"))
-	if err != nil {
-		return time.Time{}, fmt.Errorf("read device.crt: %w", err)
-	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return time.Time{}, fmt.Errorf("device.crt is not valid PEM")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("parse device.crt: %w", err)
-	}
-	return cert.NotAfter, nil
+// trustKey is the shared on-disk shape of every per-channel signing-trust
+// record (license-map, install-gate, vuln-map).  All three persist the same
+// {key_id, pubkey_b64} pair with identical JSON tags, so saveTrustKey /
+// loadTrustKey carry the one copy of the read/write/validate logic and the
+// exported per-channel types are byte-identical layouts of this struct — a
+// pointer conversion between them is legal and zero-copy.
+type trustKey struct {
+	KeyID     string `json:"key_id"`
+	PubKeyB64 string `json:"pubkey_b64"`
 }
 
-// CertsExist returns true if all three certificate files are present in certDir.
-func CertsExist(certDir string) bool {
-	for _, name := range []string{"ca.crt", "device.crt", "device.key"} {
-		if _, err := os.Stat(filepath.Join(certDir, name)); err != nil {
-			return false
-		}
+// saveTrustKey persists a {key_id, pubkey_b64} trust record to
+// certDir/filename.  Empty keyID or pubKeyB64 is a silent no-op (returns nil)
+// so a server that has not provisioned a given signing channel never blanks an
+// existing trust file with zeroes.  File mode 0o600, parent dir 0o700 — the
+// same modes all three channels used before extraction.
+func saveTrustKey(certDir, filename, keyID, pubKeyB64 string) error {
+	if keyID == "" || pubKeyB64 == "" {
+		return nil
 	}
-	return true
+	if err := os.MkdirAll(certDir, 0o700); err != nil {
+		return fmt.Errorf("create cert dir: %w", err)
+	}
+	data, err := json.Marshal(trustKey{KeyID: keyID, PubKeyB64: pubKeyB64})
+	if err != nil {
+		return fmt.Errorf("marshal trust record: %w", err)
+	}
+	path := filepath.Join(certDir, filename)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", filename, err)
+	}
+	return nil
+}
+
+// loadTrustKey reads the trust record at certDir/filename.  Returns (nil, nil)
+// when the file does not exist yet (fresh install pre-register); a decode error
+// or a partial record (either field empty) returns (nil, err) so callers can
+// log and skip verification rather than crash.
+func loadTrustKey(certDir, filename string) (*trustKey, error) {
+	path := filepath.Join(certDir, filename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", filename, err)
+	}
+	var trust trustKey
+	if err := json.Unmarshal(data, &trust); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", filename, err)
+	}
+	if trust.KeyID == "" || trust.PubKeyB64 == "" {
+		return nil, fmt.Errorf("%s: key_id and pubkey_b64 both required", filename)
+	}
+	return &trust, nil
 }
 
 // licenseMapTrustFile is the on-disk filename where the agent persists
@@ -803,21 +911,7 @@ type LicenseMapTrust struct {
 // certDir/license_map_trust.json.  Absent/empty key just writes nothing
 // and returns nil — the agent treats license-map as unavailable.
 func SaveLicenseMapTrust(certDir, keyID, pubKeyB64 string) error {
-	if keyID == "" || pubKeyB64 == "" {
-		return nil
-	}
-	if err := os.MkdirAll(certDir, 0700); err != nil {
-		return fmt.Errorf("create cert dir: %w", err)
-	}
-	data, err := json.Marshal(LicenseMapTrust{KeyID: keyID, PubKeyB64: pubKeyB64})
-	if err != nil {
-		return fmt.Errorf("marshal trust record: %w", err)
-	}
-	path := filepath.Join(certDir, licenseMapTrustFile)
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return fmt.Errorf("write %s: %w", licenseMapTrustFile, err)
-	}
-	return nil
+	return saveTrustKey(certDir, licenseMapTrustFile, keyID, pubKeyB64)
 }
 
 // LoadLicenseMapTrust returns the persisted pubkey, or (nil, nil) if
@@ -825,22 +919,11 @@ func SaveLicenseMapTrust(certDir, keyID, pubKeyB64 string) error {
 // error returns (nil, err) so callers can log and continue without
 // license-map verification.
 func LoadLicenseMapTrust(certDir string) (*LicenseMapTrust, error) {
-	path := filepath.Join(certDir, licenseMapTrustFile)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read %s: %w", licenseMapTrustFile, err)
+	t, err := loadTrustKey(certDir, licenseMapTrustFile)
+	if err != nil || t == nil {
+		return nil, err
 	}
-	var trust LicenseMapTrust
-	if err := json.Unmarshal(data, &trust); err != nil {
-		return nil, fmt.Errorf("decode %s: %w", licenseMapTrustFile, err)
-	}
-	if trust.KeyID == "" || trust.PubKeyB64 == "" {
-		return nil, fmt.Errorf("%s: key_id and pubkey_b64 both required", licenseMapTrustFile)
-	}
-	return &trust, nil
+	return (*LicenseMapTrust)(t), nil
 }
 
 // installGateTrustFile is the on-disk filename where the agent
@@ -866,21 +949,7 @@ type InstallGateTrust struct {
 // gate key (e.g. older deployments) does not blank out an existing
 // trust file with zeroes.
 func SaveInstallGateTrust(certDir, keyID, pubKeyB64 string) error {
-	if keyID == "" || pubKeyB64 == "" {
-		return nil
-	}
-	if err := os.MkdirAll(certDir, 0o700); err != nil {
-		return fmt.Errorf("create cert dir: %w", err)
-	}
-	data, err := json.Marshal(InstallGateTrust{KeyID: keyID, PubKeyB64: pubKeyB64})
-	if err != nil {
-		return fmt.Errorf("marshal trust record: %w", err)
-	}
-	path := filepath.Join(certDir, installGateTrustFile)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", installGateTrustFile, err)
-	}
-	return nil
+	return saveTrustKey(certDir, installGateTrustFile, keyID, pubKeyB64)
 }
 
 // LoadInstallGateTrust returns the persisted install-gate pubkey, or
@@ -888,22 +957,11 @@ func SaveInstallGateTrust(certDir, keyID, pubKeyB64 string) error {
 // Decode errors return (nil, err) so callers can log and skip
 // install-gate verification rather than crash.
 func LoadInstallGateTrust(certDir string) (*InstallGateTrust, error) {
-	path := filepath.Join(certDir, installGateTrustFile)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read %s: %w", installGateTrustFile, err)
+	t, err := loadTrustKey(certDir, installGateTrustFile)
+	if err != nil || t == nil {
+		return nil, err
 	}
-	var trust InstallGateTrust
-	if err := json.Unmarshal(data, &trust); err != nil {
-		return nil, fmt.Errorf("decode %s: %w", installGateTrustFile, err)
-	}
-	if trust.KeyID == "" || trust.PubKeyB64 == "" {
-		return nil, fmt.Errorf("%s: key_id and pubkey_b64 both required", installGateTrustFile)
-	}
-	return &trust, nil
+	return (*InstallGateTrust)(t), nil
 }
 
 // vulnMapTrustFile is the on-disk filename where the agent persists
@@ -933,21 +991,7 @@ type VulnMapTrust struct {
 // an NVD bundle yet) does not blank out an existing trust file
 // with zeroes.
 func SaveVulnMapTrust(certDir, keyID, pubKeyB64 string) error {
-	if keyID == "" || pubKeyB64 == "" {
-		return nil
-	}
-	if err := os.MkdirAll(certDir, 0o700); err != nil {
-		return fmt.Errorf("create cert dir: %w", err)
-	}
-	data, err := json.Marshal(VulnMapTrust{KeyID: keyID, PubKeyB64: pubKeyB64})
-	if err != nil {
-		return fmt.Errorf("marshal trust record: %w", err)
-	}
-	path := filepath.Join(certDir, vulnMapTrustFile)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", vulnMapTrustFile, err)
-	}
-	return nil
+	return saveTrustKey(certDir, vulnMapTrustFile, keyID, pubKeyB64)
 }
 
 // LoadVulnMapTrust returns the persisted vuln-map pubkey, or
@@ -955,23 +999,22 @@ func SaveVulnMapTrust(certDir, keyID, pubKeyB64 string) error {
 // or a server that doesn't ship a vuln-map signing key).  Decode
 // errors return (nil, err) so callers can log and skip vuln-map
 // envelope verification rather than crash.
+//
+// This is the read half of the register-time trust-on-first-use pin for the
+// offline-CVE (vuln-map) channel.  It has no production caller YET: the
+// vuln-map fetch/verify consumer is not built, whereas SaveVulnMapTrust IS
+// wired into register/renew (see cmd/sentari-agent/cert_lifecycle.go) so the
+// pubkey is pinned the moment it rides in on the bootstrap TLS fingerprint —
+// a one-shot that cannot be re-derived later without re-registration.  Kept
+// (rather than deleted) as the deliberate, test-covered read counterpart the
+// forthcoming vuln-map verify path will call, mirroring how
+// LoadLicenseMapTrust / LoadInstallGateTrust are consumed today.
 func LoadVulnMapTrust(certDir string) (*VulnMapTrust, error) {
-	path := filepath.Join(certDir, vulnMapTrustFile)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read %s: %w", vulnMapTrustFile, err)
+	t, err := loadTrustKey(certDir, vulnMapTrustFile)
+	if err != nil || t == nil {
+		return nil, err
 	}
-	var trust VulnMapTrust
-	if err := json.Unmarshal(data, &trust); err != nil {
-		return nil, fmt.Errorf("decode %s: %w", vulnMapTrustFile, err)
-	}
-	if trust.KeyID == "" || trust.PubKeyB64 == "" {
-		return nil, fmt.Errorf("%s: key_id and pubkey_b64 both required", vulnMapTrustFile)
-	}
-	return &trust, nil
+	return (*VulnMapTrust)(t), nil
 }
 
 // SaveDeviceID persists the server-assigned device UUID to a file so the agent
@@ -994,10 +1037,70 @@ func LoadDeviceID(certDir string) string {
 	return strings.TrimSpace(string(data))
 }
 
+// maxScanRecords is the global ceiling on the combined number of variable-
+// cardinality records a single scan upload may carry — len(Packages) +
+// len(DepEdges) + len(LicenseEvidence) + len(SupplyChainSignals).  A pathological
+// host (a build box with millions of transitive dep-edges, or a runaway
+// license-evidence explosion) would otherwise buffer and JSON-marshal an
+// unbounded payload entirely in memory, risking OOM on the agent before the
+// server ever applies its own 413 limit.  The cap mirrors the merged-tree entry
+// cap in scanner/containers/materialize.go: when it trips, the payload is
+// truncated to the budget and a single non-fatal ScanError is appended so the
+// truncation is OBSERVABLE server-side, never silent.
+//
+// 5,000,000 records is deliberately generous — a realistic fleet host reports a
+// few thousand packages and at most low-hundreds-of-thousands of dep-edges, so
+// this never trips in practice while still bounding the pathological case to a
+// payload on the order of a few hundred MiB rather than unbounded.
+var maxScanRecords = 5_000_000
+
+// enforceScanRecordBudget caps the combined variable-cardinality record count of
+// a scan result at maxScanRecords, mutating result in place.  Slices are trimmed
+// in priority order (Packages first — the primary inventory signal — then
+// DepEdges, LicenseEvidence, SupplyChainSignals) so the most valuable data
+// survives truncation, and a single ScanError is appended describing what was
+// dropped.  A result already within budget is left untouched (no ScanError).
+func enforceScanRecordBudget(result *scanner.ScanResult) {
+	total := len(result.Packages) + len(result.DepEdges) +
+		len(result.LicenseEvidence) + len(result.SupplyChainSignals)
+	if total <= maxScanRecords {
+		return
+	}
+
+	remaining := maxScanRecords
+	// Trim each slice to the budget still remaining, highest-priority first.
+	trim := func(n int) int {
+		if n <= remaining {
+			remaining -= n
+			return n
+		}
+		keep := remaining
+		remaining = 0
+		return keep
+	}
+	result.Packages = result.Packages[:trim(len(result.Packages))]
+	result.DepEdges = result.DepEdges[:trim(len(result.DepEdges))]
+	result.LicenseEvidence = result.LicenseEvidence[:trim(len(result.LicenseEvidence))]
+	result.SupplyChainSignals = result.SupplyChainSignals[:trim(len(result.SupplyChainSignals))]
+
+	result.Errors = append(result.Errors, scanner.ScanError{
+		Path: result.Hostname,
+		Error: fmt.Sprintf(
+			"scan payload truncated: %d combined records (packages+dep_edges+license_evidence+supply_chain_signals) exceeds the %d-record upload budget; kept the highest-priority records and dropped the remainder to bound agent memory",
+			total, maxScanRecords),
+		Timestamp: time.Now().UTC(),
+	})
+}
+
 // UploadScan sends scan results to the server.  Retries on transient
 // network / 429 / 5xx via doRequest.  The caller's ctx must carry the
 // scan-cycle request_id so the upload joins the correlation chain.
 func (c *Client) UploadScan(ctx context.Context, result *scanner.ScanResult) error {
+	// Bound peak memory: cap the combined record count before assembling and
+	// marshalling the payload, appending an observable truncation ScanError if
+	// the pathological ceiling is hit.
+	enforceScanRecordBudget(result)
+
 	body, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("marshal scan result: %w", err)
@@ -1026,7 +1129,11 @@ func (c *Client) UploadScan(ctx context.Context, result *scanner.ScanResult) err
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
-		return fmt.Errorf("scan upload failed (HTTP %d): %s", resp.StatusCode, truncateBytes(respBody, maxErrorBodyLog))
+		return &HTTPStatusError{
+			Op:         "scan upload",
+			StatusCode: resp.StatusCode,
+			Body:       truncateBytes(respBody, maxErrorBodyLog),
+		}
 	}
 
 	return nil
@@ -1043,6 +1150,10 @@ type auditShipEntry struct {
 	ContentHash string `json:"content_hash"`
 	PrevHash    string `json:"prev_hash"`
 	CreatedAt   string `json:"created_at"`
+	// Encoding scheme of content_hash (1 = legacy plain concat, 2 = length-
+	// prefixed). Always emitted (no omitempty) so the server never has to guess:
+	// an entry from a pre-v2 agent row carries 1, a new row carries 2.
+	HashVersion int `json:"hash_version"`
 }
 
 type auditShipRequest struct {
@@ -1081,6 +1192,17 @@ func (c *Client) ShipAudit(ctx context.Context, deviceID string, entries []map[s
 		if id > maxID {
 			maxID = id
 		}
+		// hash_version is absent on maps built by older code paths; default to
+		// scheme 1 (the legacy plain-concat encoding) so the server recomputes
+		// those correctly.
+		hashVersion := 1
+		if hv, ok := e["hash_version"]; ok && hv != "" {
+			parsed, err := strconv.Atoi(hv)
+			if err != nil {
+				return 0, fmt.Errorf("audit ship: bad entry hash_version %q: %w", hv, err)
+			}
+			hashVersion = parsed
+		}
 		payload.Entries = append(payload.Entries, auditShipEntry{
 			EntryID:     id,
 			EventType:   e["event_type"],
@@ -1088,6 +1210,7 @@ func (c *Client) ShipAudit(ctx context.Context, deviceID string, entries []map[s
 			ContentHash: e["content_hash"],
 			PrevHash:    e["prev_hash"],
 			CreatedAt:   e["created_at"],
+			HashVersion: hashVersion,
 		})
 	}
 

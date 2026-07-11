@@ -2,15 +2,15 @@
 //
 // Trust is bootstrapped at /register time: the server returns its
 // license-map signing pubkey in the register response and the agent
-// persists it to ``<certDir>/license_map_trust.json``.  On every
-// subsequent startup ``main_enterprise.go`` loads that file and calls
-// ``RegisterTrustedMapKey`` with the learned key.  Trust rides on the
+// persists it to `<certDir>/license_map_trust.json`.  On every
+// subsequent startup `main_enterprise.go` loads that file and calls
+// `RegisterTrustedMapKey` with the learned key.  Trust rides on the
 // same TLS-fingerprint anchor the cert-issuance flow uses — an
 // attacker who could inject a forged pubkey at register time could
 // also mint a forged client cert, so nothing is gained by adding a
 // compile-time pin on top.
 //
-// ``pinnedMapPubKeys`` stays empty in production.  It remains as an
+// `pinnedMapPubKeys` stays empty in production.  It remains as an
 // optional compile-time override for air-gapped deployments that
 // want to bake a specific pubkey into the agent binary and refuse
 // any key delivered at register time.
@@ -18,7 +18,7 @@
 // For local development, the SENTARI_TRUSTED_MAP_PUBKEYS environment
 // variable can inject additional keys at startup (comma-separated
 // "key_id:base64pubkey" entries).  Intended for running the agent
-// against ``make server-dev`` before the agent has registered.
+// against `make server-dev` before the agent has registered.
 
 package scanner
 

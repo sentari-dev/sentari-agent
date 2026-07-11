@@ -137,7 +137,7 @@ func TestReadFile_MissingFile(t *testing.T) {
 }
 
 // TestReadFile_DirectoryRejected: Open on a directory succeeds on
-// some platforms; the Stat-based ``IsDir`` check must still reject.
+// some platforms; the Stat-based `IsDir` check must still reject.
 func TestReadFile_DirectoryRejected(t *testing.T) {
 	dir := t.TempDir()
 	_, err := ReadFile(dir, 1024)
@@ -193,6 +193,76 @@ func TestReadDir_SymlinkDirRefused(t *testing.T) {
 	}
 	if !errors.Is(err, ErrSymlink) {
 		t.Errorf("expected ErrSymlink, got %v", err)
+	}
+}
+
+// TestReadDir_NotADirectory: pointing ReadDir at a regular file must be
+// refused with ErrNotRegular — the fd-validated type check (unix
+// O_DIRECTORY at open, plus the fstat on the held handle) must reject a
+// non-directory so a FIFO/file planted where a version dir is expected
+// cannot be enumerated as if it were a directory.
+func TestReadDir_NotADirectory(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "regular.txt")
+	if err := os.WriteFile(file, []byte("not a dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := ReadDir(file)
+	if err == nil {
+		t.Fatalf("expected ErrNotRegular, got %d entries", len(entries))
+	}
+	if !errors.Is(err, ErrNotRegular) {
+		t.Errorf("expected ErrNotRegular, got %v", err)
+	}
+}
+
+// TestReadDir_SymlinkToFileRefused: a symlink whose target is a regular
+// file (not a directory) must still be refused as a symlink — the leaf is
+// a symlink, so the refusal fires before the type check.
+func TestReadDir_SymlinkToFileRefused(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation on Windows requires admin")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(target, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink creation not permitted: %v", err)
+	}
+
+	if _, err := ReadDir(link); !errors.Is(err, ErrSymlink) {
+		t.Errorf("expected ErrSymlink for a symlinked leaf, got %v", err)
+	}
+}
+
+// TestReadDir_ManyEntriesSorted: (*os.File).ReadDir returns entries in
+// directory order, so ReadDir must sort them by name to preserve the
+// os.ReadDir contract callers rely on.  Uses enough entries that an
+// unsorted directory order is overwhelmingly likely to differ from sorted.
+func TestReadDir_ManyEntriesSorted(t *testing.T) {
+	dir := t.TempDir()
+	names := []string{"zeta", "alpha", "mike", "bravo", "yankee", "charlie"}
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	entries, err := ReadDir(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != len(names) {
+		t.Fatalf("expected %d entries, got %d", len(names), len(entries))
+	}
+	for i := 1; i < len(entries); i++ {
+		if entries[i-1].Name() > entries[i].Name() {
+			t.Errorf("entries not sorted: %q before %q", entries[i-1].Name(), entries[i].Name())
+		}
 	}
 }
 

@@ -111,37 +111,52 @@ func scanRpmPackages() ([]PackageRecord, []ScanError) {
 // surface a ScanError instead of silently returning zero packages.
 func scanRpmViaDatabase() ([]PackageRecord, []ScanError) {
 	var packages []PackageRecord
-	var errors []ScanError
+	var scanErrs []ScanError
 
 	dbPath, formatErrs := detectRpmDbFormat()
 	if dbPath == "" {
 		return packages, formatErrs
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	// Use the "file:" URI form so the modernc SQLite driver honours
+	// mode=ro.  On a plain path the driver silently discards the query
+	// string and opens READWRITE|CREATE, which would create/mutate the
+	// host rpmdb — a charter violation (agents never write host state).
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
 	if err != nil {
-		errors = append(errors, ScanError{
+		scanErrs = append(scanErrs, ScanError{
 			Path:      dbPath,
 			EnvType:   EnvSystemRpm,
 			Error:     fmt.Sprintf("open rpmdb: %v", err),
 			Timestamp: time.Now().UTC(),
 		})
-		return packages, errors
+		return packages, scanErrs
 	}
 	defer db.Close()
 
-	// Default behaviour (osScanMode == "python_only") keeps the legacy
-	// "%python%" filter on the Name index so the agent stays Python-only
-	// out of the box.  Setting SENTARI_SCAN_OS_PACKAGES=all lifts the
-	// filter so curated CPE entries for non-Python OS packages (openssl,
-	// glibc, libssl3, ...) can fire on the server side.
+	// Default behaviour (osScanMode == "python_only") bounds the rows the
+	// SQLite driver materialises with the cheap Name-index prefilter below,
+	// then applies isPythonPackage in Go as the AUTHORITATIVE membership
+	// test — the same predicate system_deb.go uses.  That parity matters:
+	// an rpm-installed pypy/pypy3 (EPEL) or jython carries no "python"
+	// substring, so a bare LIKE '%python%' filter would silently drop it on
+	// RHEL/Fedora/SUSE while a Debian host reports it.  The LIKE list mirrors
+	// isPythonPackage's patterns purely as a row-bounding optimisation;
+	// isPythonPackage remains the single source of truth for what counts as
+	// a Python package.  Setting SENTARI_SCAN_OS_PACKAGES=all lifts both the
+	// SQL prefilter and the Go gate so curated CPE entries for non-Python OS
+	// packages (openssl, glibc, libssl3, ...) can fire on the server side.
+	pythonOnly := osScanMode() != "all"
 	query := `
 		SELECT n.key, p.blob
 		FROM Name n
 		JOIN Packages p ON n.hnum = p.hnum
 		WHERE n.key LIKE '%python%'
+		   OR n.key LIKE '%pip%'
+		   OR n.key LIKE '%pypy%'
+		   OR n.key LIKE '%jython%'
 	`
-	if osScanMode() == "all" {
+	if !pythonOnly {
 		query = `
 			SELECT n.key, p.blob
 			FROM Name n
@@ -155,16 +170,35 @@ func scanRpmViaDatabase() ([]PackageRecord, []ScanError) {
 	}
 	defer rows.Close()
 
+	// seen de-duplicates byte-identical records.  On a multilib RHEL/Fedora
+	// host a package installed for two arches (glibc.i686 AND glibc.x86_64)
+	// has two Packages rows with identical name+EVR+source; the v3 wire
+	// contract has no architecture field, so both would emit indistinguishable
+	// PackageRecords and double-count in inventory/CVE.  The key is the full
+	// wire identity name+version+source: two rows sharing it emit byte-identical
+	// records, so keeping one is lossless; genuinely different versions of the
+	// same name differ in the key and are both kept.  Mirrors system_deb.go.
+	seen := make(map[string]struct{})
 	for rows.Next() {
 		var name string
 		var blob []byte
 		if err := rows.Scan(&name, &blob); err != nil {
 			continue
 		}
+		// Authoritative python_only gate — shared with system_deb.go so both
+		// scanners agree on the definition of a Python package.
+		if pythonOnly && !isPythonPackage(name) {
+			continue
+		}
 		version, license, source := parseRPMHeader(blob)
 		if version == "" {
 			version = "unknown"
 		}
+		key := name + "\x00" + version + "\x00" + source
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
 		pkg := PackageRecord{
 			Name:          name,
 			Version:       version,
@@ -180,7 +214,7 @@ func scanRpmViaDatabase() ([]PackageRecord, []ScanError) {
 	}
 
 	if err := rows.Err(); err != nil {
-		errors = append(errors, ScanError{
+		scanErrs = append(scanErrs, ScanError{
 			Path:      dbPath,
 			EnvType:   EnvSystemRpm,
 			Error:     fmt.Sprintf("read rows: %v", err),
@@ -188,36 +222,58 @@ func scanRpmViaDatabase() ([]PackageRecord, []ScanError) {
 		})
 	}
 
-	return packages, errors
+	return packages, scanErrs
 }
 
 // scanRpmNameOnly is a fallback for older rpmdb schemas where the Packages
 // table is absent. Returns packages with version "unknown".
 func scanRpmNameOnly(db *sql.DB, dbPath string) ([]PackageRecord, []ScanError) {
 	var packages []PackageRecord
-	var errors []ScanError
+	var scanErrs []ScanError
 
-	q := `SELECT key FROM Name WHERE key LIKE '%python%'`
-	if osScanMode() == "all" {
+	// Same prefilter-plus-Go-gate strategy as the JOIN path above: the LIKE
+	// list only bounds rows, and isPythonPackage is the authoritative test
+	// so pypy/pypy3/jython (no "python" substring) survive in python_only
+	// mode, matching system_deb.go.
+	pythonOnly := osScanMode() != "all"
+	q := `SELECT key FROM Name
+		WHERE key LIKE '%python%'
+		   OR key LIKE '%pip%'
+		   OR key LIKE '%pypy%'
+		   OR key LIKE '%jython%'`
+	if !pythonOnly {
 		q = `SELECT key FROM Name`
 	}
 	rows, err := db.Query(q)
 	if err != nil {
-		errors = append(errors, ScanError{
+		scanErrs = append(scanErrs, ScanError{
 			Path:      dbPath,
 			EnvType:   EnvSystemRpm,
 			Error:     fmt.Sprintf("query Name table: %v", err),
 			Timestamp: time.Now().UTC(),
 		})
-		return packages, errors
+		return packages, scanErrs
 	}
 	defer rows.Close()
 
+	// Same multilib dedup as scanRpmViaDatabase: multiple Name rows for one
+	// package (one per installed arch) collapse to a single record on the
+	// name+version+source wire identity.  Here version is always "unknown"
+	// and source empty, so multilib rows for a name share the key losslessly.
+	seen := make(map[string]struct{})
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			continue
 		}
+		if pythonOnly && !isPythonPackage(name) {
+			continue
+		}
+		key := name + "\x00" + "unknown" + "\x00" + ""
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
 		packages = append(packages, PackageRecord{
 			Name:    name,
 			Version: "unknown",
@@ -225,7 +281,7 @@ func scanRpmNameOnly(db *sql.DB, dbPath string) ([]PackageRecord, []ScanError) {
 	}
 
 	if err := rows.Err(); err != nil {
-		errors = append(errors, ScanError{
+		scanErrs = append(scanErrs, ScanError{
 			Path:      dbPath,
 			EnvType:   EnvSystemRpm,
 			Error:     fmt.Sprintf("read rows: %v", err),
@@ -233,7 +289,7 @@ func scanRpmNameOnly(db *sql.DB, dbPath string) ([]PackageRecord, []ScanError) {
 		})
 	}
 
-	return packages, errors
+	return packages, scanErrs
 }
 
 // osScanMode returns the active OS package-scan mode.  Values:

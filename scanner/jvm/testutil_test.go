@@ -11,7 +11,7 @@ import (
 // buildJAR is the fixture helper for every jar_metadata test.  Rather
 // than check in binary .jar fixtures for each case (which ages badly
 // and is opaque to reviewers), we describe each fixture declaratively
-// and build it in memory here.  ``entries`` maps archive path to
+// and build it in memory here.  `entries` maps archive path to
 // bytes; the function writes the archive to a temp file and returns
 // the path for the test to pass to extractFromJar().
 //
@@ -29,7 +29,7 @@ func buildJAR(t *testing.T, entries map[string][]byte) string {
 // buildJARBytes is the in-memory variant used when the fixture needs
 // to be nested inside another JAR (Spring Boot / Quarkus uber-jar
 // tests).  Returns the raw zip bytes so the caller can plant them as
-// an entry of an outer ``buildJAR`` call.
+// an entry of an outer `buildJAR` call.
 func buildJARBytes(t *testing.T, entries map[string][]byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer

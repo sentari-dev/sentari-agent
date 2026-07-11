@@ -13,7 +13,7 @@ import (
 
 // TestScanMCPConfig_ParsesRealShape: the config file format
 // Anthropic documents for Claude Desktop / Cursor is a top-level
-// ``mcpServers`` map.  A realistic config with three servers of
+// `mcpServers` map.  A realistic config with three servers of
 // differing command shapes produces three PackageRecords whose
 // names are mcp:<key> and whose versions are extracted when the
 // command/args carry a version hint.
@@ -177,9 +177,9 @@ func TestDiscoverMCPConfigs_PicksUpClaudeConfig(t *testing.T) {
 // to wait for an end-to-end integration to surface.
 func TestExtractMCPVersion(t *testing.T) {
 	cases := []struct {
-		name    string
-		entry   mcpServerEntry
-		want    string
+		name  string
+		entry mcpServerEntry
+		want  string
 	}{
 		{"npx @ suffix", mcpServerEntry{Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-filesystem@1.2.3"}}, "1.2.3"},
 		{"pip == suffix", mcpServerEntry{Command: "uvx", Args: []string{"mcp-server-sqlite==0.2.1"}}, "0.2.1"},

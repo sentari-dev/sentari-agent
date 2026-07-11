@@ -24,7 +24,7 @@ func TestParseAgentTags_DedupesAndDropsInvalid(t *testing.T) {
 }
 
 func TestParseAgentTags_EmptyValueReturnsNonNilEmptySlice(t *testing.T) {
-	// Operator wrote ``tags =`` with no values.  Distinct from
+	// Operator wrote `tags =` with no values.  Distinct from
 	// "no [agent] section at all" — see AgentSection.Tags doc-
 	// comment for the wire semantics.  parseAgentTags is only
 	// called when the key was present, so the return value is
@@ -92,8 +92,8 @@ func TestLoadFromFile_NoAgentSectionLeavesTagsNil(t *testing.T) {
 }
 
 func TestLoadFromFile_EmptyTagsKeyClearsServerSide(t *testing.T) {
-	// Operator wrote ``tags =`` with no values.  Agent.Tags must
-	// be a non-nil empty slice so the wire emit is ``"tags": []``,
+	// Operator wrote `tags =` with no values.  Agent.Tags must
+	// be a non-nil empty slice so the wire emit is `"tags": []`,
 	// which the server interprets as "clear device.tags_agent".
 	path := writeTempConfig(t, "[agent]\ntags =\n")
 	cfg, err := LoadFromFile(path)

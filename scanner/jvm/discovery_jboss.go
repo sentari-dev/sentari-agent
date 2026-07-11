@@ -4,7 +4,7 @@ import "github.com/sentari-dev/sentari-agent/scanner"
 
 // JBoss / WildFly / Red Hat JBoss EAP — same codebase, three brand
 // names over its history.  All three identify themselves with
-// ``bin/standalone.sh`` + a ``modules/`` directory; those two
+// `bin/standalone.sh` + a `modules/` directory; those two
 // together are unambiguous.
 //
 // Env vars:
@@ -22,7 +22,7 @@ import "github.com/sentari-dev/sentari-agent/scanner"
 // traversal (PR #6), so every bundled library surfaces as its own
 // PackageRecord.
 // jbossWellKnown — see note in tomcatWellKnown.  Previously this
-// included ``C:\`` directly which forced a listing of the Windows
+// included `C:\` directly which forced a listing of the Windows
 // system drive root; narrowed to specific parents that every real
 // Red Hat / WildFly installer uses.
 var jbossWellKnown = map[string][]string{
@@ -43,9 +43,9 @@ func discoverJBoss() []scanner.Environment {
 		wellKnown: jbossWellKnown,
 		marker: func(root string) bool {
 			// Both markers must be present so the check doesn't
-			// false-positive on random ``bin/standalone.sh`` scripts.
-			// The ``modules/`` entry must be a directory — a regular
-			// file named ``modules`` would otherwise satisfy hasAny
+			// false-positive on random `bin/standalone.sh` scripts.
+			// The `modules/` entry must be a directory — a regular
+			// file named `modules` would otherwise satisfy hasAny
 			// and produce a false positive on wrapper shell scripts.
 			return hasAny(root, "bin/standalone.sh", "bin/standalone.bat") &&
 				hasAnyDir(root, "modules")

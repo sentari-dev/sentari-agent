@@ -8,12 +8,12 @@
 package lockfiles
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -34,11 +34,31 @@ const (
 	maxMetadataBytes = 1 << 20  // 1 MiB  — pom.xml / .nuspec
 )
 
+// yarnBerryProbeBytes bounds how much of a yarn.lock head is inspected
+// to distinguish berry (v2+) from classic (v1).  The `__metadata:`
+// marker always sits at the very top (after a two-line comment header),
+// so a small window is sufficient and a marker further down is ignored
+// by design — a classic v1 lockfile that happens to contain the literal
+// string deeper in the file must NOT be misclassified as berry.
+const yarnBerryProbeBytes = 256
+
+// readLockfile reads a lockfile's bytes with the shared size cap.  It is
+// a package var so tests can install a call-counting spy proving
+// buildMeta reads each file exactly once (before this refactor a single
+// lockfile was read up to three times: kind/version probe, drift hash,
+// and declared-count parse).  safeio.ReadFile refuses symlinks and
+// non-regular files and returns ErrTooLarge — never a partial buffer —
+// for a file over the cap, so an oversized lockfile is refused rather
+// than streamed byte-by-byte through the hash as it was before.
+var readLockfile = func(path string) ([]byte, error) {
+	return safeio.ReadFile(path, maxLockfileBytes)
+}
+
 // errSkipLockfile is returned by buildMeta when a discovered file
 // matches a known filename but the agent intentionally drops it from
 // the v3 payload (e.g. a v1 npm package-lock.json — no schema enum
 // entry exists for it, and silently remapping to v3 makes downstream
-// parsers log warnings).  See detectPackageLockVersion for details.
+// parsers log warnings).  See packageLockFormat for details.
 var errSkipLockfile = errors.New("lockfile intentionally skipped")
 
 // filenameMatcher pairs a filename pattern with the format + ecosystem
@@ -99,12 +119,22 @@ var skipDirs = map[string]struct{}{
 // Returns the collected metadata. Individual file errors (e.g. open
 // failure on a single lockfile) are logged via the returned error;
 // the slice still contains everything that could be read successfully.
-func DiscoverInRoot(root string) ([]deptree.LockfileMeta, error) {
+//
+// The walk honours ctx cancellation: a cancelled scan (operator Ctrl-C,
+// supervisor timeout) stops the walk within one directory step via
+// fs.SkipAll rather than running the full tree to completion.
+func DiscoverInRoot(ctx context.Context, root string) ([]deptree.LockfileMeta, error) {
 	var results []deptree.LockfileMeta
 	var firstErr error
 
 	rootClean := filepath.Clean(root)
 	walkErr := filepath.WalkDir(rootClean, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			// Cancelled — stop the walk cleanly (fs.SkipAll makes
+			// WalkDir return nil); partial results already collected
+			// are still returned. The caller re-checks ctx.Err().
+			return fs.SkipAll
+		}
 		if err != nil {
 			// Inaccessible paths shouldn't abort the whole walk.
 			return nil
@@ -176,16 +206,33 @@ func depthOf(rel string) int {
 }
 
 func buildMeta(path string, matcher filenameMatcher) (deptree.LockfileMeta, error) {
+	// mtime is stat-only; the drift hash + kind detection + declared
+	// count all derive from ONE read of the bytes below.
+	st, err := os.Stat(path)
+	if err != nil {
+		return deptree.LockfileMeta{}, fmt.Errorf("stat %s: %w", path, err)
+	}
+
+	// Single, size-capped read.  safeio.ReadFile refuses a symlinked
+	// leaf and a non-regular file, and returns ErrTooLarge (never a
+	// partial buffer) for a lockfile over maxLockfileBytes — so an
+	// oversized lockfile is refused here instead of being streamed
+	// unbounded through the hash as the previous safeio.Open+io.Copy did.
+	raw, err := readLockfile(path)
+	if err != nil {
+		return deptree.LockfileMeta{}, fmt.Errorf("read %s: %w", path, err)
+	}
+
 	// Detect npm package-lock format version BEFORE we commit to
 	// emitting metadata — v1 lockfiles intentionally drop out (see
-	// detectPackageLockVersion for rationale).
+	// packageLockFormat for rationale).
 	format := matcher.format
 	if matcher.basename == "package-lock.json" {
-		v, err := detectPackageLockVersion(path)
-		if err == nil && v == "" {
+		v, verr := packageLockFormat(raw)
+		if verr == nil && v == "" {
 			return deptree.LockfileMeta{}, errSkipLockfile
 		}
-		if err == nil {
+		if verr == nil {
 			format = v
 		}
 	}
@@ -193,41 +240,32 @@ func buildMeta(path string, matcher filenameMatcher) (deptree.LockfileMeta, erro
 	// lockfiles open with a `__metadata:` block; the v1 dep-tree parser
 	// emits garbage on the berry format, so classify it distinctly and
 	// let the parser bail (ParseYarnLock returns nil for berry).
-	if matcher.basename == "yarn.lock" && detectYarnBerry(path) {
+	if matcher.basename == "yarn.lock" && isYarnBerry(raw) {
 		format = "yarn_berry"
 	}
 
-	st, err := os.Stat(path)
-	if err != nil {
-		return deptree.LockfileMeta{}, fmt.Errorf("stat %s: %w", path, err)
-	}
-	// Use safeio.Open so that a symlinked leaf (caught only after the
-	// walker hands us the path) is still refused.
-	f, err := safeio.Open(path)
-	if err != nil {
-		return deptree.LockfileMeta{}, fmt.Errorf("open %s: %w", path, err)
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return deptree.LockfileMeta{}, fmt.Errorf("hash %s: %w", path, err)
-	}
-	sum := hex.EncodeToString(h.Sum(nil))
+	// Drift hash over the capped bytes.  For every legitimate lockfile
+	// (always well under maxLockfileBytes — see the const comment) this
+	// is identical to a whole-file SHA256; oversized files were already
+	// refused by readLockfile above, so the hash is never taken over a
+	// truncated prefix.
+	sum := sha256.Sum256(raw)
 
-	count := declaredCount(path, matcher.basename)
+	count := declaredCountFromBytes(raw, matcher.basename)
 	return deptree.LockfileMeta{
 		Path:                  path,
 		Format:                format,
 		Ecosystem:             matcher.ecosystem,
-		SHA256:                sum,
+		SHA256:                hex.EncodeToString(sum[:]),
 		LastModified:          st.ModTime().UTC(),
 		DeclaredPackagesCount: count,
 		DriftStatus:           "unknown", // server stamps the real value during ingest
 	}, nil
 }
 
-// detectPackageLockVersion inspects the lockfileVersion field of an
-// npm package-lock.json and maps it to the on-wire format enum.
+// packageLockFormat inspects the lockfileVersion field of an npm
+// package-lock.json (already read into raw) and maps it to the on-wire
+// format enum.
 //
 // Returns ("", nil) for v1 (and any other unknown version): the v3
 // contract enum lists only package_lock_v2 / package_lock_v3, and
@@ -235,11 +273,7 @@ func buildMeta(path string, matcher filenameMatcher) (deptree.LockfileMeta, erro
 // emit warnings.  v1 is rare with npm 7+, so dropping it from the
 // payload entirely is the least-noisy outcome.  Callers (buildMeta)
 // translate the empty sentinel into errSkipLockfile.
-func detectPackageLockVersion(path string) (string, error) {
-	raw, err := safeio.ReadFile(path, maxLockfileBytes)
-	if err != nil {
-		return "", err
-	}
+func packageLockFormat(raw []byte) (string, error) {
 	var probe struct {
 		LockfileVersion int `json:"lockfileVersion"`
 	}
@@ -257,21 +291,16 @@ func detectPackageLockVersion(path string) (string, error) {
 	}
 }
 
-// detectYarnBerry reports whether a yarn.lock uses the yarn v2+
-// ("berry") format, identified by a top-level `__metadata:` block that
-// classic v1 lockfiles never contain.  Only the first ~256 bytes are
-// inspected: the comment header plus the `__metadata:` line always sit
-// at the very top of a berry lockfile.  Read failures (symlink,
-// oversize, missing) fall back to "not berry" — buildMeta's safeio.Open
-// will surface a real read error separately.
-func detectYarnBerry(path string) bool {
-	raw, err := safeio.ReadFile(path, maxLockfileBytes)
-	if err != nil {
-		return false
-	}
+// isYarnBerry reports whether a yarn.lock (already read into raw) uses
+// the yarn v2+ ("berry") format, identified by a top-level
+// `__metadata:` block that classic v1 lockfiles never contain.  Only
+// the first yarnBerryProbeBytes bytes are inspected: the comment header
+// plus the `__metadata:` line always sit at the very top of a berry
+// lockfile, so a marker deeper in the file is ignored by design.
+func isYarnBerry(raw []byte) bool {
 	head := raw
-	if len(head) > 256 {
-		head = head[:256]
+	if len(head) > yarnBerryProbeBytes {
+		head = head[:yarnBerryProbeBytes]
 	}
 	for _, line := range strings.Split(string(head), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "__metadata:") {
@@ -281,14 +310,11 @@ func detectYarnBerry(path string) bool {
 	return false
 }
 
-// declaredCount is a quick heuristic per lockfile format.
-// Returns 0 on parse failure rather than propagating an error —
-// drift detection doesn't rely on this field's accuracy.
-func declaredCount(path, basename string) int {
-	raw, err := safeio.ReadFile(path, maxLockfileBytes)
-	if err != nil {
-		return 0
-	}
+// declaredCountFromBytes is a quick heuristic per lockfile format,
+// operating on the already-read bytes.  Returns 0 on parse failure
+// rather than propagating an error — drift detection doesn't rely on
+// this field's accuracy.
+func declaredCountFromBytes(raw []byte, basename string) int {
 	switch basename {
 	case "package-lock.json":
 		var p struct {
@@ -365,8 +391,3 @@ func declaredCount(path, basename string) int {
 	}
 	return 0
 }
-
-// ErrNotFound is returned when a specific lockfile lookup fails. Not
-// used by DiscoverInRoot (which always returns a slice + first error),
-// but exported for callers that want to do single-file probes.
-var ErrNotFound = errors.New("lockfile not found")

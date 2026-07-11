@@ -110,7 +110,7 @@ func TestWriteNuGet_FreshHostFreshConfig(t *testing.T) {
 // Operator-curated NuGet.Config MUST NOT be touched.  The same
 // data-loss guard Maven applies — NuGet.Config commonly carries
 // cleartext package-source credentials in
-// ``<packageSourceCredentials>``.
+// `<packageSourceCredentials>`.
 func TestWriteNuGet_OperatorCuratedSkipped(t *testing.T) {
 	dir := t.TempDir()
 	path := nugetHomeOverride(t, dir)
@@ -305,7 +305,7 @@ func TestWriteNuGet_NilMapRejected(t *testing.T) {
 }
 
 // XML-significant characters in the endpoint URL must be escaped
-// (URLs legitimately contain ``&`` in query strings).  Without
+// (URLs legitimately contain `&` in query strings).  Without
 // escaping the rendered NuGet.Config would be invalid XML and
 // NuGet would refuse to load it.
 func TestWriteNuGet_XMLEscapesEndpoint(t *testing.T) {

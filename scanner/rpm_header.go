@@ -1,13 +1,18 @@
 package scanner
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"fmt"
+)
 
 // RPM header tag constants (from rpm/rpmtag.h).
 const (
 	rpmTagVersion   = 1001
 	rpmTagRelease   = 1002
+	rpmTagEpoch     = 1003
 	rpmTagLicense   = 1014
 	rpmTagSourceRPM = 1044
+	rpmTypeInt32    = 4 // RPM_INT32_TYPE
 	rpmTypeString   = 6 // RPM_STRING_TYPE
 
 	// rpmdb.sqlite header blob starts with nindex + hsize (no file magic).
@@ -84,13 +89,26 @@ func parseRPMHeader(blob []byte) (string, string, string) {
 	storeStart := indexEnd
 
 	var version, release, license, sourceRPM string
+	var epoch uint32
 
 	for i := 0; i < nindex; i++ {
 		base := rpmBlobHeaderSize + i*rpmEntrySize
 		tag := binary.BigEndian.Uint32(blob[base : base+4])
 		typ := binary.BigEndian.Uint32(blob[base+4 : base+8])
 		offset := int(binary.BigEndian.Uint32(blob[base+8 : base+12]))
-		// count at base+12 not needed for STRING type
+		// count at base+12 not needed for STRING/INT32-scalar types
+
+		// EPOCH is stored as a big-endian INT32 in the data store, not a
+		// null-terminated string.  Read it explicitly so epoch-qualified
+		// versions ("32:9.16.23-11.el9") match the server's EVR splitter
+		// and epoch-scoped OSV advisories (e.g. bind on RHEL 9).
+		if tag == rpmTagEpoch && typ == rpmTypeInt32 {
+			if offset < 0 || storeStart+offset+4 > len(blob) {
+				continue
+			}
+			epoch = binary.BigEndian.Uint32(blob[storeStart+offset : storeStart+offset+4])
+			continue
+		}
 
 		if typ != rpmTypeString {
 			continue
@@ -134,6 +152,11 @@ func parseRPMHeader(blob []byte) (string, string, string) {
 		versionStr = version
 		if release != "" {
 			versionStr = version + "-" + release
+		}
+		// Epoch-qualify the EVR when a nonzero epoch is present so the
+		// value matches the server's "epoch:version-release" splitter.
+		if epoch > 0 {
+			versionStr = fmt.Sprintf("%d:%s", epoch, versionStr)
 		}
 	}
 

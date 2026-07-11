@@ -3,6 +3,7 @@ package supplychain
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -44,10 +45,13 @@ var trustedCentralURLs = []string{
 //
 // One signal is emitted per _remote.repositories file that contains at
 // least one untrusted entry — not one per line — to avoid signal flooding.
-func DetectUntrustedRepos(m2Dir string) ([]deptree.SupplyChainSignal, error) {
+func DetectUntrustedRepos(ctx context.Context, m2Dir string) ([]deptree.SupplyChainSignal, error) {
 	var signals []deptree.SupplyChainSignal
 
 	walkErr := filepath.WalkDir(m2Dir, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return fs.SkipAll
+		}
 		if err != nil {
 			return nil
 		}

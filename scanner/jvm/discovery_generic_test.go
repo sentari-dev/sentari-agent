@@ -9,7 +9,7 @@ import (
 
 // TestDiscoverGeneric_OptAndDirect walks a fixture tree redirected at
 // /opt, /usr/share/java-style layouts and verifies the discoverer
-// emits an Environment for every ``lib`` / ``libs`` subdirectory it
+// emits an Environment for every `lib` / `libs` subdirectory it
 // finds under the parents.  Overrides the package-level root slices
 // via t.Cleanup-guarded test hooks so nothing on the CI host's real
 // filesystem leaks into the result.

@@ -3,13 +3,13 @@ package jvm
 import "github.com/sentari-dev/sentari-agent/scanner"
 
 // Tomcat — the Apache servlet container.  Layout markers: Tomcat
-// always ships ``bin/catalina.sh`` on POSIX + ``bin/catalina.bat`` on
+// always ships `bin/catalina.sh` on POSIX + `bin/catalina.bat` on
 // Windows.  Either alone is sufficient; checking for both is
 // redundant (distro packaging strips whichever doesn't apply).
 //
 // Walking the install root recursively via scanDirTree picks up:
-//   - ``lib/*.jar`` (Tomcat's own library dir)
-//   - ``webapps/**/WEB-INF/lib/*.jar`` (deployed applications' libs)
+//   - `lib/*.jar` (Tomcat's own library dir)
+//   - `webapps/**/WEB-INF/lib/*.jar` (deployed applications' libs)
 //
 // No per-server walker needed; the shared scanDirTree handles both.
 //

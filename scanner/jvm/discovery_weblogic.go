@@ -15,8 +15,8 @@ import "github.com/sentari-dev/sentari-agent/scanner"
 // the current WL_HOME check to misbehave.  Previously including them
 // with the WL_HOME marker produced only silent refusals.
 //
-// Marker: WebLogic's classic entry script ``server/bin/startWebLogic.sh``
-// is present in every 10.3+ install.  ``server/lib/weblogic.jar`` is
+// Marker: WebLogic's classic entry script `server/bin/startWebLogic.sh`
+// is present in every 10.3+ install.  `server/lib/weblogic.jar` is
 // the definitive binary marker.  We check for either.
 // weblogicWellKnown — see note in tomcatWellKnown.
 var weblogicWellKnown = map[string][]string{

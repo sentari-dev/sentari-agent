@@ -11,7 +11,7 @@ import (
 // TestReadCappedFile_RefusesSymlink — Fix #3.  readCappedFile is the
 // shared metadata reader behind cache-id / mount-id / image-config /
 // container-config reads.  It must refuse a symlinked target so a
-// malicious package planting ``cache-id -> /etc/shadow`` can't
+// malicious package planting `cache-id -> /etc/shadow` can't
 // exfiltrate host content into a container-tagged record, and must
 // avoid the os.Stat+os.ReadFile TOCTOU.  Routing through safeio gives
 // us both (O_NOFOLLOW + fd-based stat).

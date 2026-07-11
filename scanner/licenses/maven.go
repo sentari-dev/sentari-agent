@@ -1,6 +1,7 @@
 package licenses
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io/fs"
@@ -21,9 +22,12 @@ const maxPOMBytes = 1 << 20 // 1 MiB
 // pom's <licenses><license><name> entries. Confidence 0.9 — POM
 // licenses are author-declared and aren't validated SPDX, but they're
 // the canonical source for Maven projects.
-func ExtractMaven(m2Dir string) ([]deptree.LicenseEvidence, error) {
+func ExtractMaven(ctx context.Context, m2Dir string) ([]deptree.LicenseEvidence, error) {
 	var out []deptree.LicenseEvidence
 	walkErr := filepath.WalkDir(m2Dir, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return fs.SkipAll
+		}
 		if err != nil {
 			return nil
 		}
@@ -47,7 +51,7 @@ func ExtractMaven(m2Dir string) ([]deptree.LicenseEvidence, error) {
 			return nil
 		}
 		var pom mavenPomDoc
-		if err := xml.Unmarshal(raw, &pom); err != nil {
+		if err := xml.Unmarshal(stripBOM(raw), &pom); err != nil {
 			return nil
 		}
 		// Skip POMs missing either coordinate half.  A POM that inherits

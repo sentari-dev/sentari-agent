@@ -7,12 +7,12 @@ import "github.com/sentari-dev/sentari-agent/scanner"
 // on-disk layout because Payara started as a GlassFish fork and
 // never diverged structurally.
 //
-// Env vars: GlassFish ships scripts that set ``GLASSFISH_HOME``;
-// Payara's scripts set ``PAYARA_HOME``.  ``AS_INSTALL`` is the
+// Env vars: GlassFish ships scripts that set `GLASSFISH_HOME`;
+// Payara's scripts set `PAYARA_HOME`.  `AS_INSTALL` is the
 // historic variable name from Sun days — still honoured by many
 // operator scripts.  Single discoverer covers all three.
 //
-// Marker: ``bin/asadmin`` is unique to the GlassFish family (the
+// Marker: `bin/asadmin` is unique to the GlassFish family (the
 // admin CLI has had the same binary name since GlassFish v2).
 //
 // The scanDirTree walk from the install root picks up:
@@ -20,6 +20,7 @@ import "github.com/sentari-dev/sentari-agent/scanner"
 //   - lib/*.jar
 //   - domains/*/applications/**/*.{jar,war,ear}
 //   - domains/*/lib/*.jar
+//
 // glassfishWellKnown — see note in tomcatWellKnown.
 var glassfishWellKnown = map[string][]string{
 	"linux":  {"/opt"},

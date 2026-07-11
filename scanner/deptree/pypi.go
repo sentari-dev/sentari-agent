@@ -21,11 +21,32 @@ import (
 // lockfile is refused before any byte reaches a parser.
 const maxLockfileBytes = 50 << 20 // 50 MiB
 
+// pypiSyntheticRoot is the sentinel parent used when a lockfile carries
+// no real project package (poetry.lock) and one must be synthesized so
+// every top-level dep is anchored to a single root. It matches the
+// sentinel the other pypi emitters already use.
+const pypiSyntheticRoot = "(unknown)"
+
 // pypiPkgInfo is the per-package summary used internally by the PyPI
-// graph builders. Names in the map keys are lowercased.
+// graph builders. Names in the map keys are PEP 503-normalized.
 type pypiPkgInfo struct {
 	version string
 	deps    []string
+}
+
+// pep503SepRe matches any run of the PEP 503 name separators (-, _, .).
+var pep503SepRe = regexp.MustCompile(`[-_.]+`)
+
+// normalizePyPIName applies PEP 503 name normalization: lowercase, then
+// collapse every run of "-", "_", or "." into a single "-". This is what
+// lets a requirements/lock name like "Typing_Extensions" join against a
+// dist-info / dependency reference of "typing-extensions" — plain
+// strings.ToLower left the underscore/hyphen/dot mismatch in place and
+// silently broke the edge. deptree cannot import scanner.normalizePEP503
+// (that lives in the separate `scanner` package), so this small helper
+// mirrors it locally.
+func normalizePyPIName(name string) string {
+	return pep503SepRe.ReplaceAllString(strings.ToLower(name), "-")
 }
 
 // ParseUvLock reads uv.lock (TOML) and emits dep-graph edges.
@@ -47,11 +68,11 @@ func ParseUvLock(path string) ([]DepEdge, error) {
 
 	pkgs := map[string]pypiPkgInfo{}
 	for _, p := range lock.Packages {
-		name := strings.ToLower(p.Name)
+		name := normalizePyPIName(p.Name)
 		var deps []string
 		for _, d := range p.Dependencies {
 			if d.Name != "" {
-				deps = append(deps, strings.ToLower(d.Name))
+				deps = append(deps, normalizePyPIName(d.Name))
 			}
 		}
 		pkgs[name] = pypiPkgInfo{version: p.Version, deps: deps}
@@ -79,6 +100,26 @@ func ParseUvLock(path string) ([]DepEdge, error) {
 	return buildPypiEdges(pkgs, rootName, rootVersion), nil
 }
 
+// pickPypiRootDirMatch reports the candidate whose name matches the
+// lockfile's containing directory name (case-insensitive, PEP 503
+// normalized), identifying a genuine self-referential project root.
+// The bool is false when no candidate matches the directory name.
+func pickPypiRootDirMatch(roots []string, lockPath string) (string, bool) {
+	dirName := strings.ToLower(filepath.Base(filepath.Dir(lockPath)))
+	if dirName != "" && dirName != "." && dirName != string(filepath.Separator) {
+		// roots carry PEP 503-normalized names, so normalize the directory
+		// name the same way before comparing (e.g. dir "my_app" matches a
+		// root normalized to "my-app").
+		normDir := normalizePyPIName(dirName)
+		for _, r := range roots {
+			if r == normDir {
+				return r, true
+			}
+		}
+	}
+	return "", false
+}
+
 // pickPypiRoot chooses the project root among several no-incoming-edge
 // candidates.  Candidates are pre-sorted, so roots[0] is the
 // deterministic alphabetical default.  When the lockfile's containing
@@ -87,13 +128,8 @@ func ParseUvLock(path string) ([]DepEdge, error) {
 // e.g. /srv/myapp/uv.lock with candidates {aaa-lib, myapp} resolves to
 // "myapp" rather than the alphabetically-first "aaa-lib".
 func pickPypiRoot(roots []string, lockPath string) string {
-	dirName := strings.ToLower(filepath.Base(filepath.Dir(lockPath)))
-	if dirName != "" && dirName != "." && dirName != string(filepath.Separator) {
-		for _, r := range roots {
-			if strings.ToLower(r) == dirName {
-				return r
-			}
-		}
+	if r, ok := pickPypiRootDirMatch(roots, lockPath); ok {
+		return r
 	}
 	return roots[0]
 }
@@ -112,10 +148,10 @@ func ParsePoetryLock(path string) ([]DepEdge, error) {
 	}
 	pkgs := map[string]pypiPkgInfo{}
 	for _, p := range lock.Packages {
-		name := strings.ToLower(p.Name)
+		name := normalizePyPIName(p.Name)
 		var deps []string
 		for depName := range p.Dependencies {
-			deps = append(deps, strings.ToLower(depName))
+			deps = append(deps, normalizePyPIName(depName))
 		}
 		pkgs[name] = pypiPkgInfo{version: p.Version, deps: deps}
 	}
@@ -133,13 +169,32 @@ func ParsePoetryLock(path string) ([]DepEdge, error) {
 	}
 	sort.Strings(roots)
 	if len(roots) == 0 {
-		// poetry.lock typically does NOT contain the project itself.
-		// Fall back to all-direct emission with an unknown synthetic root.
-		return buildPypiAllDirect(pkgs, "(unknown)", ""), nil
+		// No no-incoming-edge candidate — the whole graph is a cycle, so
+		// no root is derivable. Fall back to all-direct emission under an
+		// unknown synthetic root.
+		return buildPypiAllDirect(pkgs, pypiSyntheticRoot, ""), nil
 	}
-	rootName := pickPypiRoot(roots, path)
-	rootVersion := pkgs[rootName].version
-	return buildPypiEdges(pkgs, rootName, rootVersion), nil
+	// A poetry.lock (unlike uv.lock) does NOT contain the project package
+	// itself: it lists only resolved deps, each carrying its own
+	// [package.dependencies]. Therefore EVERY no-incoming-edge candidate is
+	// a real top-level direct dep — not a set of rival roots to elect one
+	// from. Electing a single root (the old behavior) silently dropped
+	// every sibling top-level dep and its entire subtree.
+	//
+	// Exception: when the lockfile's directory name matches a candidate,
+	// that candidate is a genuine self-referential project root (the
+	// dir-name tie-break heuristic); BFS from it directly, preserving the
+	// uv-style single-root semantics.
+	if realRoot, ok := pickPypiRootDirMatch(roots, path); ok {
+		return buildPypiEdges(pkgs, realRoot, pkgs[realRoot].version), nil
+	}
+	// Otherwise synthesize ONE virtual root whose direct children are ALL
+	// the top-level candidates (depth 1), then let buildPypiEdges BFS each
+	// subtree so transitives receive correct root-anchored depth>=2 paths.
+	rootDeps := append([]string{}, roots...)
+	sort.Strings(rootDeps)
+	pkgs[pypiSyntheticRoot] = pypiPkgInfo{version: "", deps: rootDeps}
+	return buildPypiEdges(pkgs, pypiSyntheticRoot, ""), nil
 }
 
 // ParsePipfileLock reads Pipfile.lock (JSON). All packages are treated
@@ -221,8 +276,23 @@ func ParsePipfileLock(path string) ([]DepEdge, error) {
 // permit it and hand-written requirements files commonly use it.
 var requirementsLineRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._\-]*(?:\[[^\]]*\])?)\s*((?:===|==|!=|~=|>=|<=|>|<)\s*[^;#\s]*)?`)
 
-// ParseRequirementsTxt reads a requirements.txt and emits direct edges
-// only. Hash pins (--hash=...) and includes (-r other.txt) are ignored.
+// maxRequirementsIncludeDepth bounds `-r`/`-c` include recursion so a
+// self-referential or maliciously deep include chain cannot drive the
+// parser into a runaway loop or stack blow-up.  Layered requirements
+// layouts are shallow in practice (a root that pulls base/dev/test), so
+// a cap of 8 — matching maxReactorDepth for the Maven reactor walk —
+// leaves ample headroom while still terminating on abuse.  A visited-set
+// additionally short-circuits cycles before the depth cap is reached.
+const maxRequirementsIncludeDepth = 8
+
+// ParseRequirementsTxt reads a requirements.txt and emits direct edges.
+// `-r`/`--requirement` and `-c`/`--constraint` includes are followed
+// (resolved relative to the including file's directory) and their edges
+// are merged in, so a layered file that is just `-r requirements/base.txt`
+// still yields the base file's dependencies.  Other option lines
+// (`--hash=...`, `--index-url`, `-e`, …) are ignored, and remote `http(s)`
+// include targets are skipped (the agent never fetches over the network
+// for data).
 //
 // All PEP 440 specifiers are accepted. Pinned (`==` / `===`) edges
 // carry a concrete version in ChildVersion. Range / compatible-release
@@ -236,6 +306,70 @@ var requirementsLineRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._\-]*(?:\[[
 // Extras (`pkg[async]`) are stripped from the emitted name; environment
 // markers (`; python_version >= "3.8"`) are dropped from the line.
 func ParseRequirementsTxt(path string) ([]DepEdge, error) {
+	visited := map[string]bool{}
+	edges, err := collectRequirementsEdges(path, visited, 0)
+	if err != nil {
+		return edges, err
+	}
+	// Sort once at the top level so merged-in include edges share the
+	// single deterministic ChildName ordering the callers rely on.
+	sort.Slice(edges, func(i, j int) bool {
+		return edges[i].ChildName < edges[j].ChildName
+	})
+	return edges, nil
+}
+
+// requirementIncludePath recognises a pip include directive
+// (`-r`/`--requirement <file>` or `-c`/`--constraint <file>`, in both
+// space- and `=`-separated forms) and returns the raw referenced path.
+// Any other leading-`-` option line yields ("", false) so the caller
+// keeps ignoring it.
+func requirementIncludePath(line string) (string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return "", false
+	}
+	opt := fields[0]
+	var arg string
+	if i := strings.IndexByte(opt, '='); i >= 0 {
+		// `--requirement=base.txt` / `-r=base.txt` form.
+		arg = opt[i+1:]
+		opt = opt[:i]
+	} else if len(fields) >= 2 {
+		arg = fields[1]
+	}
+	switch opt {
+	case "-r", "--requirement", "-c", "--constraint":
+		arg = strings.Trim(strings.TrimSpace(arg), `"'`)
+		if arg == "" {
+			return "", false
+		}
+		return arg, true
+	}
+	return "", false
+}
+
+// collectRequirementsEdges parses one requirements file and recurses into
+// its `-r`/`-c` includes, returning the UNSORTED union of all edges (the
+// public ParseRequirementsTxt sorts once at the top).  visited is keyed
+// by cleaned absolute path to break include cycles; depth is bounded by
+// maxRequirementsIncludeDepth as a second, belt-and-braces guard.
+func collectRequirementsEdges(path string, visited map[string]bool, depth int) ([]DepEdge, error) {
+	if depth > maxRequirementsIncludeDepth {
+		return nil, nil
+	}
+	// Canonicalise for the visited-set so the same file reached via two
+	// different relative includes is only parsed once (safeio refuses
+	// symlinks, so the cleaned abs path is a stable identity here).
+	key := path
+	if abs, aErr := filepath.Abs(path); aErr == nil {
+		key = filepath.Clean(abs)
+	}
+	if visited[key] {
+		return nil, nil
+	}
+	visited[key] = true
+
 	f, err := safeio.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
@@ -264,7 +398,34 @@ func ParseRequirementsTxt(path string) ([]DepEdge, error) {
 			first = false
 		}
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "-") {
+			// `-r`/`-c` includes are followed; every other option line
+			// (--hash, --index-url, -e, ...) is ignored as before.
+			inc, ok := requirementIncludePath(line)
+			if !ok {
+				continue
+			}
+			// Never fetch a remote include over the network — the agent
+			// reads local files only (air-gap / no-telemetry charter).
+			if strings.Contains(inc, "://") {
+				continue
+			}
+			target := inc
+			if !filepath.IsAbs(target) {
+				// Resolve relative to the INCLUDING file's directory, per
+				// pip semantics.
+				target = filepath.Join(filepath.Dir(path), target)
+			}
+			// Best-effort: a missing/unreadable include (or one already
+			// visited / past the depth cap) contributes no edges but does
+			// not fail the whole parse.
+			childEdges, cErr := collectRequirementsEdges(target, visited, depth+1)
+			if cErr == nil {
+				edges = append(edges, childEdges...)
+			}
 			continue
 		}
 		// Drop inline " #" comments.
@@ -276,6 +437,23 @@ func ParseRequirementsTxt(path string) ([]DepEdge, error) {
 			line = strings.TrimSpace(line[:i])
 		}
 		if line == "" {
+			continue
+		}
+		// Skip lines whose leading token is a direct URL or VCS reference
+		// ("git+https://...", a bare "https://.../foo-1.0.tar.gz", etc.).
+		// The name regex would otherwise capture the URL/VCS scheme token
+		// ("git", "https") as a phantom package name. The leading-token
+		// check (rather than "contains ://") preserves the documented
+		// "pkg @ git+https://..." form, whose real name precedes the URL.
+		firstTok := line
+		if i := strings.IndexAny(firstTok, " \t"); i >= 0 {
+			firstTok = firstTok[:i]
+		}
+		if strings.Contains(firstTok, "://") ||
+			strings.HasPrefix(firstTok, "git+") ||
+			strings.HasPrefix(firstTok, "hg+") ||
+			strings.HasPrefix(firstTok, "svn+") ||
+			strings.HasPrefix(firstTok, "bzr+") {
 			continue
 		}
 		m := requirementsLineRe.FindStringSubmatch(line)
@@ -309,14 +487,14 @@ func ParseRequirementsTxt(path string) ([]DepEdge, error) {
 		}
 
 		edges = append(edges, DepEdge{
-			ParentName:    rootName,
-			ParentVersion: rootVersion,
-			ChildName:     emitName,
-			ChildVersion:  version,
-			Ecosystem:     "pypi",
-			Type:          "direct",
-			Scope:         "",
-			Depth:         1,
+			ParentName:       rootName,
+			ParentVersion:    rootVersion,
+			ChildName:        emitName,
+			ChildVersion:     version,
+			Ecosystem:        "pypi",
+			Type:             "direct",
+			Scope:            "",
+			Depth:            1,
 			IntroducedByPath: []string{rootName, emitName},
 			// resolved=false is reserved by the v3 contract for Maven
 			// BOM-imported deps; an unpinned pypi requirement is still a
@@ -328,22 +506,34 @@ func ParseRequirementsTxt(path string) ([]DepEdge, error) {
 	if err := scanner.Err(); err != nil {
 		return edges, err
 	}
-	sort.Slice(edges, func(i, j int) bool {
-		return edges[i].ChildName < edges[j].ChildName
-	})
+	// Unsorted on purpose — the public ParseRequirementsTxt sorts the
+	// merged edge set (own + included) once, at the top level.
 	return edges, nil
 }
 
 // buildPypiEdges runs BFS from rootName through the (name → deps) graph
 // and emits edges per the standard direct/transitive convention.
+//
+// Each emitted edge carries a PER-EDGE introduced_by_path and depth:
+// the path is the BFS resolution path to the emitting parent plus the
+// child, and depth is len(path)-1.  A child with multiple parents thus
+// gets a distinct, parent-anchored path (and depth) on each of its
+// edges — the earlier version reused the child's single BFS depth/path
+// on every edge, which broke the v3 invariant depth==len(path)-1 for
+// all but one parent.  Parents that are unreachable from the chosen
+// root (dev/optional subgraphs, multi-root leftovers, orphans) are
+// dropped rather than emitted with a fabricated depth-0 / 2-element
+// path.
+// rootVersion is accepted for signature symmetry with buildPypiAllDirect
+// but is intentionally unused here: parent_version for every emitted edge
+// (root or not) is read from the pkgs map.
 func buildPypiEdges(pkgs map[string]pypiPkgInfo, rootName, rootVersion string) []DepEdge {
-	_ = rootVersion // parent_version for non-root parents comes from pkgs map
 	type queueItem struct {
-		name  string
-		path  []string
-		depth int
+		name string
+		path []string
 	}
-	depthByName := map[string]int{rootName: 0}
+	// pathByName holds ONE root→node resolution path per reachable node.
+	// depth is always len(path)-1, so it is derived, never stored.
 	pathByName := map[string][]string{rootName: {rootName}}
 	queue := []queueItem{}
 
@@ -351,12 +541,11 @@ func buildPypiEdges(pkgs map[string]pypiPkgInfo, rootName, rootVersion string) [
 	rootDeps := append([]string{}, pkgs[rootName].deps...)
 	sort.Strings(rootDeps)
 	for _, child := range rootDeps {
-		if _, seen := depthByName[child]; seen {
+		if _, seen := pathByName[child]; seen {
 			continue
 		}
-		depthByName[child] = 1
 		pathByName[child] = []string{rootName, child}
-		queue = append(queue, queueItem{name: child, path: pathByName[child], depth: 1})
+		queue = append(queue, queueItem{name: child, path: pathByName[child]})
 	}
 	for len(queue) > 0 {
 		head := queue[0]
@@ -364,14 +553,12 @@ func buildPypiEdges(pkgs map[string]pypiPkgInfo, rootName, rootVersion string) [
 		children := append([]string{}, pkgs[head.name].deps...)
 		sort.Strings(children)
 		for _, child := range children {
-			if _, seen := depthByName[child]; seen {
+			if _, seen := pathByName[child]; seen {
 				continue
 			}
-			childPath := append([]string{}, head.path...)
-			childPath = append(childPath, child)
-			depthByName[child] = head.depth + 1
+			childPath := append(append([]string{}, head.path...), child)
 			pathByName[child] = childPath
-			queue = append(queue, queueItem{name: child, path: childPath, depth: head.depth + 1})
+			queue = append(queue, queueItem{name: child, path: childPath})
 		}
 	}
 
@@ -383,6 +570,10 @@ func buildPypiEdges(pkgs map[string]pypiPkgInfo, rootName, rootVersion string) [
 	sort.Strings(parents)
 	var edges []DepEdge
 	for _, parent := range parents {
+		parentPath, reached := pathByName[parent]
+		if !reached {
+			continue // parent not reachable from root — drop its edges
+		}
 		info := pkgs[parent]
 		children := append([]string{}, info.deps...)
 		sort.Strings(children)
@@ -391,6 +582,7 @@ func buildPypiEdges(pkgs map[string]pypiPkgInfo, rootName, rootVersion string) [
 			if parent == rootName {
 				edgeType = "direct"
 			}
+			childPath := append(append([]string{}, parentPath...), child)
 			edges = append(edges, DepEdge{
 				ParentName:       parent,
 				ParentVersion:    info.version,
@@ -399,8 +591,8 @@ func buildPypiEdges(pkgs map[string]pypiPkgInfo, rootName, rootVersion string) [
 				Ecosystem:        "pypi",
 				Type:             edgeType,
 				Scope:            "",
-				Depth:            depthByName[child],
-				IntroducedByPath: SafePath(pathByName[child], parent, child),
+				Depth:            len(childPath) - 1,
+				IntroducedByPath: childPath,
 				Resolved:         true,
 			})
 		}

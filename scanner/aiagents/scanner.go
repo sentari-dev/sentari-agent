@@ -15,13 +15,13 @@
 // requests 2.31.0?"
 //
 // Design.  This is a RootScanner plugin: discovery is driven by
-// reading fixed well-known config paths (``~/.cursor/mcp.json`` etc.)
+// reading fixed well-known config paths (`~/.cursor/mcp.json` etc.)
 // rather than by the shared filesystem walk.  That keeps the
 // discovery cost bounded — we never walk entire home directories
 // hunting for config, only stat the known paths.
 //
 // Each AI artefact is emitted as a PackageRecord with
-// ``env_type=ai_agent``.  Server-side ecosystem mapping treats
+// `env_type=ai_agent`.  Server-side ecosystem mapping treats
 // ai_agent records as a distinct partition so CVE correlation
 // doesn't try to join them against PyPI or Maven advisories.
 package aiagents
@@ -54,7 +54,7 @@ type Scanner struct{}
 
 // EnvType reports the env_type this plugin emits on every
 // PackageRecord.  Every server-side mapping from env_type to
-// ecosystem treats ``ai_agent`` as a distinct bucket.
+// ecosystem treats `ai_agent` as a distinct bucket.
 func (Scanner) EnvType() string { return EnvAIAgent }
 
 // DiscoverAll enumerates every AI-adjacent surface the agent
@@ -63,7 +63,7 @@ func (Scanner) EnvType() string { return EnvAIAgent }
 //   - MCP server configurations (Claude Desktop, Cursor, Claude
 //     Code CLI) — one Environment per config file that exists.
 //   - Claude Code agents + skills + plugins directories under
-//     ``~/.claude``.
+//     `~/.claude`.
 //   - VS Code + Cursor extensions folder, one Environment per
 //     install root (each extension inside becomes a record at
 //     Scan() time).
@@ -74,7 +74,7 @@ func (Scanner) EnvType() string { return EnvAIAgent }
 //   - "Autonomous install markers" — pip installs attributable
 //     to an AI agent via env-var context at install time.
 //     Requires instrumenting pip, which Sentari refuses to do
-//     (zero binary execution).  A near-equivalent detective rule
+//     (ADR 0003).  A near-equivalent detective rule
 //     (install_age combined with a known-AI-agent env-var
 //     correlation at scan time) is a follow-up.
 func (Scanner) DiscoverAll(ctx context.Context) ([]scanner.Environment, []scanner.ScanError) {

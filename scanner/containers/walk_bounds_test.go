@@ -1,6 +1,7 @@
 package containers
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 // TestWalkLayer_DepthCap — Fix #1.  walkLayer must stop descending
 // past a finite depth cap so a hostile image with a pathologically
 // deep directory chain can't exhaust CPU/memory.  We build a chain
-// ``d0/d1/.../dN/leaf.txt`` deeper than the cap and assert that
+// `d0/d1/.../dN/leaf.txt` deeper than the cap and assert that
 // entries beyond the cap are NOT emitted, while shallow entries are.
 func TestWalkLayer_DepthCap(t *testing.T) {
 	root := t.TempDir()
@@ -36,7 +37,8 @@ func TestWalkLayer_DepthCap(t *testing.T) {
 
 	var maxRelDepth int
 	emitted := map[string]bool{}
-	err := walkLayer(root, func(relPath string, d fs.DirEntry) error {
+	entries := 0
+	_, err := walkLayer(context.Background(), root, &entries, func(relPath string, d fs.DirEntry) error {
 		emitted[relPath] = true
 		seps := 0
 		for _, c := range relPath {

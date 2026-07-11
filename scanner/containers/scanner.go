@@ -21,25 +21,25 @@ const (
 )
 
 // ContainerTarget is one unit of work the container scanner produces
-// for the orchestrator.  Images yield targets with ``ContainerID == ""``;
-// running containers yield targets with ``ContainerID`` set and
-// ``MergedRootFS`` that includes the container's upper-dir as the top
-// layer (so ``pip install`` etc. inside a running container surfaces).
+// for the orchestrator.  Images yield targets with `ContainerID == ""`;
+// running containers yield targets with `ContainerID` set and
+// `MergedRootFS` that includes the container's upper-dir as the top
+// layer (so `pip install` etc. inside a running container surfaces).
 type ContainerTarget struct {
 	// Runtime identifies the engine that produced this target.
 	Runtime Runtime
-	// ImageID is the OCI image digest (``sha256:...``).  Present for
+	// ImageID is the OCI image digest (`sha256:...`).  Present for
 	// both image-only targets and running-container targets (the
 	// container was started from this image).
 	ImageID string
-	// ImageTags lists every tag the engine has for ``ImageID``
-	// locally (``python:3.12``, ``docker.io/library/python:3.12``,
+	// ImageTags lists every tag the engine has for `ImageID`
+	// locally (`python:3.12`, `docker.io/library/python:3.12`,
 	// etc.).  May be empty for dangling images.
 	ImageTags []string
 	// ContainerID is the container UUID — empty for image-only
 	// targets.  Present for running-container targets.
 	ContainerID string
-	// ContainerName is the engine-assigned name (``happy_curie``).
+	// ContainerName is the engine-assigned name (`happy_curie`).
 	// Empty for image-only targets.
 	ContainerName string
 	// MergedRootFS is the stacked view the Phase-A walker will
@@ -53,31 +53,31 @@ type ContainerTarget struct {
 // production defaults": every known runtime is probed, discovery
 // errors are collected but never fatal.
 type Config struct {
-	// DockerRoot overrides ``/var/lib/docker``.  Tests set this to a
+	// DockerRoot overrides `/var/lib/docker`.  Tests set this to a
 	// fixture tree; production reads the real path.  Empty string =
 	// use the default.
 	DockerRoot string
-	// ContainerdRoot overrides ``/var/lib/containerd``.
+	// ContainerdRoot overrides `/var/lib/containerd`.
 	ContainerdRoot string
 	// PodmanRoots overrides the podman storage paths; first match
-	// wins.  Defaults to ``[/var/lib/containers/storage]`` plus the
-	// caller's rootless ``$HOME/.local/share/containers/storage``
+	// wins.  Defaults to `[/var/lib/containers/storage]` plus the
+	// caller's rootless `$HOME/.local/share/containers/storage`
 	// when HOME is readable.  Tests pass a single fixture path.
 	PodmanRoots []string
 	// CRIORoot overrides the CRI-O storage root (same layout as
-	// Podman; defaults to ``/var/lib/containers/storage`` same as
+	// Podman; defaults to `/var/lib/containers/storage` same as
 	// Podman's system path, so we skip this if PodmanRoots already
 	// covered it).
 	CRIORoot string
 	// Now is injected for deterministic timestamps in discovery
-	// logs.  ``nil`` = use time.Now.
+	// logs.  `nil` = use time.Now.
 	Now func() time.Time
 }
 
 // Scanner performs runtime discovery across Docker, containerd,
-// Podman, and CRI-O, and hands the resulting ``ContainerTarget`` set
-// to the orchestrator.  It is NOT a scanner.Scanner plugin — by
-// design for the container scanner.  The
+// Podman, and CRI-O, and hands the resulting `ContainerTarget` set
+// to the orchestrator.  It is NOT a scanner.Scanner plugin — see the
+// Sprint-17 container-scanner plan §4 for the rationale.  The
 // orchestrator invokes DiscoverTargets() once per scan cycle,
 // then for each target opens a sub-scan with the merged rootfs as
 // the scan root so the existing plugin registry handles it normally.
@@ -99,7 +99,7 @@ func NewScanner(cfg Config) *Scanner {
 // as a ScanError so operators can audit what was skipped and why.
 //
 // Context cancellation is respected at the per-runtime boundary;
-// each discoverer is expected to check ``ctx.Err()`` during its
+// each discoverer is expected to check `ctx.Err()` during its
 // filesystem walk if it does heavy work.
 func (s *Scanner) DiscoverTargets(ctx context.Context) ([]ContainerTarget, []scanner.ScanError) {
 	var (
@@ -184,9 +184,9 @@ func (s *Scanner) nowFn() func() time.Time {
 	return func() time.Time { return time.Now().UTC() }
 }
 
-// dedupeTargets removes duplicate ``ContainerTarget``s that can
+// dedupeTargets removes duplicate `ContainerTarget`s that can
 // arise when two runtimes share a storage path (Podman + CRI-O at
-// ``/var/lib/containers/storage``) or when a rootless + rootful
+// `/var/lib/containers/storage`) or when a rootless + rootful
 // Podman surface the same image.  Uniqueness key is
 // (Runtime, ImageID, ContainerID).
 func dedupeTargets(ts []ContainerTarget) []ContainerTarget {
