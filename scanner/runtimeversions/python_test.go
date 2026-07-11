@@ -1,6 +1,7 @@
 package runtimeversions
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -52,6 +53,61 @@ func TestDetectPythonInDir_versionInfoBeforeVersion(t *testing.T) {
 	}
 }
 
+// TestDetectPythonInDir_versionInfoOnly covers uv- and PyPA-virtualenv-
+// created venvs, which write ONLY a `version_info` key (no plain
+// `version`). The bodies are copied verbatim from scanner/uv_test.go's
+// fixtures so the two suites stay in lock-step. Both shapes must yield a
+// runtime, and CPython's `3.11.0.final.0`-style value must normalise to a
+// clean X.Y.Z for server EOL correlation.
+func TestDetectPythonInDir_versionInfoOnly(t *testing.T) {
+	cases := []struct {
+		name        string
+		body        string
+		wantVersion string
+		wantCycle   string
+	}{
+		{
+			name:        "uv-managed venv",
+			body:        "home = /usr/bin\nimplementation = CPython\nuv = 0.4.18\nversion_info = 3.12.4\n",
+			wantVersion: "3.12.4",
+			wantCycle:   "3.12",
+		},
+		{
+			name:        "plain cpython venv",
+			body:        "home = /usr/bin\nimplementation = CPython\nversion_info = 3.11.0\ninclude-system-site-packages = false\n",
+			wantVersion: "3.11.0",
+			wantCycle:   "3.11",
+		},
+		{
+			name:        "cpython version_info with release-level tag",
+			body:        "home = /usr/bin\nimplementation = CPython\nversion_info = 3.12.4.final.0\n",
+			wantVersion: "3.12.4",
+			wantCycle:   "3.12",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "pyvenv.cfg"), []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := DetectPythonInDir(dir)
+			if err != nil {
+				t.Fatalf("detect failed: %v", err)
+			}
+			if got == nil {
+				t.Fatal("expected an InstalledRuntime, got nil")
+			}
+			if got.Version != tc.wantVersion {
+				t.Errorf("Version = %q, want %q", got.Version, tc.wantVersion)
+			}
+			if got.Cycle != tc.wantCycle {
+				t.Errorf("Cycle = %q, want %q", got.Cycle, tc.wantCycle)
+			}
+		})
+	}
+}
+
 func TestDetectPythonInDir_noPyvenvCfg(t *testing.T) {
 	dir := t.TempDir()
 	got, err := DetectPythonInDir(dir)
@@ -100,7 +156,7 @@ func TestDetectAllPythons_respectsDepthCap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := DetectAllPythons([]string{root})
+	got := DetectAllPythons(context.Background(), []string{root})
 	versions := make(map[string]bool)
 	for _, r := range got {
 		versions[r.Version] = true

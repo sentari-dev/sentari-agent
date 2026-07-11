@@ -1,6 +1,68 @@
 package scanner
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"sort"
+	"testing"
+)
+
+// TestDetectWindowsStorePythons proves the Microsoft Store Python
+// detector maps a `PythonSoftwareFoundation.Python.<X.Y>_<pub>` package
+// dir under %LOCALAPPDATA%\Packages to a python <X.Y> runtime.  It runs
+// on any OS: detectWindowsStorePythons takes the LOCALAPPDATA root as a
+// parameter and reads only directory names, so a faked layout in a temp
+// dir exercises the full path without needing Windows.
+func TestDetectWindowsStorePythons(t *testing.T) {
+	local := t.TempDir()
+	pkgs := filepath.Join(local, "Packages")
+	for _, name := range []string{
+		// Two real Store interpreters (different series).
+		"PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0",
+		"PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0",
+		// Non-versioned Store sibling — must be ignored (no X.Y).
+		"PythonSoftwareFoundation.Python.Launcher_qbz5n2kfra8p0",
+		// Unrelated UWP package — ignored.
+		"Microsoft.WindowsTerminal_8wekyb3d8bbwe",
+	} {
+		if err := os.MkdirAll(filepath.Join(pkgs, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A stray regular file matching the prefix must not be emitted
+	// (IsDir guard).
+	if err := os.WriteFile(filepath.Join(pkgs, "PythonSoftwareFoundation.Python.3.9_x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rts := detectWindowsStorePythons(local)
+	got := make([]string, 0, len(rts))
+	for _, r := range rts {
+		if r.Name != "python" {
+			t.Errorf("runtime name = %q, want python", r.Name)
+		}
+		got = append(got, r.Version)
+	}
+	sort.Strings(got)
+	want := []string{"3.11", "3.12"}
+	if len(got) != len(want) {
+		t.Fatalf("versions = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestDetectWindowsStorePythons_noPackagesDir proves a host with no
+// Packages directory (Store never used) yields no runtimes and no error
+// path panic.
+func TestDetectWindowsStorePythons_noPackagesDir(t *testing.T) {
+	if rts := detectWindowsStorePythons(t.TempDir()); len(rts) != 0 {
+		t.Fatalf("expected no runtimes for a host without Packages, got %v", rts)
+	}
+}
 
 func TestNodeModulesAncestor(t *testing.T) {
 	cases := []struct {

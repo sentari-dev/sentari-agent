@@ -1,6 +1,7 @@
 package runtimeversions
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -16,7 +17,7 @@ func TestAppServerMarkers_WildFlyStable(t *testing.T) {
 		"bin/standalone.sh": "#!/bin/sh\n",
 		"modules/.keep":     "",
 	})
-	got := DetectAllAppServers([]string{parent})
+	got := DetectAllAppServers(context.Background(), []string{parent})
 	if len(got) != 1 || got[0].Name != "wildfly" || got[0].Cycle != "31.0" {
 		t.Fatalf("WildFly marker/version drift: %+v", got)
 	}

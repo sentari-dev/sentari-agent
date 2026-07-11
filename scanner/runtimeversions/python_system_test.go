@@ -1,6 +1,7 @@
 package runtimeversions
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,7 +36,7 @@ func TestDetectAllSystemPythons_homebrewCellar(t *testing.T) {
 	// Apple Silicon layout: <root>/python@<series>/<full-version>/.
 	mustMkdir(t, filepath.Join(root, "python@3.13", "3.13.7"))
 	mustMkdir(t, filepath.Join(root, "python@3.12", "3.12.4"))
-	// Side-by-side same series with a rev suffix — Homebrew uses ``_N``
+	// Side-by-side same series with a rev suffix — Homebrew uses `_N`
 	// to mark a re-build; we strip that for the canonical version.
 	mustMkdir(t, filepath.Join(root, "python@3.12", "3.12.5_1"))
 	// Noise that must be ignored: a non-formula sibling, and a stray
@@ -45,7 +46,7 @@ func TestDetectAllSystemPythons_homebrewCellar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assertVersions(t, versions(DetectAllSystemPythons([]string{root})), []string{"3.12.4", "3.12.5", "3.13.7"})
+	assertVersions(t, versions(DetectAllSystemPythons(context.Background(), []string{root})), []string{"3.12.4", "3.12.5", "3.13.7"})
 }
 
 // assertVersions checks the detected version list both in length AND
@@ -76,7 +77,7 @@ func TestDetectAllSystemPythons_pythonFramework(t *testing.T) {
 	// component, also not a series, ignore.
 	mustMkdir(t, filepath.Join(root, "3"))
 
-	assertVersions(t, versions(DetectAllSystemPythons([]string{root})), []string{"3.11", "3.12"})
+	assertVersions(t, versions(DetectAllSystemPythons(context.Background(), []string{root})), []string{"3.11", "3.12"})
 }
 
 func TestDetectAllSystemPythons_distroLib(t *testing.T) {
@@ -86,15 +87,15 @@ func TestDetectAllSystemPythons_distroLib(t *testing.T) {
 	mustMkdir(t, filepath.Join(root, "python3.11"))
 	mustMkdir(t, filepath.Join(root, "perl5")) // ignored
 	mustMkdir(t, filepath.Join(root, "python2.7"))
-	// Nested ``python3.11/site-packages`` — must NOT be re-emitted; the
+	// Nested `python3.11/site-packages` — must NOT be re-emitted; the
 	// walker only matches the top level.
 	mustMkdir(t, filepath.Join(root, "python3.11", "site-packages"))
 
-	assertVersions(t, versions(DetectAllSystemPythons([]string{root})), []string{"2.7", "3.10", "3.11"})
+	assertVersions(t, versions(DetectAllSystemPythons(context.Background(), []string{root})), []string{"2.7", "3.10", "3.11"})
 }
 
 func TestDetectAllSystemPythons_windowsLayout(t *testing.T) {
-	// Windows: ``<ProgramFiles>\Python311\`` — flattened ``XY``.
+	// Windows: `<ProgramFiles>\Python311\` — flattened `XY`.
 	root := filepath.Join(t.TempDir(), "Python")
 	mustMkdir(t, filepath.Join(root, "Python310"))
 	mustMkdir(t, filepath.Join(root, "Python311"))
@@ -103,19 +104,69 @@ func TestDetectAllSystemPythons_windowsLayout(t *testing.T) {
 	mustMkdir(t, filepath.Join(root, "Common Files"))
 	mustMkdir(t, filepath.Join(root, "Python3-tools")) // 'Python3-…' doesn't match Python<XY>
 
-	assertVersions(t, versions(DetectAllSystemPythons([]string{root})), []string{"3.10", "3.11", "3.13"})
+	assertVersions(t, versions(DetectAllSystemPythons(context.Background(), []string{root})), []string{"3.10", "3.11", "3.13"})
 }
 
-// Direct per-machine ProgramFiles layout: each ``Python<XY>\`` is a
-// sibling of ProgramFiles itself, not under an umbrella ``Python/``
+// Direct per-machine ProgramFiles layout: each `Python<XY>\` is a
+// sibling of ProgramFiles itself, not under an umbrella `Python/`
 // parent.  v3_enrich.go now globs those siblings and feeds each one
-// directly — which triggers the detector's ``HasPrefix(base,
-// "Python")`` branch.  Exercise that path so the regression doesn't
+// directly — which triggers the detector's `HasPrefix(base,
+// "Python")` branch.  Exercise that path so the regression doesn't
 // silently revert.
 func TestDetectAllSystemPythons_directPython311Root(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "Python311")
 	mustMkdir(t, root)
-	assertVersions(t, versions(DetectAllSystemPythons([]string{root})), []string{"3.11"})
+	assertVersions(t, versions(DetectAllSystemPythons(context.Background(), []string{root})), []string{"3.11"})
+}
+
+func TestDetectAllSystemPythons_pyenvVersions(t *testing.T) {
+	// pyenv layout: ~/.pyenv/versions/<full-version>/, one child dir per
+	// installed interpreter.  The switch keys on ".pyenv" in the path.
+	root := filepath.Join(t.TempDir(), ".pyenv", "versions")
+	// Real install identified by a lib/python<X.Y>/ stdlib dir.
+	mustMkdir(t, filepath.Join(root, "3.8.18", "lib", "python3.8"))
+	// Real install identified only by a bin/ launcher dir.
+	mustMkdir(t, filepath.Join(root, "3.11.5", "bin"))
+	// pyenv-virtualenv with a non-version name — rejected by the regexp.
+	mustMkdir(t, filepath.Join(root, "my-env", "lib", "python3.11"))
+	// Version-named dir with no interpreter payload — rejected by the
+	// hasInterpreterPayload guard.
+	mustMkdir(t, filepath.Join(root, "3.9.1"))
+
+	got := DetectAllSystemPythons(context.Background(), []string{root})
+	assertVersions(t, versions(got), []string{"3.11.5", "3.8.18"})
+
+	// Spot-check the full runtime for the lib/-shaped install.
+	var found *InstalledRuntime
+	for i := range got {
+		if got[i].Version == "3.8.18" {
+			found = &got[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("3.8.18 interpreter not detected in %+v", got)
+	}
+	if found.Name != "python" {
+		t.Errorf("Name = %q, want python", found.Name)
+	}
+	if found.Cycle != "3.8" {
+		t.Errorf("Cycle = %q, want 3.8", found.Cycle)
+	}
+	if found.InstallPath != filepath.Join(root, "3.8.18") {
+		t.Errorf("InstallPath = %q, want %q", found.InstallPath, filepath.Join(root, "3.8.18"))
+	}
+}
+
+func TestDetectAllSystemPythons_asdfInstalls(t *testing.T) {
+	// asdf layout: ~/.asdf/installs/python/<full-version>/.  Same reader
+	// as pyenv; the switch keys on ".asdf" in the path.
+	root := filepath.Join(t.TempDir(), ".asdf", "installs", "python")
+	mustMkdir(t, filepath.Join(root, "3.8.18", "lib", "python3.8"))
+	mustMkdir(t, filepath.Join(root, "3.12.2", "bin"))
+	// Non-version dir ignored.
+	mustMkdir(t, filepath.Join(root, "system"))
+
+	assertVersions(t, versions(DetectAllSystemPythons(context.Background(), []string{root})), []string{"3.12.2", "3.8.18"})
 }
 
 func TestDetectAllSystemPythons_unknownRootSkipped(t *testing.T) {
@@ -124,7 +175,7 @@ func TestDetectAllSystemPythons_unknownRootSkipped(t *testing.T) {
 	// we hit false positives.
 	root := filepath.Join(t.TempDir(), "random")
 	mustMkdir(t, filepath.Join(root, "python@3.13", "3.13.7"))
-	got := DetectAllSystemPythons([]string{root})
+	got := DetectAllSystemPythons(context.Background(), []string{root})
 	if len(got) != 0 {
 		t.Errorf("expected 0 runtimes for unknown root, got %+v", got)
 	}
@@ -135,7 +186,7 @@ func TestDetectAllSystemPythons_cycleDerivation(t *testing.T) {
 	// that's what the server's runtime_eol_cycle.py keys on.
 	root := filepath.Join(t.TempDir(), "Cellar")
 	mustMkdir(t, filepath.Join(root, "python@3.13", "3.13.7"))
-	got := DetectAllSystemPythons([]string{root})
+	got := DetectAllSystemPythons(context.Background(), []string{root})
 	if len(got) != 1 {
 		t.Fatalf("got %d, want 1: %+v", len(got), got)
 	}

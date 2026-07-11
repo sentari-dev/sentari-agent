@@ -4,15 +4,16 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
 // writeNuGetPkg lays out one package dir in NuGet's global-
-// packages layout.  ``id`` is the canonical-cased manifest ID
-// (e.g. ``Newtonsoft.Json``); the on-disk dir uses the lowercase
-// form per NuGet's own convention.  ``nuspecBody`` replaces the
+// packages layout.  `id` is the canonical-cased manifest ID
+// (e.g. `Newtonsoft.Json`); the on-disk dir uses the lowercase
+// form per NuGet's own convention.  `nuspecBody` replaces the
 // default minimal manifest when the test wants a specific shape.
 func writeNuGetPkg(t *testing.T, root, id, version string, nuspecBody string) {
 	t.Helper()
@@ -140,7 +141,7 @@ func TestScan_GlobalPackagesLayout(t *testing.T) {
 }
 
 // TestScan_MultipleVersionsOfSamePackage: NuGet keeps every
-// installed version side-by-side under ``<id>/<version>/``.
+// installed version side-by-side under `<id>/<version>/`.
 // Each becomes its own record — CVE correlation needs the
 // exact version, so merging would lose data.
 func TestScan_MultipleVersionsOfSamePackage(t *testing.T) {
@@ -168,8 +169,8 @@ func TestScan_MultipleVersionsOfSamePackage(t *testing.T) {
 }
 
 // TestScan_LicenseExpression: modern nuspec uses
-// ``<license type="expression">MIT</license>`` and
-// ``<license type="expression">(MIT OR Apache-2.0)</license>``.
+// `<license type="expression">MIT</license>` and
+// `<license type="expression">(MIT OR Apache-2.0)</license>`.
 // Both pass through to LicenseRaw.
 func TestScan_LicenseExpression(t *testing.T) {
 	root := t.TempDir()
@@ -208,8 +209,8 @@ func TestScan_LicenseExpression(t *testing.T) {
 }
 
 // TestScan_LegacyLicenseURL: older nuspec files carry
-// ``<licenseUrl>https://licenses.nuget.org/MIT</licenseUrl>``
-// instead of the modern ``<license>``.  The well-known URL
+// `<licenseUrl>https://licenses.nuget.org/MIT</licenseUrl>`
+// instead of the modern `<license>`.  The well-known URL
 // pattern reduces to the SPDX-ish ID; a custom URL passes
 // through verbatim.
 func TestScan_LegacyLicenseURL(t *testing.T) {
@@ -297,7 +298,7 @@ func TestScan_MalformedNuspecSurfacesScanError(t *testing.T) {
 }
 
 // TestScan_EnvironmentFieldIsPackagesRoot: every record carries
-// the global-packages folder as its ``Environment``, regardless
+// the global-packages folder as its `Environment`, regardless
 // of which ID/version it is.  Matches the same-tree-grouping
 // behaviour of the npm plugin.
 func TestScan_EnvironmentFieldIsPackagesRoot(t *testing.T) {
@@ -333,5 +334,272 @@ func TestScan_UnknownLayout_ScanError(t *testing.T) {
 	})
 	if len(errs) != 1 {
 		t.Fatalf("expected 1 ScanError; got %+v", errs)
+	}
+}
+
+// writeNuGetConfig lays a minimal user-level NuGet.Config with a
+// globalPackagesFolder redirect at the unix `~/.config/NuGet` location
+// under the given home dir.
+func writeNuGetConfig(t *testing.T, home, globalPackagesFolder string) {
+	t.Helper()
+	dir := filepath.Join(home, ".config", "NuGet")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	body := `<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <config>
+    <add key="globalPackagesFolder" value="` + globalPackagesFolder + `" />
+  </config>
+</configuration>`
+	if err := os.WriteFile(filepath.Join(dir, "NuGet.Config"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write NuGet.Config: %v", err)
+	}
+}
+
+// isolateNuGetEnv points HOME/USERPROFILE at a fresh temp dir and
+// clears the env vars that would otherwise leak the host's real NuGet
+// config into a test.  Returns the fake home.
+func isolateNuGetEnv(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	t.Setenv("NUGET_PACKAGES", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	return home
+}
+
+// TestDiscoverAll_NuGetConfigGlobalPackagesFolder: a NuGet.Config
+// `globalPackagesFolder` redirect must be discovered and scanned —
+// otherwise a redirected host is a silent zero-package false-negative.
+func TestDiscoverAll_NuGetConfigGlobalPackagesFolder(t *testing.T) {
+	home := isolateNuGetEnv(t)
+	redirected := t.TempDir()
+	writeNuGetConfig(t, home, redirected)
+
+	var s Scanner
+	envs, errs := s.DiscoverAll(context.Background())
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	found := false
+	for _, e := range envs {
+		if e.Name == layoutGlobalPackages && e.Path == redirected {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected an env for the redirected globalPackagesFolder %q; got %+v", redirected, envs)
+	}
+}
+
+// TestDiscoverAll_NuGetConfigRelativeFolder: a relative
+// globalPackagesFolder resolves against the config file's directory.
+func TestDiscoverAll_NuGetConfigRelativeFolder(t *testing.T) {
+	home := isolateNuGetEnv(t)
+	// Relative "cache" under ~/.config/NuGet — create it so the probe
+	// finds a real directory.
+	cfgDir := filepath.Join(home, ".config", "NuGet")
+	if err := os.MkdirAll(filepath.Join(cfgDir, "cache"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeNuGetConfig(t, home, "cache")
+
+	var s Scanner
+	envs, errs := s.DiscoverAll(context.Background())
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	want := filepath.Join(cfgDir, "cache")
+	found := false
+	for _, e := range envs {
+		if e.Path == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected relative globalPackagesFolder to resolve to %q; got %+v", want, envs)
+	}
+}
+
+// TestDiscoverAll_NuGetConfigMissingFolder_ScanError: a
+// globalPackagesFolder that points at a path that doesn't exist is a
+// config bug — surface it as a ScanError, never a silent empty scan.
+func TestDiscoverAll_NuGetConfigMissingFolder_ScanError(t *testing.T) {
+	home := isolateNuGetEnv(t)
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	writeNuGetConfig(t, home, missing)
+
+	var s Scanner
+	envs, errs := s.DiscoverAll(context.Background())
+	for _, e := range envs {
+		if e.Name == layoutGlobalPackages {
+			t.Errorf("did not expect a global-packages env for a missing folder; got %+v", e)
+		}
+	}
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 ScanError for the missing redirect; got %+v", errs)
+	}
+}
+
+// TestDiscoverAll_NUGET_PACKAGES_WinsOverConfig: NuGet precedence —
+// the env var overrides the NuGet.Config redirect entirely, and the
+// config folder is neither scanned nor errored.
+func TestDiscoverAll_NUGET_PACKAGES_WinsOverConfig(t *testing.T) {
+	home := isolateNuGetEnv(t)
+	envDir := t.TempDir()
+	configDir := t.TempDir()
+	writeNuGetConfig(t, home, configDir)
+	t.Setenv("NUGET_PACKAGES", envDir)
+
+	var s Scanner
+	envs, errs := s.DiscoverAll(context.Background())
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	if len(envs) != 1 || envs[0].Path != envDir {
+		t.Fatalf("expected only the NUGET_PACKAGES dir %q; got %+v", envDir, envs)
+	}
+}
+
+// TestDiscoverAll_MalformedNuGetConfig_ScanError: a present but
+// unparseable NuGet.Config surfaces a ScanError rather than being
+// silently ignored (a redirect we can't read could hide the inventory).
+func TestDiscoverAll_MalformedNuGetConfig_ScanError(t *testing.T) {
+	home := isolateNuGetEnv(t)
+	dir := filepath.Join(home, ".config", "NuGet")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "NuGet.Config"), []byte("<config><not xml>"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var s Scanner
+	_, errs := s.DiscoverAll(context.Background())
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 ScanError for malformed NuGet.Config; got %+v", errs)
+	}
+}
+
+// TestDiscoverAll_PackagesConfigAtScanRoot: a legacy packages.config
+// at the scan root is discovered (no filesystem walk needed).
+func TestDiscoverAll_PackagesConfigAtScanRoot(t *testing.T) {
+	isolateNuGetEnv(t)
+	scanRoot := t.TempDir()
+	writePackagesConfig(t, scanRoot)
+
+	var s Scanner
+	ctx := scanner.WithScanRoot(context.Background(), scanRoot)
+	envs, errs := s.DiscoverAll(ctx)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	want := filepath.Join(scanRoot, "packages.config")
+	found := false
+	for _, e := range envs {
+		if e.Name == layoutPackagesConfig && e.Path == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a packages.config env at %q; got %+v", want, envs)
+	}
+}
+
+// writePackagesConfig lays a two-entry legacy packages.config at dir.
+func writePackagesConfig(t *testing.T, dir string) {
+	t.Helper()
+	body := `<?xml version="1.0" encoding="utf-8"?>
+<packages>
+  <package id="Newtonsoft.Json" version="13.0.3" targetFramework="net472" />
+  <package id="Serilog" version="3.1.1" />
+</packages>`
+	if err := os.WriteFile(filepath.Join(dir, "packages.config"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write packages.config: %v", err)
+	}
+}
+
+// TestScan_PackagesConfig: each <package id= version=> in a legacy
+// packages.config becomes a record; the project dir is stamped as the
+// Environment so entries group together server-side.
+func TestScan_PackagesConfig(t *testing.T) {
+	root := t.TempDir()
+	writePackagesConfig(t, root)
+	cfgPath := filepath.Join(root, "packages.config")
+
+	var s Scanner
+	records, errs := s.Scan(context.Background(), scanner.Environment{
+		EnvType: EnvNuGet,
+		Name:    layoutPackagesConfig,
+		Path:    cfgPath,
+	})
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	want := map[string]string{"Newtonsoft.Json": "13.0.3", "Serilog": "3.1.1"}
+	got := map[string]string{}
+	for _, r := range records {
+		if r.EnvType != EnvNuGet {
+			t.Errorf("wrong env_type on %s: %q", r.Name, r.EnvType)
+		}
+		if r.Environment != root {
+			t.Errorf("%s Environment: got %q, want %q", r.Name, r.Environment, root)
+		}
+		got[r.Name] = r.Version
+	}
+	for name, version := range want {
+		if got[name] != version {
+			t.Errorf("%s: got %q, want %q", name, got[name], version)
+		}
+	}
+}
+
+// TestScan_PackagesConfigMalformed_ScanError: an unparseable
+// packages.config surfaces a ScanError rather than a silent empty.
+func TestScan_PackagesConfigMalformed_ScanError(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "packages.config")
+	if err := os.WriteFile(cfgPath, []byte("<packages><not xml>"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	var s Scanner
+	_, errs := s.Scan(context.Background(), scanner.Environment{
+		EnvType: EnvNuGet,
+		Name:    layoutPackagesConfig,
+		Path:    cfgPath,
+	})
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 ScanError; got %+v", errs)
+	}
+}
+
+// TestScan_GlobalPackagesHonoursCancellation: a cancelled context
+// stops the global-packages walk promptly and surfaces a typed
+// "scan cancelled" ScanError so the partial result is self-describing.
+func TestScan_GlobalPackagesHonoursCancellation(t *testing.T) {
+	root := t.TempDir()
+	writeNuGetPkg(t, root, "Newtonsoft.Json", "13.0.3", "")
+	writeNuGetPkg(t, root, "Serilog", "3.1.1", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before the walk begins
+
+	var s Scanner
+	_, errs := s.Scan(ctx, scanner.Environment{
+		EnvType: EnvNuGet,
+		Name:    layoutGlobalPackages,
+		Path:    root,
+	})
+	cancelled := false
+	for _, e := range errs {
+		if e.EnvType == EnvNuGet && strings.Contains(e.Error, "scan cancelled") {
+			cancelled = true
+		}
+	}
+	if !cancelled {
+		t.Errorf("expected a 'scan cancelled' ScanError; got %+v", errs)
 	}
 }

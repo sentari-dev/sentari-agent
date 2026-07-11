@@ -1,6 +1,7 @@
 package runtimeversions
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -80,7 +81,7 @@ func TestDetectAllJDKs_respectsDepthCap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := DetectAllJDKs([]string{root})
+	got := DetectAllJDKs(context.Background(), []string{root})
 	versions := make(map[string]bool)
 	for _, r := range got {
 		versions[r.Version] = true
@@ -90,6 +91,66 @@ func TestDetectAllJDKs_respectsDepthCap(t *testing.T) {
 	}
 	if versions["11.0.20"] {
 		t.Errorf("should NOT have found deep 11.0.20 JDK (beyond depth cap), got %+v", got)
+	}
+}
+
+// TestDetectHomebrewJDKs_findsBrewOpenJDK covers finding scanner-2: a
+// brew-installed OpenJDK buries its release file at
+// <cellar>/openjdk[@NN]/<version>/libexec/openjdk.jdk/Contents/Home/release,
+// far below the walk depth cap and unreachable from the /opt candidate root.
+// The dedicated Cellar reader must probe the fixed keg sub-path directly.
+func TestDetectHomebrewJDKs_findsBrewOpenJDK(t *testing.T) {
+	cellar := t.TempDir()
+
+	// Unversioned `openjdk` keg (Homebrew's rolling latest).
+	writeBrewKeg(t, cellar, "openjdk", "21.0.1", `JAVA_VERSION="21.0.1"
+IMPLEMENTOR="Homebrew"`)
+	// Versioned `openjdk@17` keg.
+	writeBrewKeg(t, cellar, "openjdk@17", "17.0.9", `JAVA_VERSION="17.0.9"
+IMPLEMENTOR="Homebrew"`)
+	// A non-JDK formula must be ignored.
+	if err := os.MkdirAll(filepath.Join(cellar, "wget", "1.21.4", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := detectHomebrewJDKs([]string{cellar})
+	versions := make(map[string]bool)
+	for _, r := range got {
+		if r.Name != "jdk" {
+			t.Errorf("Name = %q, want jdk", r.Name)
+		}
+		versions[r.Version] = true
+	}
+	if !versions["21.0.1"] {
+		t.Errorf("expected brew openjdk 21.0.1, got %+v", got)
+	}
+	if !versions["17.0.9"] {
+		t.Errorf("expected brew openjdk@17 17.0.9, got %+v", got)
+	}
+	if len(got) != 2 {
+		t.Errorf("expected exactly 2 JDKs (wget ignored), got %d: %+v", len(got), got)
+	}
+}
+
+// A missing Cellar root (the common case on Linux, or Intel paths on Apple
+// Silicon) must be a silent no-op, not an error or panic.
+func TestDetectHomebrewJDKs_missingRootIsNoOp(t *testing.T) {
+	got := detectHomebrewJDKs([]string{filepath.Join(t.TempDir(), "does-not-exist")})
+	if len(got) != 0 {
+		t.Errorf("expected no JDKs from a missing root, got %+v", got)
+	}
+}
+
+// writeBrewKeg materialises a Homebrew openjdk keg layout under cellar:
+// <cellar>/<formula>/<version>/libexec/openjdk.jdk/Contents/Home/release.
+func writeBrewKeg(t *testing.T, cellar, formula, version, release string) {
+	t.Helper()
+	home := filepath.Join(cellar, formula, version, "libexec", "openjdk.jdk", "Contents", "Home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "release"), []byte(release+"\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -114,14 +175,14 @@ IMPLEMENTOR="GraalVM Community"
 
 func TestParseJDKDistroFromImplementor(t *testing.T) {
 	cases := map[string]string{
-		"Eclipse Adoptium":           "Temurin",
-		"Amazon.com Inc.":            "Corretto",
-		"Microsoft":                  "Microsoft",
-		"Azul Systems, Inc.":         "Zulu",
-		"AdoptOpenJDK":               "Temurin",
-		"Oracle Corporation":         "Oracle",
-		"":                           "",
-		"Unknown Vendor":             "Unknown Vendor",
+		"Eclipse Adoptium":   "Temurin",
+		"Amazon.com Inc.":    "Corretto",
+		"Microsoft":          "Microsoft",
+		"Azul Systems, Inc.": "Zulu",
+		"AdoptOpenJDK":       "Temurin",
+		"Oracle Corporation": "Oracle",
+		"":                   "",
+		"Unknown Vendor":     "Unknown Vendor",
 	}
 	for in, want := range cases {
 		if got := parseJDKDistroFromImplementor(in); got != want {
