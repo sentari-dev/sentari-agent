@@ -4,11 +4,25 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
+
+// nugetUserConfigDir returns the user-level NuGet.Config directory the scanner
+// actually probes on the current OS (see nugetConfigCandidates in parser.go):
+// %APPDATA%\NuGet on Windows, ~/.config/NuGet elsewhere. A fixture written
+// anywhere else is invisible to the product — writing to the Unix path on a
+// Windows run is why these tests returned []. isolateNuGetEnv already points
+// APPDATA at the fake home, so this resolves inside the test sandbox.
+func nugetUserConfigDir(home string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(os.Getenv("APPDATA"), "NuGet")
+	}
+	return filepath.Join(home, ".config", "NuGet")
+}
 
 // writeNuGetPkg lays out one package dir in NuGet's global-
 // packages layout.  `id` is the canonical-cased manifest ID
@@ -338,11 +352,11 @@ func TestScan_UnknownLayout_ScanError(t *testing.T) {
 }
 
 // writeNuGetConfig lays a minimal user-level NuGet.Config with a
-// globalPackagesFolder redirect at the unix `~/.config/NuGet` location
-// under the given home dir.
+// globalPackagesFolder redirect at the OS-appropriate user-level config
+// location (nugetUserConfigDir) under the given home dir.
 func writeNuGetConfig(t *testing.T, home, globalPackagesFolder string) {
 	t.Helper()
-	dir := filepath.Join(home, ".config", "NuGet")
+	dir := nugetUserConfigDir(home)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
@@ -399,9 +413,9 @@ func TestDiscoverAll_NuGetConfigGlobalPackagesFolder(t *testing.T) {
 // globalPackagesFolder resolves against the config file's directory.
 func TestDiscoverAll_NuGetConfigRelativeFolder(t *testing.T) {
 	home := isolateNuGetEnv(t)
-	// Relative "cache" under ~/.config/NuGet — create it so the probe
-	// finds a real directory.
-	cfgDir := filepath.Join(home, ".config", "NuGet")
+	// Relative "cache" under the OS-appropriate config dir — create it so the
+	// probe finds a real directory.
+	cfgDir := nugetUserConfigDir(home)
 	if err := os.MkdirAll(filepath.Join(cfgDir, "cache"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -469,7 +483,7 @@ func TestDiscoverAll_NUGET_PACKAGES_WinsOverConfig(t *testing.T) {
 // silently ignored (a redirect we can't read could hide the inventory).
 func TestDiscoverAll_MalformedNuGetConfig_ScanError(t *testing.T) {
 	home := isolateNuGetEnv(t)
-	dir := filepath.Join(home, ".config", "NuGet")
+	dir := nugetUserConfigDir(home)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}

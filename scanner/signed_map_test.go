@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -369,12 +370,15 @@ func TestSaveAndLoadVerifiedEnvelope_RoundTrip(t *testing.T) {
 	}
 
 	// File permissions should be 0600 (owner rw only).
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mode := info.Mode().Perm(); mode&0o077 != 0 {
-		t.Errorf("file mode too permissive: %v", mode)
+	// NTFS cannot represent Unix perm bits; enforced on unix, product sets 0600 via os.Chmod.
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode := info.Mode().Perm(); mode&0o077 != 0 {
+			t.Errorf("file mode too permissive: %v", mode)
+		}
 	}
 
 	if !LoadVerifiedOverlayFromFile(path) {

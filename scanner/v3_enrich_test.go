@@ -86,8 +86,17 @@ func TestNodeModulesAncestor(t *testing.T) {
 		{".", ""},
 	}
 	for _, c := range cases {
-		if got := nodeModulesAncestor(c.in); got != c.want {
-			t.Errorf("nodeModulesAncestor(%q) = %q, want %q", c.in, got, c.want)
+		// nodeModulesAncestor operates on OS-native paths (filepath.Dir/Base),
+		// and in production it is fed real install paths from the filesystem
+		// walk — '/'-separated on Unix, '\'-separated on Windows. The literals
+		// above are written Unix-style for readability; translate them (and the
+		// expectations) to the host separator so the test exercises the same
+		// shape the product sees on each OS. filepath.FromSlash is a no-op on
+		// Unix, so darwin/linux coverage is unchanged.
+		in := filepath.FromSlash(c.in)
+		want := filepath.FromSlash(c.want)
+		if got := nodeModulesAncestor(in); got != want {
+			t.Errorf("nodeModulesAncestor(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

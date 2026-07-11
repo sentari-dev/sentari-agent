@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -201,21 +202,24 @@ func TestSaveCertificatesAtomic_WritesAllNoResidue(t *testing.T) {
 		}
 	}
 
-	// Key must be 0600.
-	info, err := os.Stat(filepath.Join(dir, "device.key"))
-	if err != nil {
-		t.Fatalf("stat device.key: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Fatalf("device.key perms: want 0600, got %o", perm)
-	}
-	// device.crt must be 0600 too (matches SaveCertificates).
-	info, err = os.Stat(filepath.Join(dir, "device.crt"))
-	if err != nil {
-		t.Fatalf("stat device.crt: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Fatalf("device.crt perms: want 0600, got %o", perm)
+	// Key and cert must be 0600.
+	// NTFS cannot represent Unix perm bits; enforced on unix, product sets 0600 via os.Chmod.
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(filepath.Join(dir, "device.key"))
+		if err != nil {
+			t.Fatalf("stat device.key: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Fatalf("device.key perms: want 0600, got %o", perm)
+		}
+		// device.crt must be 0600 too (matches SaveCertificates).
+		info, err = os.Stat(filepath.Join(dir, "device.crt"))
+		if err != nil {
+			t.Fatalf("stat device.crt: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Fatalf("device.crt perms: want 0600, got %o", perm)
+		}
 	}
 
 	// No .tmp residue must remain.

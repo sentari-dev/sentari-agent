@@ -3,6 +3,7 @@ package scanner
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -13,6 +14,14 @@ import (
 // picked up.  The ~/.asdf/shims dir holds wrapper scripts (not real binaries)
 // and must NOT be probed.
 func TestNodeCandidateBinariesAsdf(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// asdf uses a Unix $HOME dotfile layout (~/.asdf), and t.Setenv("HOME")
+		// does not redirect os.UserHomeDir on Windows (it reads %USERPROFILE%),
+		// so the faked install root is never probed. Windows Node managers live
+		// under %APPDATA%/%LOCALAPPDATA% and are covered by
+		// windowsNodeCandidateBinaries / TestWindowsNodeCandidateBinaries.
+		t.Skip("asdf uses a Unix ~/.asdf layout and t.Setenv(HOME) does not affect os.UserHomeDir on Windows; Windows Node detection is covered by windowsNodeCandidateBinaries")
+	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -87,6 +96,14 @@ func candidateSet(t *testing.T) map[string]struct{} {
 // the Volta layout ~/.volta/tools/image/node/<ver>/bin/node, mirroring the
 // Windows fnm glob.
 func TestNodeCandidateBinariesFnmAndVolta(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// fnm/Volta default roots are Unix $HOME dotfile layouts, and
+		// t.Setenv("HOME") does not redirect os.UserHomeDir on Windows (it reads
+		// %USERPROFILE%), so the faked install roots are never probed. Windows
+		// fnm uses %FNM_DIR%/%LOCALAPPDATA% and is covered by
+		// windowsNodeCandidateBinaries / TestWindowsNodeCandidateBinaries.
+		t.Skip("fnm/Volta default roots use a Unix ~/ layout and t.Setenv(HOME) does not affect os.UserHomeDir on Windows; Windows Node detection is covered by windowsNodeCandidateBinaries")
+	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	// Ensure no FNM_DIR override leaks in from the host environment.

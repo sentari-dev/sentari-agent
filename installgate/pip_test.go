@@ -38,7 +38,17 @@ func userHomeOverride(t *testing.T, dir string) string {
 	t.Helper()
 	switch runtime.GOOS {
 	case "windows":
+		// Redirect every user-config root a writer may consult so the
+		// whole install-gate suite stays hermetic on Windows.  The pip
+		// writer keys off APPDATA, pdm off LOCALAPPDATA, and the
+		// UserHomeDir-based writers (npm, maven, gradle, sbt, yarnberry)
+		// off USERPROFILE.  The Unix branch below sandboxes all of these
+		// through HOME; without the equivalent here those writers escape
+		// into the real runner home and can Remove a stray Sentari-managed
+		// file, making orchestrator no-op assertions flap.
 		t.Setenv("APPDATA", dir)
+		t.Setenv("LOCALAPPDATA", dir)
+		t.Setenv("USERPROFILE", dir)
 		return filepath.Join(dir, "pip", "pip.ini")
 	default:
 		// Clear XDG_CONFIG_HOME so the home-fallback path is

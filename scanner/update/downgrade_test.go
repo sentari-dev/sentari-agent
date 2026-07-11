@@ -137,6 +137,9 @@ func TestCheck_latestBelowMinSupportedRejected(t *testing.T) {
 }
 
 func TestApply_refusesDowngrade(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apply self-update refused on Windows by design; see TestApply_refusesOnWindows")
+	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	body := []byte("older-binary")
 	srv := signedManifestServer(t, "primary", priv, "0.1.0", "0.1.0", "2026-05-22T10:00:01Z", body)

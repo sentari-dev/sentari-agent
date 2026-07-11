@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -86,7 +87,12 @@ func TestCopyFileSync_roundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm()&0o100 == 0 {
-		t.Fatalf("copied file is not executable: %v", fi.Mode())
+	// The exec bit isn't representable on NTFS — os.Stat reports
+	// 0666 on Windows regardless of the 0755 we copied with.  The
+	// byte round-trip above still runs on Windows.
+	if runtime.GOOS != "windows" {
+		if fi.Mode().Perm()&0o100 == 0 {
+			t.Fatalf("copied file is not executable: %v", fi.Mode())
+		}
 	}
 }

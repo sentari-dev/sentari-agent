@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -49,8 +50,13 @@ func TestWriteAtomic_FreshFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode := info.Mode().Perm(); mode != 0o644 {
-		t.Errorf("mode: got %v, want 0644", mode)
+	// Unix perm bits aren't representable on NTFS — os.Stat reports
+	// 0666 on Windows regardless of the 0644 WriteAtomic requested.
+	// The content round-trip above still runs on Windows.
+	if runtime.GOOS != "windows" {
+		if mode := info.Mode().Perm(); mode != 0o644 {
+			t.Errorf("mode: got %v, want 0644", mode)
+		}
 	}
 }
 
@@ -405,6 +411,9 @@ func TestRenderHashMarker_Format(t *testing.T) {
 // errors.Is(err, fs.ErrPermission) etc. without surprises.
 func TestWriteAtomic_ErrorWrapping(t *testing.T) {
 	// Read-only parent → mkdir fails with EACCES on POSIX.
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0500 does not block owner writes on Windows")
+	}
 	if os.Getuid() == 0 {
 		t.Skip("skipped: root bypasses POSIX dir permissions")
 	}

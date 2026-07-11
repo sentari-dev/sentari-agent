@@ -1,0 +1,4 @@
+# Golden SBOM fixtures are byte-compared against generator output, which always
+# emits LF. Force LF on checkout on every platform so a Windows working tree
+# (core.autocrlf=true) does not rewrite them to CRLF and break the compare.
+*.json text eol=lf

@@ -34,6 +34,9 @@ func applyPlanFromServer(t *testing.T, c *Client, version, servedAt string, body
 }
 
 func TestApply_recordsAndEnforcesHighWaterMark(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apply self-update refused on Windows by design; see TestApply_refusesOnWindows")
+	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	body := []byte("binary-0.3.0")
 	srv := signedManifestServer(t, "primary", priv, "0.3.0", "0.1.0", "2026-05-22T12:00:00Z", body)

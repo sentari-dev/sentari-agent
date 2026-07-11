@@ -1,6 +1,7 @@
 package sbom
 
 import (
+	"bytes"
 	"flag"
 	"os"
 	"path/filepath"
@@ -33,6 +34,13 @@ var (
 	cdxSerialRe = regexp.MustCompile(`urn:uuid:[0-9a-fA-F-]{36}`)
 	spdxNSRe    = regexp.MustCompile(`https://sentari\.io/sbom/[0-9a-fA-F-]{36}`)
 )
+
+// normalizeEOL collapses CRLF to LF so a byte-compare against a checked-in
+// fixture is invariant to git's platform-dependent line-ending translation
+// (Windows core.autocrlf rewrites the LF fixture to CRLF on checkout).
+func normalizeEOL(b []byte) []byte {
+	return bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
+}
 
 // normalizeSBOM replaces the nondeterministic UUID-bearing fields with a fixed
 // placeholder so repeated generations of the same ScanResult are byte-stable.
@@ -166,6 +174,12 @@ func assertGolden(t *testing.T, name string, got []byte) {
 	if err != nil {
 		t.Fatalf("read golden %s (run `go test ./sbom/ -run TestGolden -update` to create): %v", name, err)
 	}
+	// The generators always emit LF (json.MarshalIndent), and the fixtures are
+	// committed with LF, but a Windows checkout with core.autocrlf=true rewrites
+	// the on-disk golden to CRLF. Normalize both sides to LF so this stays an
+	// assertion about the document's content, not the checkout's EOL policy.
+	got = normalizeEOL(got)
+	want = normalizeEOL(want)
 	if string(got) != string(want) {
 		t.Fatalf("SBOM document does not match golden %s.\n"+
 			"If this change is intentional, regenerate with:\n"+

@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -105,13 +106,16 @@ func TestSaveAndReadCertificatesAtomicAt_RoundTrip(t *testing.T) {
 	}
 
 	// device cert and key must be 0600.
-	for _, f := range []string{certFile, keyFile} {
-		info, err := os.Stat(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm()&0o077 != 0 {
-			t.Errorf("%s too permissive: %v", f, info.Mode().Perm())
+	// NTFS cannot represent Unix perm bits; enforced on unix, product sets 0600 via os.Chmod.
+	if runtime.GOOS != "windows" {
+		for _, f := range []string{certFile, keyFile} {
+			info, err := os.Stat(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm()&0o077 != 0 {
+				t.Errorf("%s too permissive: %v", f, info.Mode().Perm())
+			}
 		}
 	}
 
