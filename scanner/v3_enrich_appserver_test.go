@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"archive/zip"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,7 +19,7 @@ func TestEnrichWithV3_DetectsAppServer(t *testing.T) {
 
 	t.Setenv("CATALINA_HOME", home)
 	var res ScanResult
-	enrichWithV3(&res, nil) // app-server detection reads CATALINA_HOME directly
+	enrichWithV3(context.Background(), &res, nil, "") // app-server detection reads CATALINA_HOME directly
 
 	found := false
 	for _, r := range res.InstalledRuntimes {

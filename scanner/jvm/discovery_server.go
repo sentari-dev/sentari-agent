@@ -15,10 +15,10 @@ import (
 // servers is tiny and worth factoring out, because six near-identical
 // 40-line files become six near-identical 10-line files.
 //
-// The shape check (``marker``) is how we tell a real server install
+// The shape check (`marker`) is how we tell a real server install
 // from an unrelated directory that happens to have the matching name:
-// a Tomcat install always has ``bin/catalina.sh`` (or .bat); a
-// WildFly install always has ``bin/standalone.sh`` + ``modules/``.
+// a Tomcat install always has `bin/catalina.sh` (or .bat); a
+// WildFly install always has `bin/standalone.sh` + `modules/`.
 // Without this check, an env var pointing at /tmp would cause us to
 // walk /tmp looking for JARs — useless and slow.
 type serverSpec struct {
@@ -85,14 +85,14 @@ func discoverByServerSpec(spec serverSpec) []scanner.Environment {
 	return out
 }
 
-// hasAny returns true iff ``root`` contains at least one of the given
+// hasAny returns true iff `root` contains at least one of the given
 // relative paths as anything (file or directory).  Helper for the
 // marker predicates below — each server has a short list of "this
 // file/dir uniquely identifies an install of me" markers.
 //
 // Use hasAnyDir instead when a marker MUST be a directory (e.g. the
-// JBoss/WildFly ``modules`` check): otherwise a hostile or buggy
-// wrapper script named ``modules`` would satisfy the shape check.
+// JBoss/WildFly `modules` check): otherwise a hostile or buggy
+// wrapper script named `modules` would satisfy the shape check.
 func hasAny(root string, rels ...string) bool {
 	for _, rel := range rels {
 		if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
@@ -105,7 +105,7 @@ func hasAny(root string, rels ...string) bool {
 // hasAnyDir is the directory-only variant of hasAny.  Returns true iff
 // at least one of the relative paths exists AND names a directory.
 // Used for markers that must be directories (e.g. the JBoss/WildFly
-// ``modules`` entry) so a same-named regular file can't spoof the
+// `modules` entry) so a same-named regular file can't spoof the
 // check.
 func hasAnyDir(root string, rels ...string) bool {
 	for _, rel := range rels {

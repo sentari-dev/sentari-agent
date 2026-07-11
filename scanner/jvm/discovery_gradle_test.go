@@ -82,9 +82,9 @@ func TestDiscoverGradleCache_NoCachePresent(t *testing.T) {
 }
 
 // TestDiscoverGradleCache_DirectoryShapeRequired: some hosts have
-// ``~/.gradle`` as a config file rather than a dir (rare, but seen on
+// `~/.gradle` as a config file rather than a dir (rare, but seen on
 // Windows when a user has tinkered).  We must not crash on that case
-// — ``Stat`` returns a non-dir; we skip.
+// — `Stat` returns a non-dir; we skip.
 func TestDiscoverGradleCache_DirectoryShapeRequired(t *testing.T) {
 	tmp := t.TempDir()
 	// Create a FILE at the path where we expect a directory.

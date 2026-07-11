@@ -237,13 +237,16 @@ scan_max_depth = 12
 interval = $ScanInterval
 "@
 
-    Set-Content -Path $configFile -Value $configContent -Encoding UTF8
+    # Write UTF-8 without a BOM; PowerShell 5.1's UTF8 Set-Content encoding
+    # emits a BOM that the Go config parser would otherwise choke on.
+    [IO.File]::WriteAllText($configFile, $configContent, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "  Config:  $configFile" -ForegroundColor Green
 
     # Write enrollment token to a separate restricted file (not in config,
     # not visible on the command line via process listing).
     $tokenFile = Join-Path $configDir 'enroll-token'
-    Set-Content -Path $tokenFile -Value $EnrollToken -NoNewline -Encoding UTF8
+    # UTF-8 without BOM, no trailing newline (WriteAllText adds neither).
+    [IO.File]::WriteAllText($tokenFile, $EnrollToken, (New-Object System.Text.UTF8Encoding($false)))
 
     # Restrict enroll-token to SYSTEM + Administrators only.
     $tokenAcl = Get-Acl $tokenFile

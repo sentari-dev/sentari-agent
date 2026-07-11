@@ -1,14 +1,14 @@
 // sbt writer — Scala build tool.
 //
 // sbt resolves Maven artifacts via the same Ivy/Aether layout
-// gradle and Maven use; the user-level ``~/.sbt/repositories``
+// gradle and Maven use; the user-level `~/.sbt/repositories`
 // file overrides every project's resolver list when present.  We
 // own that file in its entirety because sbt's resolver-resolution
 // is "first matching repositories file wins" — a Sentari-managed
 // file at the user level shadows the bundled defaults and any
 // project-local overrides for plugin resolution.
 //
-// Reads ``proxy_endpoints["maven"]`` since sbt's repository format
+// Reads `proxy_endpoints["maven"]` since sbt's repository format
 // shares the Maven artifact layout.
 
 package installgate
@@ -26,12 +26,12 @@ import (
 type SbtScope int
 
 const (
-	// SbtScopeUser writes ``~/.sbt/repositories``.  Same path on
+	// SbtScopeUser writes `~/.sbt/repositories`.  Same path on
 	// every supported OS — sbt is JVM-portable.
 	SbtScopeUser SbtScope = iota
 
-	// SbtScopeSystem writes ``$SBT_HOME/conf/repositories``.
-	// Returns empty (soft no-op) when ``SBT_HOME`` is not set —
+	// SbtScopeSystem writes `$SBT_HOME/conf/repositories`.
+	// Returns empty (soft no-op) when `SBT_HOME` is not set —
 	// sbt's install path varies across distros + sdkman / brew /
 	// apt installs.
 	SbtScopeSystem
@@ -136,7 +136,7 @@ func WriteSbt(m *scanner.InstallGateMap, scope SbtScope, marker MarkerFields) (W
 //	[repositories]
 //	sentari-proxy: <url>
 //
-// The ``[repositories]`` header is mandatory; without it sbt
+// The `[repositories]` header is mandatory; without it sbt
 // silently ignores the file and falls back to its baked-in
 // defaults (which is the worst-case failure mode — operators
 // would see no error and the gate would be inert).

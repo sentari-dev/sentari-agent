@@ -9,7 +9,7 @@ import "os"
 // of wrong-Windows-detection is low because the install-gate threat
 // model on Windows is dominated by EXE installers, not package-
 // manager registries running inside Windows containers.  Operators
-// can override via ``PUT /api/v1/inventory/devices/{id}/runtime``
+// can override via `PUT /api/v1/inventory/devices/{id}/runtime`
 // when the auto-detection guesses wrong.
 func detect() string {
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {

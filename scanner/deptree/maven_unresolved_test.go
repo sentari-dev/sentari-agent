@@ -1,6 +1,7 @@
 package deptree
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,7 +67,7 @@ func TestUnresolvedRefs(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		edges, err := ParseMavenPom(filepath.Join(pomDir, "pom.xml"), m2)
+		edges, err := ParseMavenPom(context.Background(), filepath.Join(pomDir, "pom.xml"), m2)
 		if err != nil {
 			t.Fatalf("ParseMavenPom must not error on missing parent: %v", err)
 		}
@@ -134,7 +135,7 @@ func TestUnresolvedRefs(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		edges, err := ParseMavenPom(filepath.Join(pomDir, "pom.xml"), m2)
+		edges, err := ParseMavenPom(context.Background(), filepath.Join(pomDir, "pom.xml"), m2)
 		if err != nil {
 			t.Fatalf("ParseMavenPom should not error: %v", err)
 		}
@@ -191,7 +192,7 @@ func TestUnresolvedRefs(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		edges, err := ParseMavenPom(filepath.Join(pomDir, "pom.xml"), m2)
+		edges, err := ParseMavenPom(context.Background(), filepath.Join(pomDir, "pom.xml"), m2)
 		if err != nil {
 			t.Fatalf("ParseMavenPom should not error: %v", err)
 		}

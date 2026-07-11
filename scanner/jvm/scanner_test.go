@@ -10,8 +10,8 @@ import (
 )
 
 // TestScanner_EnvTypeIsJVM is a one-liner guard so a future refactor
-// that accidentally renames EnvJVM to something else (``java``,
-// ``maven``) breaks this test rather than silently re-namespacing every
+// that accidentally renames EnvJVM to something else (`java`,
+// `maven`) breaks this test rather than silently re-namespacing every
 // PackageRecord the plugin emits.
 func TestScanner_EnvTypeIsJVM(t *testing.T) {
 	var s Scanner

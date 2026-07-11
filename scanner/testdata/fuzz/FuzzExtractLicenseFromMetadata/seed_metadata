@@ -1,0 +1,2 @@
+go test fuzz v1
+string("Metadata-Version: 2.1\nName: requests\nVersion: 2.31.0\nLicense: Apache-2.0\nClassifier: License :: OSI Approved :: Apache Software License\n")

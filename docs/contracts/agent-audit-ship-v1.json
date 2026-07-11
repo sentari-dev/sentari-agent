@@ -42,7 +42,7 @@
         "content_hash": {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$",
-          "description": "sha256(event_type + detail + prev_hash + created_at), lowercase hex. Server recomputes and must match."
+          "description": "Content hash, lowercase hex, encoded per hash_version. v1 (default): sha256(event_type + detail + prev_hash + created_at). v2: sha256 over, for each field in order (event_type, detail, prev_hash, created_at), an 8-byte big-endian byte-length followed by the field bytes. Server recomputes and must match."
         },
         "prev_hash": {
           "type": "string",
@@ -53,6 +53,13 @@
           "type": "string",
           "maxLength": 64,
           "description": "EXACT RFC3339Nano string the agent fed into the hash. Stored verbatim; any reformatting breaks server-side hash verification."
+        },
+        "hash_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2,
+          "default": 1,
+          "description": "Encoding scheme of content_hash: 1 = legacy plain concatenation, 2 = length-prefixed. Optional and additive; absent means 1 (older agents). Linkage is scheme-independent, so a chain may mix v1 and v2 rows."
         }
       }
     }

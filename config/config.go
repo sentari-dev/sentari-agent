@@ -19,11 +19,83 @@ type AgentConfig struct {
 	Logging     LoggingConfig
 	InstallGate InstallGateConfig
 	Agent       AgentSection
+	Cache       CacheConfig
+	Audit       AuditConfig
 }
 
+// CacheConfig holds local scan-queue (offline cache) settings.
+//
+// INI section:
+//
+//	[cache]
+//	max_pending_scans = 500
+//	max_pending_bytes = 536870912
+type CacheConfig struct {
+	// MaxPendingScans caps how many not-yet-uploaded scan rows the local
+	// SQLite queue retains before EnqueueScan evicts the oldest ones.  It
+	// bounds on-disk growth during a server outage or air-gap window: at the
+	// default hourly cadence, 500 rows is ~3 weeks of offline operation.  A
+	// durably air-gapped fleet on the 365-day tier can raise this (at the cost
+	// of disk) so a longer offline burst is retained rather than evicted.
+	// Must be non-negative; 0 disables retention (every enqueue evicts older
+	// pending rows).  Defaults to cache.DefaultMaxPendingScans (500) and is
+	// applied via cache.SetMaxPendingScans at startup.  INI key:
+	// `[cache] max_pending_scans`.
+	MaxPendingScans int
+
+	// MaxPendingBytes caps the total size (in bytes) of retained
+	// not-yet-uploaded scan_json the local SQLite queue holds before
+	// EnqueueScan evicts the oldest rows.  It bounds on-disk growth when a
+	// few very large scans would otherwise blow past a sensible disk budget
+	// even while the row count stays under MaxPendingScans.  Must be
+	// non-negative; 0 disables the byte cap (retention is then bounded only
+	// by MaxPendingScans).  Defaults to cache.DefaultMaxPendingBytes (512
+	// MiB) and is applied via cache.SetMaxPendingBytes at startup.  INI key:
+	// `[cache] max_pending_bytes`.
+	MaxPendingBytes int
+}
+
+// AuditConfig holds local append-only audit-log retention settings.
+//
+// INI section:
+//
+//	[audit]
+//	max_audit_bytes = 268435456
+type AuditConfig struct {
+	// MaxAuditBytes is the soft cap, in bytes, on the total logical size of the
+	// local append-only audit_log table.  It bounds on-disk growth of the audit
+	// log so a long-lived agent does not accumulate audit rows forever: once the
+	// estimated table size exceeds this cap, the OLDEST already-SHIPPED rows
+	// (server-witnessed, safe to reclaim) are purged oldest-first, always
+	// retaining a forensic tail.  UNSHIPPED rows are NEVER purged — on a long
+	// air-gap window (up to the 365-day tier) every row is unshipped and the log
+	// grows unbounded by design, because that growth is undelivered audit
+	// evidence that must be preserved, not discarded.  The cap therefore only
+	// ever reclaims history the server has already re-anchored.
+	//
+	// Must be non-negative; 0 DISABLES the cap (retain every row forever — the
+	// audit package's own historical default).  Defaults to
+	// DefaultMaxAuditBytes (256 MiB): a generous but real ceiling sized for
+	// compliance audit trails on air-gap deployments — audit rows are small (a few
+	// hundred bytes each), so 256 MiB is on the order of a million shipped
+	// events of reclaimable forensic tail, while still bounding an always-online
+	// agent's shipped-and-re-anchored history.  Applied via
+	// audit.SetMaxAuditBytes at startup.  INI key: `[audit] max_audit_bytes`.
+	MaxAuditBytes int64
+}
+
+// DefaultMaxAuditBytes is the built-in bounded cap wired into the audit log's
+// MaxAuditBytes retention knob when the operator does not set `[audit]
+// max_audit_bytes`.  256 MiB.  Kept as a package literal (like the cache
+// defaults) so this leaf config package does not import the audit package; the
+// audit package's own MaxAuditBytes var still defaults to 0 (disabled) for
+// callers that do not wire this in, and this default is what the enterprise
+// agent applies at startup to make the log bounded out of the box.
+const DefaultMaxAuditBytes int64 = 256 << 20 // 256 MiB
+
 // AgentSection holds operator-supplied per-host metadata that the
-// agent emits on every scan upload.  The server consumes these tags
-// for dashboard-side filtering.
+// agent emits on every scan upload.  The server filters against
+// these tags on the dashboard side.
 //
 // INI section:
 //
@@ -38,15 +110,15 @@ type AgentConfig struct {
 // on a single typo.  Cap at 32 entries (parser truncates with a
 // warning if more).
 //
-// ``Tags`` is a *pointer* to a slice so we can distinguish three
+// `Tags` is a *pointer* to a slice so we can distinguish three
 // states on the wire:
 //
-//	nil          → ``[agent]`` section absent OR no ``tags`` key →
+//	nil          → `[agent]` section absent OR no `tags` key →
 //	               omit the field on /scan → server leaves
-//	               ``device.tags_agent`` untouched (back-compat).
-//	&[]string{}  → operator wrote ``tags =`` with no values →
-//	               serialise as ``"tags": []`` → server clears
-//	               ``device.tags_agent``.
+//	               `device.tags_agent` untouched (back-compat).
+//	&[]string{}  → operator wrote `tags =` with no values →
+//	               serialise as `"tags": []` → server clears
+//	               `device.tags_agent`.
 //	&[]string{…} → populated → server applies the canonical list.
 type AgentSection struct {
 	Tags *[]string
@@ -66,20 +138,20 @@ type ServerConfig struct {
 	// step previously honoured only the SENTARI_AGENT_SYSTEMD_UNIT /
 	// SENTARI_AGENT_LAUNCHD_LABEL env vars — which the service-spawned
 	// agent process does not inherit.  Empty means "use the built-in
-	// default".  INI keys: ``[server] systemd_unit`` / ``launchd_label``.
+	// default".  INI keys: `[server] systemd_unit` / `launchd_label`.
 	SystemdUnit  string // e.g. sentari-agent.service (Linux)
 	LaunchdLabel string // e.g. system/dev.sentari.agent (macOS)
 }
 
 // ScannerConfig holds scanner settings.
 type ScannerConfig struct {
-	ScanRoot string // Filesystem root to scan (default: / or C:\)
+	ScanRoot string // Filesystem root to scan (empty = platform default resolved by scanner.NewRunner: / on POSIX, C:\ on Windows)
 	MaxDepth int    // Max directory depth (default: 8)
 	Interval int    // Scan interval in seconds (default: 3600)
-	// ScanContainers enables the container-image scanner
+	// ScanContainers enables the Sprint-17 container-image scanner
 	// (Docker / Podman / CRI-O — containerd deferred).  INI key:
-	// ``[scanner] containers = true``.  Also honoured via the
-	// ``SENTARI_SCAN_CONTAINERS=true`` env override at main.go.
+	// `[scanner] containers = true`.  Also honoured via the
+	// `SENTARI_SCAN_CONTAINERS=true` env override at main.go.
 	// Defaults to false: off-by-default until fleet telemetry
 	// validates the performance shape on real hosts.
 	ScanContainers bool
@@ -87,10 +159,10 @@ type ScannerConfig struct {
 
 // ProxyConfig holds forward proxy settings.
 type ProxyConfig struct {
-	HTTPSProxy       string // Proxy URL
-	NoProxy          string // Bypass list (comma-separated)
-	AuthUser         string // Proxy auth username
-	AuthPassFile     string // Path to file containing proxy password
+	HTTPSProxy   string // Proxy URL
+	NoProxy      string // Bypass list (comma-separated)
+	AuthUser     string // Proxy auth username
+	AuthPassFile string // Path to file containing proxy password
 }
 
 // LoggingConfig holds logging settings.
@@ -118,67 +190,67 @@ type InstallGateConfig struct {
 	Enabled bool
 
 	// PythonScope selects the pip-config target on hosts with
-	// Python installed.  ``user`` writes ``~/.config/pip/pip.conf``
-	// (laptop default); ``system`` writes ``/etc/pip.conf`` (server
+	// Python installed.  `user` writes `~/.config/pip/pip.conf`
+	// (laptop default); `system` writes `/etc/pip.conf` (server
 	// default but requires the agent to run as root).  Empty
-	// resolves to ``user`` at apply time.
+	// resolves to `user` at apply time.
 	PythonScope string
 
 	// NodeScope selects the npm-config target on hosts with Node
-	// installed.  ``user`` writes ``~/.npmrc``; ``system`` writes
-	// ``/etc/npmrc`` (Linux/macOS only — the npm "global" prefix
+	// installed.  `user` writes `~/.npmrc`; `system` writes
+	// `/etc/npmrc` (Linux/macOS only — the npm "global" prefix
 	// on Windows is install-method-dependent so the npm writer
 	// soft-no-ops there for system scope).  Empty resolves to
-	// ``user`` at apply time.
+	// `user` at apply time.
 	NodeScope string
 
 	// MavenScope selects the Maven settings.xml target on hosts
-	// with Maven installed.  ``user`` writes ``~/.m2/settings.xml``;
-	// ``system`` writes ``$MAVEN_HOME/conf/settings.xml`` (soft no-op
+	// with Maven installed.  `user` writes `~/.m2/settings.xml`;
+	// `system` writes `$MAVEN_HOME/conf/settings.xml` (soft no-op
 	// when MAVEN_HOME is unset, since Maven's install path is non-
-	// stable across distros).  Empty resolves to ``user`` at apply
+	// stable across distros).  Empty resolves to `user` at apply
 	// time.
 	MavenScope string
 
 	// NuGetScope selects the NuGet config target on hosts with
-	// .NET installed.  ``user`` writes the per-user
-	// ``NuGet.Config`` (``%APPDATA%\NuGet\NuGet.Config`` on
-	// Windows, ``~/.nuget/NuGet/NuGet.Config`` on POSIX);
-	// ``system`` writes a Sentari-Config drop-in under
-	// ``%ProgramData%\NuGet\Config\`` (Windows only — POSIX has
+	// .NET installed.  `user` writes the per-user
+	// `NuGet.Config` (`%APPDATA%\NuGet\NuGet.Config` on
+	// Windows, `~/.nuget/NuGet/NuGet.Config` on POSIX);
+	// `system` writes a Sentari-Config drop-in under
+	// `%ProgramData%\NuGet\Config\` (Windows only — POSIX has
 	// no system-wide NuGet config dir, the writer soft-no-ops).
-	// Empty resolves to ``user`` at apply time.
+	// Empty resolves to `user` at apply time.
 	NuGetScope string
 
 	// UvScope selects the uv.toml target on hosts with Astral's
-	// uv installed.  ``user`` writes the per-user ``uv.toml``;
-	// ``system`` writes ``/etc/uv/uv.toml`` (POSIX) or
-	// ``%PROGRAMDATA%\uv\uv.toml`` (Windows).  Empty resolves
-	// to ``user`` at apply time.
+	// uv installed.  `user` writes the per-user `uv.toml`;
+	// `system` writes `/etc/uv/uv.toml` (POSIX) or
+	// `%PROGRAMDATA%\uv\uv.toml` (Windows).  Empty resolves
+	// to `user` at apply time.
 	UvScope string
 
-	// PdmScope selects the pdm config target.  ``user`` writes
-	// the per-user pdm config; ``system`` is a soft no-op (pdm
+	// PdmScope selects the pdm config target.  `user` writes
+	// the per-user pdm config; `system` is a soft no-op (pdm
 	// has no system-wide config path).  Empty resolves to
-	// ``user`` at apply time.
+	// `user` at apply time.
 	PdmScope string
 
 	// GradleScope selects the gradle init-script target.
-	// ``user`` writes ``~/.gradle/init.d/sentari-proxy.gradle``;
-	// ``system`` writes ``$GRADLE_HOME/init.d/sentari-proxy.gradle``
+	// `user` writes `~/.gradle/init.d/sentari-proxy.gradle`;
+	// `system` writes `$GRADLE_HOME/init.d/sentari-proxy.gradle`
 	// (soft no-op when GRADLE_HOME is unset).
 	GradleScope string
 
 	// SbtScope selects the sbt repositories-file target.
-	// ``user`` writes ``~/.sbt/repositories``; ``system`` writes
-	// ``$SBT_HOME/conf/repositories`` (soft no-op when SBT_HOME
+	// `user` writes `~/.sbt/repositories`; `system` writes
+	// `$SBT_HOME/conf/repositories` (soft no-op when SBT_HOME
 	// is unset).
 	SbtScope string
 
 	// YarnBerryScope selects the Yarn Berry .yarnrc.yml target.
 	// Yarn classic (1.x) reads .npmrc and is covered by the npm
 	// writer; this is the separate Berry-specific writer.
-	// ``user`` writes ``~/.yarnrc.yml``; ``system`` is a soft
+	// `user` writes `~/.yarnrc.yml`; `system` is a soft
 	// no-op (Yarn Berry has no system-wide config path).
 	YarnBerryScope string
 }
@@ -190,12 +262,36 @@ func DefaultConfig() AgentConfig {
 			PollInterval: 900,
 		},
 		Scanner: ScannerConfig{
-			ScanRoot: "/",
+			// ScanRoot is intentionally left empty so the
+			// platform default resolves at scan time in
+			// scanner.NewRunner (/ on POSIX, C:\ on Windows).
+			// Hardcoding "/" here defeated the Windows fallback
+			// on config-less runs.
 			MaxDepth: 8,
 			Interval: 3600,
 		},
 		Logging: LoggingConfig{
 			Level: "info",
+		},
+		Cache: CacheConfig{
+			// Mirror cache.DefaultMaxPendingScans (500).  Kept as a literal
+			// (like MaxDepth/Interval above) so this leaf config package does
+			// not depend on the cache package; the two defaults must stay in
+			// sync.
+			MaxPendingScans: 500,
+			// Mirror cache.DefaultMaxPendingBytes (512 MiB = 512 << 20).  Kept
+			// as a literal for the same reason; the two defaults must stay in
+			// sync.
+			MaxPendingBytes: 512 << 20,
+		},
+		Audit: AuditConfig{
+			// Bound the audit log out of the box (DefaultMaxAuditBytes, 256
+			// MiB).  Unlike audit.MaxAuditBytes (which defaults to 0 =
+			// disabled for callers that do not wire it), a config-less
+			// enterprise agent applies this bounded default via
+			// audit.SetMaxAuditBytes so the log cannot grow forever.  0 in the
+			// config disables the cap.
+			MaxAuditBytes: DefaultMaxAuditBytes,
 		},
 	}
 }
@@ -217,6 +313,13 @@ func LoadFromFile(path string) (AgentConfig, error) {
 	for scanner.Scan() {
 		lineNum++
 		line := strings.TrimSpace(scanner.Text())
+
+		// Strip a leading UTF-8 BOM (U+FEFF) on the first line.  Windows
+		// PowerShell 5.1's Set-Content -Encoding UTF8 prepends one; it is not
+		// Unicode whitespace, so the TrimSpace above leaves it in place.
+		if lineNum == 1 {
+			line = strings.TrimPrefix(line, "\ufeff")
+		}
 
 		// Skip empty lines and comments.
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
@@ -406,6 +509,46 @@ func (c *AgentConfig) set(section, key, value string) error {
 			default:
 				return fmt.Errorf("invalid yarnberry_scope %q (want user/system)", value)
 			}
+		default:
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
+		}
+	case "cache":
+		switch key {
+		case "max_pending_scans":
+			v, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("invalid max_pending_scans: %w", err)
+			}
+			if v < 0 {
+				return fmt.Errorf("max_pending_scans must be non-negative, got %d", v)
+			}
+			c.Cache.MaxPendingScans = v
+		case "max_pending_bytes":
+			v, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("invalid max_pending_bytes: %w", err)
+			}
+			if v < 0 {
+				return fmt.Errorf("max_pending_bytes must be non-negative, got %d", v)
+			}
+			c.Cache.MaxPendingBytes = v
+		default:
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
+		}
+	case "audit":
+		switch key {
+		case "max_audit_bytes":
+			// int64: the audit retention cap can legitimately exceed 2 GiB on a
+			// 32-bit build, and audit.MaxAuditBytes is int64, so parse the full
+			// width rather than truncating through int.
+			v, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid max_audit_bytes: %w", err)
+			}
+			if v < 0 {
+				return fmt.Errorf("max_audit_bytes must be non-negative, got %d", v)
+			}
+			c.Audit.MaxAuditBytes = v
 		default:
 			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}

@@ -55,9 +55,9 @@ func discoverClaudeCode() []scanner.Environment {
 // scanClaudeCode walks one of the claude subdirs and emits a
 // PackageRecord per discovered item.  Each item's shape is:
 //
-//   agents/<name>.md            -> "agent:<name>"
-//   skills/<name>/SKILL.md      -> "skill:<name>"
-//   plugins/<name>/plugin.json  -> "plugin:<name>"
+//	agents/<name>.md            -> "agent:<name>"
+//	skills/<name>/SKILL.md      -> "skill:<name>"
+//	plugins/<name>/plugin.json  -> "plugin:<name>"
 //
 // These are configurations, not packages — Name reflects that by
 // carrying a prefix so they don't collide with real package names

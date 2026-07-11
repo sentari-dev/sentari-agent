@@ -1,6 +1,7 @@
 package update
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -29,10 +30,13 @@ func applyPlanFromServer(t *testing.T, c *Client, version, servedAt string, body
 	plan.Platform.URL = "/api/v1/agent/release/binary/" + runtime.GOOS + "/" + runtime.GOARCH
 	sum := sha256.Sum256(body)
 	plan.Platform.SHA256 = hex.EncodeToString(sum[:])
-	return c.Apply(plan, installPath, stagedDir)
+	return c.Apply(context.Background(), plan, installPath, stagedDir)
 }
 
 func TestApply_recordsAndEnforcesHighWaterMark(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apply self-update refused on Windows by design; see TestApply_refusesOnWindows")
+	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	body := []byte("binary-0.3.0")
 	srv := signedManifestServer(t, "primary", priv, "0.3.0", "0.1.0", "2026-05-22T12:00:00Z", body)
@@ -60,6 +64,9 @@ func TestApply_recordsAndEnforcesHighWaterMark(t *testing.T) {
 }
 
 func TestApply_refusesReplayOfOlderServedAt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apply self-update path is unix-only; Windows uses install.ps1 — see TestApply_refusesOnWindows")
+	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	tmp := t.TempDir()
 	installPath := filepath.Join(tmp, "sentari-agent")
@@ -92,6 +99,9 @@ func TestApply_refusesReplayOfOlderServedAt(t *testing.T) {
 }
 
 func TestApply_refusesReplayOfOlderVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apply self-update path is unix-only; Windows uses install.ps1 — see TestApply_refusesOnWindows")
+	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	tmp := t.TempDir()
 	installPath := filepath.Join(tmp, "sentari-agent")

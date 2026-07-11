@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"name\":\"numpy\",\"version\":\"1.26.0\",\"license\":\"BSD-3-Clause\",\"build\":\"py312h0\"}")

@@ -6,6 +6,8 @@
 package supplychain
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -23,6 +25,47 @@ import (
 // dependency cannot use safeio's symlink-refusal + size cap to push
 // arbitrary content into a scan payload.
 const maxPackageJSONBytes = 4 << 20 // 4 MiB
+
+// utf8BOM is the UTF-8 byte-order mark (EF BB BF). npm tolerates a
+// BOM-prefixed package.json, but encoding/json rejects the leading U+FEFF,
+// so a BOM'd manifest would otherwise parse-fail and silently emit no
+// supply-chain signal. Strip it before Unmarshal, mirroring the same fix
+// applied in scanner/licenses and scanner/npm.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+func stripBOM(b []byte) []byte {
+	return bytes.TrimPrefix(b, utf8BOM)
+}
+
+// isInstalledPackageDir reports whether dir is the top-level directory of
+// an installed npm package — i.e. a direct child of a node_modules dir
+// (`node_modules/<pkg>`) or a scoped package's dir
+// (`node_modules/@scope/<pkg>`). The scan root passed to
+// DetectInNodeModules is treated as an implicit node_modules so a caller
+// that passes `<project>/node_modules` works whether or not the walk
+// origin is literally named "node_modules".
+//
+// package.json files nested DEEPER inside a package (subpath-export stub
+// manifests, bundled test fixtures like
+// `node_modules/foo/test/fixtures/bar/package.json`) are NOT installed
+// packages and must not emit spurious signals. The walk still descends
+// through them to reach any nested node_modules (npm's hoisting layout).
+func isInstalledPackageDir(dir, root string) bool {
+	parent := filepath.Dir(dir)
+	// node_modules/<pkg> — parent is the scan root or any node_modules dir.
+	if parent == root || filepath.Base(parent) == "node_modules" {
+		return true
+	}
+	// node_modules/@scope/<pkg> — parent is a scope dir sitting directly
+	// under the scan root or a node_modules dir.
+	if strings.HasPrefix(filepath.Base(parent), "@") {
+		grand := filepath.Dir(parent)
+		if grand == root || filepath.Base(grand) == "node_modules" {
+			return true
+		}
+	}
+	return false
+}
 
 // DetectInNodeModules walks `nodeModulesRoot` (typically
 // `<project>/node_modules`) and produces one or more signals per
@@ -44,10 +87,13 @@ const maxPackageJSONBytes = 4 << 20 // 4 MiB
 //
 // Sub-package `node_modules` directories are traversed too (npm's
 // hoisting model leaves nested node_modules in non-flat installs).
-func DetectInNodeModules(nodeModulesRoot string) ([]deptree.SupplyChainSignal, error) {
+func DetectInNodeModules(ctx context.Context, nodeModulesRoot string) ([]deptree.SupplyChainSignal, error) {
 	var signals []deptree.SupplyChainSignal
 
 	walkErr := filepath.WalkDir(nodeModulesRoot, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return fs.SkipAll
+		}
 		if err != nil {
 			return nil
 		}
@@ -66,9 +112,17 @@ func DetectInNodeModules(nodeModulesRoot string) ([]deptree.SupplyChainSignal, e
 		if !d.IsDir() {
 			return nil
 		}
-		// Each package dir contains its own package.json one level inside.
-		// Scoped packages (@scope/name) sit at depth 2 under node_modules.
+		// node_modules and @scope dirs are traversal waypoints, not package
+		// dirs themselves — keep descending but don't read a manifest here.
 		if d.Name() == "node_modules" || strings.HasPrefix(d.Name(), "@") {
+			return nil
+		}
+		// Only a direct child of a node_modules dir (or a scoped
+		// node_modules/@scope/<pkg>) is a real installed package. package.json
+		// files nested deeper (subpath-export stubs, bundled test fixtures)
+		// must not emit signals — but keep walking so a nested node_modules
+		// (npm hoisting) is still reached.
+		if !isInstalledPackageDir(path, nodeModulesRoot) {
 			return nil
 		}
 		pkgJSON := filepath.Join(path, "package.json")
@@ -81,7 +135,7 @@ func DetectInNodeModules(nodeModulesRoot string) ([]deptree.SupplyChainSignal, e
 			Version string            `json:"version"`
 			Scripts map[string]string `json:"scripts"`
 		}
-		if err := json.Unmarshal(raw, &pj); err != nil {
+		if err := json.Unmarshal(stripBOM(raw), &pj); err != nil {
 			return nil
 		}
 		if pj.Name == "" {

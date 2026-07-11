@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/comms"
@@ -60,21 +63,17 @@ func runUpdate(mode updateMode, agentCfg config.AgentConfig, serverURLOverride, 
 		return 1
 	}
 
-	certDir := dataDir + "/certs"
-	certFile := agentCfg.Server.CertFile
-	keyFile := agentCfg.Server.KeyFile
-	caFile := agentCfg.Server.CACertFile
-	if certFile == "" {
-		certFile = certDir + "/device.crt"
-	}
-	if keyFile == "" {
-		keyFile = certDir + "/device.key"
-	}
-	if caFile == "" {
-		caFile = certDir + "/ca.crt"
-	}
+	certDir, certPaths := resolveUpdateCertPaths(agentCfg, dataDir)
+	certFile := certPaths.CertFile
+	keyFile := certPaths.KeyFile
+	caFile := certPaths.CAFile
 
-	if !comms.CertsExist(certDir) {
+	// Existence-check the SAME resolved paths the mTLS client loads from — not
+	// the legacy certDir/device.* convention.  A config-overridden cert path
+	// (agent.conf [server] cert_file/key_file/ca_cert_file) would otherwise be
+	// invisible to the legacy dir-based check, spuriously reporting a validly
+	// registered agent as unregistered (or vice versa) and breaking self-update.
+	if !comms.CertsExistAt(certPaths) {
 		fmt.Fprintln(os.Stderr, "Agent is not registered (no client certificates on disk). Run --upload or --serve first.")
 		return 1
 	}
@@ -155,7 +154,14 @@ func runUpdate(mode updateMode, agentCfg config.AgentConfig, serverURLOverride, 
 			return 0
 		}
 		stagedDir := filepath.Join(dataDir, "staged")
-		if err := client.Apply(plan, installPath, stagedDir); err != nil {
+		// Bind the (potentially long) binary download to an interrupt/
+		// terminate-cancelled context so Ctrl-C or a service-manager
+		// SIGTERM aborts the download promptly instead of leaving the
+		// operator wedged behind a slow air-gap link.  The swap itself is
+		// fast and non-cancellable once the download completes.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := client.Apply(ctx, plan, installPath, stagedDir); err != nil {
 			fmt.Fprintf(os.Stderr, "Apply failed: %v\n", err)
 			// Even on apply error after binary swap, surface non-zero so
 			// the caller knows manual intervention may be needed.
@@ -165,6 +171,32 @@ func runUpdate(mode updateMode, agentCfg config.AgentConfig, serverURLOverride, 
 		return 0
 	}
 	return 1
+}
+
+// resolveUpdateCertPaths resolves the mTLS cert material paths the self-update
+// path should load and existence-check.  It mirrors the resolution in
+// main_enterprise.go: an explicit [server] cert_file/key_file/ca_cert_file in
+// agent.conf wins, otherwise fall back to the dataDir/certs/device.* + ca.crt
+// convention.  Returning the resolved CertFilePaths (rather than a bare dir)
+// lets the registration gate check exactly where the client loads from, so a
+// custom-path deployment is not misjudged as unregistered.  certDir is also
+// returned because trust-file loads (install-gate/license-map) still key off
+// the conventional certs dir.
+func resolveUpdateCertPaths(agentCfg config.AgentConfig, dataDir string) (certDir string, paths comms.CertFilePaths) {
+	certDir = filepath.Join(dataDir, "certs")
+	certFile := agentCfg.Server.CertFile
+	keyFile := agentCfg.Server.KeyFile
+	caFile := agentCfg.Server.CACertFile
+	if certFile == "" {
+		certFile = filepath.Join(certDir, "device.crt")
+	}
+	if keyFile == "" {
+		keyFile = filepath.Join(certDir, "device.key")
+	}
+	if caFile == "" {
+		caFile = filepath.Join(certDir, "ca.crt")
+	}
+	return certDir, comms.CertFilePaths{CertFile: certFile, KeyFile: keyFile, CAFile: caFile}
 }
 
 func resolveInstallPath(override string) (string, error) {

@@ -1,22 +1,22 @@
 // Package jvm extracts package identity metadata from JAR / WAR / EAR /
-// JMOD files without invoking any Java toolchain (zero binary
+// JMOD files without invoking any Java toolchain (ADR 0003: zero binary
 // execution).  Identity comes from on-disk artefacts in the following
 // precedence:
 //
-//  1. ``META-INF/maven/<groupId>/<artifactId>/pom.properties`` — the
+//  1. `META-INF/maven/<groupId>/<artifactId>/pom.properties` — the
 //     canonical Maven coordinate.  A shaded uber-jar carries one of
 //     these per embedded library; we emit one PackageRecord per file.
-//  2. ``META-INF/MANIFEST.MF`` — OSGi ``Bundle-SymbolicName`` +
-//     ``Bundle-Version`` when present (OSGi is authoritative for its
-//     own bundles); else ``Implementation-Title`` + ``Implementation-
-//     Version`` as a generic last fallback.
-//  3. **Filename** — ``<artifact>-<version>.jar`` parsing.  Heuristic,
+//  2. `META-INF/MANIFEST.MF` — OSGi `Bundle-SymbolicName` +
+//     `Bundle-Version` when present (OSGi is authoritative for its
+//     own bundles); else `Implementation-Title` + `Implementation-
+//     Version` as a generic last fallback.
+//  3. **Filename** — `<artifact>-<version>.jar` parsing.  Heuristic,
 //     but the only option for JARs that ship neither Maven metadata
 //     nor OSGi headers (e.g. older Apache Commons releases).
 //
 // Size caps exist on every parse to defend against malicious or
 // corrupt archives — see the max* constants.  The zip format's own
-// path-normalisation means entries like ``../../etc/passwd`` never
+// path-normalisation means entries like `../../etc/passwd` never
 // escape the archive's virtual namespace; the parser still only reads
 // specific logical paths, so a zip-slip entry is either picked up
 // unambiguously as its stated name or ignored.
@@ -34,6 +34,7 @@ import (
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // EnvType value this package emits on every PackageRecord.  Keep it
@@ -52,7 +53,6 @@ const (
 	maxPomPropertiesBytes = 64 * 1024
 	maxManifestBytes      = 1 * 1024 * 1024
 	maxJARBytes           = 512 * 1024 * 1024
-	maxRecordsPerJAR      = 10_000
 	// maxNestedDepth bounds the recursion into Spring Boot / Quarkus
 	// / shaded uber-jars.  Real-world uber-jars nest 1 level (Spring
 	// Boot BOOT-INF/lib/*.jar).  A shaded uber-jar that itself
@@ -62,10 +62,45 @@ const (
 	maxNestedDepth = 3
 	// maxNestedJarBytes is the per-nested-member read cap.  If a
 	// nested JAR entry decompresses to more than this, we stop
-	// reading and surface a ScanError.  Matches maxJARBytes for
-	// outer files — one member can't be larger than a whole JAR.
-	maxNestedJarBytes = maxJARBytes
+	// reading and surface a ScanError.  Deliberately much smaller
+	// than the 512 MiB outer-file cap: real nested library jars are
+	// under ~50 MiB, and the outer cap applied per-level across the
+	// depth-3 recursion (512 MiB × 3 × workers) would let a crafted
+	// bomb pin gigabytes of RAM per worker.  64 MiB comfortably fits
+	// every legitimate nested jar we have seen.
+	maxNestedJarBytes = 64 * 1024 * 1024
 )
+
+// maxNestedInFlightBytes caps the *cumulative* decompressed bytes a
+// single outer JAR may materialise across its entire nested-jar
+// subtree.  maxNestedJarBytes bounds one member; this bounds the sum,
+// so a wide fan-out of many just-under-cap members (or a deflate bomb
+// whose on-disk size hides its expanded size) can't exhaust memory.
+// When the budget is spent the remaining subtree is skipped with a
+// ScanError, mirroring the depth-cap behaviour.
+//
+// A var, not a const, so tests can lower it to exercise the budget
+// path without having to materialise 256 MiB of fixtures.
+var maxNestedInFlightBytes int64 = 256 * 1024 * 1024
+
+// maxRecordsPerJAR caps the total number of PackageRecords a single
+// outer JAR may emit across its *entire* extraction — the identity
+// records of the outer archive, every pom.properties inside it, and
+// every record produced by descending into nested jars all draw from
+// this one shared budget.  Without a single shared cap a crafted JAR
+// could bypass the limit by mixing paths: e.g. a central directory
+// listing millions of tiny META-INF/maven/<g>/<a>/pom.properties
+// entries would otherwise build an unbounded pomEntries slice and emit
+// an unbounded number of records, amplifying a small on-disk archive
+// into gigabytes of resident memory.  The budget is threaded by
+// reference through the recursion so pom records and nested-jar records
+// cannot each individually stay under the cap while together blowing
+// past it.  When the budget is spent the remainder is skipped with a
+// single ScanError, mirroring the depth-cap / byte-budget behaviour.
+//
+// A var, not a const, so tests can lower it to exercise the cap path
+// without having to materialise 10 000 fixture entries.
+var maxRecordsPerJAR = 10_000
 
 // PomProperties is the parsed shape of a META-INF/maven .pom.properties
 // file.  All three identity fields are populated on a well-formed file;
@@ -136,7 +171,7 @@ func parsePomProperties(data []byte) (PomProperties, error) {
 
 // parseManifest reads a MANIFEST.MF body.  Supports both CRLF (per
 // spec) and LF-only (common enough in the wild to tolerate).  Handles
-// the ``continuation line'' convention: any line starting with a single
+// the "continuation line" convention: any line starting with a single
 // space is appended to the value of the previous header.
 func parseManifest(data []byte) (ManifestInfo, error) {
 	if len(data) > maxManifestBytes {
@@ -217,10 +252,10 @@ func parseManifest(data []byte) (ManifestInfo, error) {
 // "3.12.0") using the Maven convention: the version suffix begins at
 // the last hyphen whose next character is a digit.  This handles:
 //
-//   spring-boot-2.7.18-RELEASE.jar → spring-boot + 2.7.18-RELEASE
-//   lib-1.0-SNAPSHOT.jar           → lib         + 1.0-SNAPSHOT
-//   tools.jar                      → tools       + ""
-//   nothing-like-a-version.jar     → nothing-like-a-version + ""
+//	spring-boot-2.7.18-RELEASE.jar → spring-boot + 2.7.18-RELEASE
+//	lib-1.0-SNAPSHOT.jar           → lib         + 1.0-SNAPSHOT
+//	tools.jar                      → tools       + ""
+//	nothing-like-a-version.jar     → nothing-like-a-version + ""
 //
 // Returns ("", "") if the input doesn't look like a JAR at all.
 func parseFilename(name string) (artifact, version string) {
@@ -264,7 +299,12 @@ func parseFilename(name string) (artifact, version string) {
 //   - Never emits more than maxRecordsPerJAR records per outer JAR.
 //   - Recursion depth bounded by maxNestedDepth.
 func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanError) {
-	rc, err := zip.OpenReader(jarPath)
+	// Open through safeio (O_NOFOLLOW|O_NONBLOCK + fstat regular check)
+	// rather than zip.OpenReader: the latter follows a `*.jar` symlink
+	// and blocks forever on a FIFO named `*.jar`.  safeio refuses both
+	// promptly.  We then hand the fd to zip.NewReader (which needs the
+	// archive size, taken from the same fd's stat to avoid a TOCTOU).
+	f, err := safeio.Open(jarPath)
 	if err != nil {
 		return nil, []scanner.ScanError{{
 			Path:    jarPath,
@@ -272,21 +312,51 @@ func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanErro
 			Error:   fmt.Sprintf("open zip: %v", err),
 		}}
 	}
-	defer rc.Close()
-	return extractFromReader(&rc.Reader, jarPath, 0)
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, []scanner.ScanError{{
+			Path:    jarPath,
+			EnvType: EnvJVM,
+			Error:   fmt.Sprintf("stat zip: %v", err),
+		}}
+	}
+	zr, err := zip.NewReader(f, info.Size())
+	if err != nil {
+		return nil, []scanner.ScanError{{
+			Path:    jarPath,
+			EnvType: EnvJVM,
+			Error:   fmt.Sprintf("open zip: %v", err),
+		}}
+	}
+	budget := maxNestedInFlightBytes
+	// remaining is the shared per-outer-JAR record budget.  It is passed
+	// by reference into the recursion so pom records + nested-jar records
+	// together respect maxRecordsPerJAR (see the const's doc comment).
+	remaining := maxRecordsPerJAR
+	return extractFromReader(zr, jarPath, 0, &budget, &remaining)
 }
 
 // extractFromReader is the recursion core.  Given an already-opened
-// ``*zip.Reader`` and a ``displayPath`` naming this archive (for
-// outer JARs: the filesystem path; for nested: ``outer!/inner.jar``),
+// `*zip.Reader` and a `displayPath` naming this archive (for
+// outer JARs: the filesystem path; for nested: `outer!/inner.jar`),
 // it applies the precedence rules for identity, then descends into
 // any nested .jar entries found.
 //
-// ``depth`` starts at 0 for the physical outer JAR; increases by 1
+// `depth` starts at 0 for the physical outer JAR; increases by 1
 // per recursion.  When depth reaches maxNestedDepth, this function
 // still extracts identity but refuses to recurse further and emits a
 // ScanError naming the depth-4 child that was skipped.
-func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.PackageRecord, []scanner.ScanError) {
+// `budget` points at the remaining cumulative in-flight byte allowance
+// for the *outer* JAR (see maxNestedInFlightBytes).  It is shared by
+// reference across the whole recursion so a wide-and-deep bomb draws
+// from one shared pool; when it is exhausted the remaining nested
+// members are skipped with a ScanError.
+// `remaining` points at the shared per-outer-JAR record budget (see
+// maxRecordsPerJAR).  It, too, is shared by reference so pom records and
+// nested-jar records draw from one pool and cannot collectively exceed
+// the cap.
+func extractFromReader(r *zip.Reader, displayPath string, depth int, budget *int64, remaining *int) ([]scanner.PackageRecord, []scanner.ScanError) {
 	// Single pass over entries to classify them.  This is cheaper than
 	// three separate passes and keeps the O(n) bound explicit.
 	var (
@@ -294,10 +364,18 @@ func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.
 		manifestEntry *zip.File
 		nestedJARs    []*zip.File
 	)
+	// pomTruncated records that we stopped collecting pom.properties
+	// entries because the shared record budget was already saturated —
+	// so extractIdentity can surface a single "record cap exceeded"
+	// ScanError.  Bounding the *slice* (not just the emit) is what keeps
+	// a JAR whose central directory lists millions of pom.properties
+	// entries from amplifying a tiny on-disk archive into an unbounded
+	// resident slice.
+	pomTruncated := false
 	for _, f := range r.File {
 		name := path.Clean(f.Name)
 		// Zip-slip guard: refuse entries that try to walk out of the
-		// archive's virtual root (``../etc/passwd`` etc).  The
+		// archive's virtual root (`../etc/passwd` etc).  The
 		// extractor doesn't extract-to-disk, but a malicious entry
 		// name could otherwise mislead the metadata pickers.
 		if strings.HasPrefix(name, "..") {
@@ -310,24 +388,40 @@ func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.
 		switch {
 		case strings.HasPrefix(f.Name, "META-INF/maven/") &&
 			strings.HasSuffix(f.Name, "/pom.properties"):
+			// Never retain more pom entries than the shared record budget
+			// could ever emit: extractIdentity emits at most one record
+			// per entry, and the whole subtree may emit at most *remaining
+			// more records.  Anything beyond that is guaranteed to be
+			// skipped, so we refuse to even hold a reference to it.
+			if len(pomEntries) >= *remaining {
+				pomTruncated = true
+				continue
+			}
 			pomEntries = append(pomEntries, f)
 		case f.Name == "META-INF/MANIFEST.MF":
 			manifestEntry = f
 		case isJARLike(f.Name):
+			// Same rationale as pom entries: a nested jar yields at least
+			// one record (filename fallback), so we never need to retain
+			// more than *remaining candidates.  Anything beyond that is
+			// dropped here and reported by the descent loop's cap check.
+			if len(nestedJARs) >= *remaining {
+				continue
+			}
 			nestedJARs = append(nestedJARs, f)
 		}
 	}
 
-	records, errs := extractIdentity(displayPath, pomEntries, manifestEntry)
+	records, errs := extractIdentity(displayPath, pomEntries, manifestEntry, remaining, pomTruncated)
 
 	// Descend into nested JARs.  Every .jar / .war / .ear / .jmod
 	// inside this archive is its own artefact with its own coordinates
 	// — Spring Boot / Quarkus / shaded uber-jars all end up here.
 	// Agnostic to framework: we descend based on filename suffix, not
-	// on Spring Boot's ``BOOT-INF/lib/`` path, so new uber-jar
+	// on Spring Boot's `BOOT-INF/lib/` path, so new uber-jar
 	// conventions Just Work.
 	for _, f := range nestedJARs {
-		if len(records) >= maxRecordsPerJAR {
+		if *remaining <= 0 {
 			errs = append(errs, scanner.ScanError{
 				Path:    displayPath,
 				EnvType: EnvJVM,
@@ -345,6 +439,22 @@ func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.
 			continue
 		}
 
+		// Cumulative byte-budget guard.  Refuse to materialise this
+		// member if the outer JAR has already spent its allowance, or
+		// if the member's declared uncompressed size alone would blow
+		// it.  The declared size is a cheap pre-check; the actual bytes
+		// read (bounded by maxNestedJarBytes) are debited below, so a
+		// member that lies about its size still can't overrun the pool
+		// by more than one capped read.
+		if *budget <= 0 || f.UncompressedSize64 > uint64(*budget) {
+			errs = append(errs, scanner.ScanError{
+				Path:    childPath,
+				EnvType: EnvJVM,
+				Error:   fmt.Sprintf("nested JAR byte budget exceeded (max %d bytes); subtree skipped", maxNestedInFlightBytes),
+			})
+			continue
+		}
+
 		body, readErr := readZipMember(f, maxNestedJarBytes)
 		if readErr != nil {
 			errs = append(errs, scanner.ScanError{
@@ -354,6 +464,10 @@ func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.
 			})
 			continue
 		}
+		// Debit the shared pool by the bytes we actually pulled into
+		// memory (not the declared size), so liars are charged their
+		// real cost.
+		*budget -= int64(len(body))
 		childReader, zerr := zip.NewReader(bytes.NewReader(body), int64(len(body)))
 		if zerr != nil {
 			errs = append(errs, scanner.ScanError{
@@ -363,7 +477,7 @@ func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.
 			})
 			continue
 		}
-		childRecs, childErrs := extractFromReader(childReader, childPath, depth+1)
+		childRecs, childErrs := extractFromReader(childReader, childPath, depth+1, budget, remaining)
 		records = append(records, childRecs...)
 		errs = append(errs, childErrs...)
 	}
@@ -375,13 +489,25 @@ func extractFromReader(r *zip.Reader, displayPath string, depth int) ([]scanner.
 // sets classified by the caller.  Returns the identity records for
 // the archive *itself* — nested-jar records are a separate concern
 // handled by the recursion.
-func extractIdentity(displayPath string, pomEntries []*zip.File, manifestEntry *zip.File) ([]scanner.PackageRecord, []scanner.ScanError) {
+func extractIdentity(displayPath string, pomEntries []*zip.File, manifestEntry *zip.File, remaining *int, pomTruncated bool) ([]scanner.PackageRecord, []scanner.ScanError) {
 	var records []scanner.PackageRecord
 	var errs []scanner.ScanError
+
+	// capped is set if we ran out of the shared record budget while
+	// emitting pom records, or if classification already dropped pom
+	// entries because the budget was saturated.  Either way we surface
+	// exactly one ScanError, mirroring the depth-cap / byte-budget style.
+	capped := pomTruncated
 
 	// Precedence 1 — pom.properties (can produce multiple records for
 	// a shaded uber-jar).
 	for _, f := range pomEntries {
+		if *remaining <= 0 {
+			// Shared record budget exhausted mid-JAR: stop emitting and
+			// flag the truncation for a single aggregated ScanError.
+			capped = true
+			break
+		}
 		body, err := readZipMember(f, maxPomPropertiesBytes)
 		if err != nil {
 			errs = append(errs, scanner.ScanError{
@@ -414,12 +540,23 @@ func extractIdentity(displayPath string, pomEntries []*zip.File, manifestEntry *
 			EnvType:     EnvJVM,
 			Environment: displayPath,
 		})
+		*remaining--
+	}
+	if capped {
+		errs = append(errs, scanner.ScanError{
+			Path:    displayPath,
+			EnvType: EnvJVM,
+			Error:   fmt.Sprintf("record cap exceeded (%d); remaining pom.properties skipped", maxRecordsPerJAR),
+		})
 	}
 	if len(records) > 0 {
 		return records, errs
 	}
 
-	// Precedence 2 — MANIFEST.MF.
+	// Precedence 2 — MANIFEST.MF.  Only reached when no pom record was
+	// emitted, which (given the pom loop decrements *remaining on every
+	// emit and returns above once len(records)>0) guarantees the shared
+	// budget still has room here; the fallback record is charged below.
 	if manifestEntry != nil {
 		body, err := readZipMember(manifestEntry, maxManifestBytes)
 		if err != nil {
@@ -438,6 +575,7 @@ func extractIdentity(displayPath string, pomEntries []*zip.File, manifestEntry *
 				})
 			} else if rec, ok := manifestToRecord(displayPath, mi); ok {
 				records = append(records, rec)
+				*remaining--
 			}
 		}
 	}
@@ -446,8 +584,8 @@ func extractIdentity(displayPath string, pomEntries []*zip.File, manifestEntry *
 	}
 
 	// Precedence 3 — filename fallback.  Parses the trailing filename
-	// component; for nested paths like ``outer!/BOOT-INF/lib/x.jar`` we
-	// want the inner filename only, so split on the last ``/``.
+	// component; for nested paths like `outer!/BOOT-INF/lib/x.jar` we
+	// want the inner filename only, so split on the last `/`.
 	filename := displayPath
 	if idx := strings.LastIndex(filename, "/"); idx >= 0 {
 		filename = filename[idx+1:]
@@ -460,6 +598,7 @@ func extractIdentity(displayPath string, pomEntries []*zip.File, manifestEntry *
 		EnvType:     EnvJVM,
 		Environment: displayPath,
 	})
+	*remaining--
 	return records, errs
 }
 
@@ -508,7 +647,7 @@ func manifestToRecord(jarPath string, mi ManifestInfo) (scanner.PackageRecord, b
 	return rec, true
 }
 
-// readZipMember reads at most ``max+1`` bytes from a zip member.  The
+// readZipMember reads at most `max+1` bytes from a zip member.  The
 // +1 is deliberate: it lets the caller detect "exceeded cap" vs "at
 // cap exactly" without an extra stat call.  Returns an error if the
 // archive's stream is bad.

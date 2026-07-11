@@ -1,0 +1,2 @@
+go test fuzz v1
+string("version = 1\n\n[[package]]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[package.dependencies]]\nname = \"requests\"\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\n\n[[package.dependencies]]\nname = \"urllib3\"\n\n[[package]]\nname = \"urllib3\"\nversion = \"2.0.7\"\n")

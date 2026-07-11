@@ -1,6 +1,7 @@
 package licenses
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -17,12 +18,30 @@ func TestExtractNuGet_spdxExpression(t *testing.T) {
     <license type="expression">MIT</license>
   </metadata>
 </package>`)
-	out, err := ExtractNuGet(root)
+	out, err := ExtractNuGet(context.Background(), root)
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}
 	if len(out) != 1 || out[0].SpdxID != "MIT" || out[0].Confidence != 0.9 {
 		t.Errorf("wrong: %+v", out)
+	}
+}
+
+// A UTF-8 BOM-prefixed .nuspec is valid to NuGet; xml.Unmarshal rejects the
+// leading U+FEFF, so without stripping it the license would be lost.
+func TestExtractNuGet_bomPrefixedNuspec(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "bommed", "1.0.0")
+	mustMkdir(t, dir)
+	mustWrite(t, filepath.Join(dir, "Bommed.nuspec"),
+		"\xEF\xBB\xBF"+`<?xml version="1.0"?>
+<package><metadata><id>Bommed</id><version>1.0.0</version><license type="expression">MIT</license></metadata></package>`)
+	out, err := ExtractNuGet(context.Background(), root)
+	if err != nil {
+		t.Fatalf("extract failed: %v", err)
+	}
+	if len(out) != 1 || out[0].SpdxID != "MIT" || out[0].Confidence != 0.9 {
+		t.Errorf("BOM'd .nuspec not parsed: %+v", out)
 	}
 }
 
@@ -32,7 +51,7 @@ func TestExtractNuGet_licenseUrlFallback(t *testing.T) {
 	mustMkdir(t, dir)
 	mustWrite(t, filepath.Join(dir, "Old.Pkg.nuspec"), `<?xml version="1.0"?>
 <package><metadata><id>Old.Pkg</id><version>1.0.0</version><licenseUrl>https://opensource.org/licenses/MIT</licenseUrl></metadata></package>`)
-	out, err := ExtractNuGet(root)
+	out, err := ExtractNuGet(context.Background(), root)
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}

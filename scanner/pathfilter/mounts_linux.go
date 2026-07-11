@@ -4,7 +4,7 @@ package pathfilter
 
 import "golang.org/x/sys/unix"
 
-// linuxNetworkMagic lists the ``Statfs.Type`` magic numbers that
+// linuxNetworkMagic lists the `Statfs.Type` magic numbers that
 // indicate a network filesystem on Linux.
 //
 // Source: linux/include/uapi/linux/magic.h (cross-checked against
@@ -32,13 +32,17 @@ var linuxNetworkMagic = map[int64]struct{}{
 	0x564c:     {}, // NCP_SUPER_MAGIC (legacy Novell)
 }
 
+// statfsFn is a test seam over unix.Statfs so tests can fake a network
+// filesystem type; production code never reassigns it.
+var statfsFn = unix.Statfs
+
 // IsNetworkFilesystem reports whether path lives on a Linux network
 // mount.  Errors from statfs (path missing, EACCES) return
 // (false, err); the runtime walkers treat any error as "scan it" to
 // preserve coverage on quirky hosts.
 func IsNetworkFilesystem(path string) (bool, error) {
 	var stat unix.Statfs_t
-	if err := unix.Statfs(path, &stat); err != nil {
+	if err := statfsFn(path, &stat); err != nil {
 		return false, err
 	}
 	_, isNetwork := linuxNetworkMagic[int64(stat.Type)]

@@ -1,0 +1,2 @@
+go test fuzz v1
+string("lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      express:\n        specifier: ^4.18.0\n        version: 4.18.2\npackages:\n  express@4.18.2:\n    resolution: {integrity: sha512-test}\nsnapshots:\n  express@4.18.2:\n    dependencies:\n      qs: 6.11.0\n  qs@6.11.0: {}\n")

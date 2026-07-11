@@ -5,7 +5,7 @@
 // its exact source text (Python ints are arbitrary-precision).  A
 // verifier that re-canonicalizes through map[string]interface{} coerces
 // every number to float64, so an integer field at or above 2^53 (e.g.
-// the install-gate ``version`` epoch) round-trips with lost precision
+// the install-gate `version` epoch) round-trips with lost precision
 // and ed25519.Verify fails on an otherwise-valid envelope.  These tests
 // pin the round-trip on a >2^53 integer.
 

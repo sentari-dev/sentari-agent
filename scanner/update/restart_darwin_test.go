@@ -11,7 +11,7 @@ import (
 // exact command line the restart hook would invoke, without spawning
 // launchctl.  Defended against the 2026-05-22 regression where the
 // hardcoded launchd label silently diverged from the install-time
-// plist's ``dev.sentari.agent``.
+// plist's `dev.sentari.agent`.
 type captured struct {
 	name string
 	args []string
@@ -125,7 +125,7 @@ func TestRestartService_darwin_acceptsValidLabels(t *testing.T) {
 }
 
 func TestRestartService_darwin_defaultMatchesShippedPlist(t *testing.T) {
-	// The install-time LaunchDaemons plist uses ``dev.sentari.agent``.
+	// The install-time LaunchDaemons plist uses `dev.sentari.agent`.
 	// If anyone changes the default to a different reverse-DNS label,
 	// this test fails on purpose so they update the plist too.
 	if defaultDarwinLaunchdLabel != "system/dev.sentari.agent" {

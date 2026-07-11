@@ -87,8 +87,14 @@ func TestNormalizeLicense_SPDXPassthrough(t *testing.T) {
 	}
 }
 
-func TestNormalizeLicense_ClassifierFormat(t *testing.T) {
-	spdx, tier := NormalizeLicenseClassifier("License :: OSI Approved :: MIT License")
+// The trove-classifier fallback lives inline in ExtractLicenseFromMetadata
+// (the sole production consumer of "Classifier: License :: ..." lines).  These
+// tests drive that production path directly.
+func TestExtractLicenseFromMetadata_ClassifierFormat(t *testing.T) {
+	raw, spdx, tier := ExtractLicenseFromMetadata("Classifier: License :: OSI Approved :: MIT License\n")
+	if raw != "MIT License" {
+		t.Errorf("got raw %q, want %q", raw, "MIT License")
+	}
 	if spdx != "MIT" {
 		t.Errorf("got spdx %q, want MIT", spdx)
 	}
@@ -97,8 +103,11 @@ func TestNormalizeLicense_ClassifierFormat(t *testing.T) {
 	}
 }
 
-func TestNormalizeLicenseClassifier_Unknown(t *testing.T) {
-	spdx, tier := NormalizeLicenseClassifier("License :: Other/Proprietary License")
+func TestExtractLicenseFromMetadata_ClassifierUnknown(t *testing.T) {
+	raw, spdx, tier := ExtractLicenseFromMetadata("Classifier: License :: OSI Approved :: Nonexistent License\n")
+	if raw != "Nonexistent License" {
+		t.Errorf("got raw %q, want %q", raw, "Nonexistent License")
+	}
 	if spdx != "" {
 		t.Errorf("got spdx %q, want empty", spdx)
 	}
@@ -172,6 +181,111 @@ func TestExtractLicenseFromMetadata_NoLicense(t *testing.T) {
 	}
 }
 
+func TestExtractLicenseFromMetadata_HeaderBoundary(t *testing.T) {
+	// The real license is the RFC822 header field ("License: MIT"). The long-
+	// description body after the blank line is an embedded README that itself
+	// contains a "License: GPL-3.0" line — it must NOT override the header.
+	metadata := "Metadata-Version: 2.1\n" +
+		"Name: some-pkg\n" +
+		"Version: 1.0.0\n" +
+		"License: MIT\n" +
+		"\n" +
+		"# some-pkg\n" +
+		"\n" +
+		"License: GPL-3.0\n" +
+		"This project is distributed under the terms above.\n"
+	raw, spdx, tier := ExtractLicenseFromMetadata(metadata)
+	if raw != "MIT" {
+		t.Errorf("raw = %q, want MIT (body License: line leaked through)", raw)
+	}
+	if spdx != "MIT" {
+		t.Errorf("spdx = %q, want MIT", spdx)
+	}
+	if tier != "permissive" {
+		t.Errorf("tier = %q, want permissive", tier)
+	}
+}
+
+// TestExtractLicenseFromMetadata_LicenseExpressionSimple — a PEP 639
+// "License-Expression: MIT" header (setuptools >=77, no legacy License: field)
+// resolves directly to the SPDX id + tier.
+func TestExtractLicenseFromMetadata_LicenseExpressionSimple(t *testing.T) {
+	metadata := "Metadata-Version: 2.4\nName: modern-pkg\nVersion: 2.0.0\nLicense-Expression: MIT\n"
+	raw, spdx, tier := ExtractLicenseFromMetadata(metadata)
+	if raw != "MIT" {
+		t.Errorf("raw = %q, want MIT", raw)
+	}
+	if spdx != "MIT" {
+		t.Errorf("spdx = %q, want MIT", spdx)
+	}
+	if tier != "permissive" {
+		t.Errorf("tier = %q, want permissive", tier)
+	}
+}
+
+// TestExtractLicenseFromMetadata_LicenseExpressionCompound — a compound SPDX
+// expression is resolved by its first operand (Apache-2.0) while the full
+// original expression is preserved as the raw license.
+func TestExtractLicenseFromMetadata_LicenseExpressionCompound(t *testing.T) {
+	metadata := "Metadata-Version: 2.4\nName: dual-pkg\nVersion: 1.2.3\nLicense-Expression: Apache-2.0 OR MIT\n"
+	raw, spdx, tier := ExtractLicenseFromMetadata(metadata)
+	if raw != "Apache-2.0 OR MIT" {
+		t.Errorf("raw = %q, want %q (full expression preserved)", raw, "Apache-2.0 OR MIT")
+	}
+	if spdx != "Apache-2.0" {
+		t.Errorf("spdx = %q, want Apache-2.0 (first operand)", spdx)
+	}
+	if tier != "permissive" {
+		t.Errorf("tier = %q, want permissive", tier)
+	}
+}
+
+// TestExtractLicenseFromMetadata_LicenseExpressionWinsOverLegacy — per PEP 639,
+// License-Expression takes precedence over both a legacy License: header and
+// Trove classifiers when all are present.
+func TestExtractLicenseFromMetadata_LicenseExpressionWinsOverLegacy(t *testing.T) {
+	metadata := "Metadata-Version: 2.4\n" +
+		"Name: mixed-pkg\n" +
+		"Version: 1.0.0\n" +
+		"License: GPL-3.0\n" +
+		"License-Expression: MIT\n" +
+		"Classifier: License :: OSI Approved :: GNU General Public License v3 (GPLv3)\n"
+	raw, spdx, tier := ExtractLicenseFromMetadata(metadata)
+	if raw != "MIT" {
+		t.Errorf("raw = %q, want MIT (License-Expression must win)", raw)
+	}
+	if spdx != "MIT" {
+		t.Errorf("spdx = %q, want MIT", spdx)
+	}
+	if tier != "permissive" {
+		t.Errorf("tier = %q, want permissive", tier)
+	}
+}
+
+// TestExtractLicenseFromMetadata_LicenseExpressionBodyIgnored — a
+// "License-Expression:" line that appears in the long-description body (after
+// the RFC822 blank line) must NOT override the real header field.
+func TestExtractLicenseFromMetadata_LicenseExpressionBodyIgnored(t *testing.T) {
+	metadata := "Metadata-Version: 2.4\n" +
+		"Name: body-pkg\n" +
+		"Version: 1.0.0\n" +
+		"License: MIT\n" +
+		"\n" +
+		"# body-pkg\n" +
+		"\n" +
+		"License-Expression: GPL-3.0-only\n"
+	raw, spdx, tier := ExtractLicenseFromMetadata(metadata)
+	if raw != "MIT" {
+		t.Errorf("raw = %q, want MIT (body License-Expression leaked through)", raw)
+	}
+	if spdx != "MIT" {
+		t.Errorf("spdx = %q, want MIT", spdx)
+	}
+	if tier != "permissive" {
+		t.Errorf("tier = %q, want permissive", tier)
+	}
+}
+
 func TestExtractLicenseFromCondaJSON(t *testing.T) {
 	condaJSON := `{"name": "numpy", "version": "1.26.4", "license": "BSD 3-Clause License"}`
 	raw, spdx, tier := ExtractLicenseFromCondaJSON([]byte(condaJSON))
@@ -194,6 +308,82 @@ func TestExtractLicenseFromCondaJSON_Missing(t *testing.T) {
 	}
 	if tier != "unknown" {
 		t.Errorf("tier = %q, want unknown", tier)
+	}
+}
+
+// TestNormalizeLicense_BareAndTroveCopyleft pins the fix for the
+// previously-missed bare/Trove-classifier license strings that silently
+// resolved to tier "unknown" — letting a copyleft-flagging policy miss
+// GPL/LGPL/AGPL packages.  Each string must now resolve to a concrete
+// SPDX id and a non-"unknown" copyleft/permissive tier.
+func TestNormalizeLicense_BareAndTroveCopyleft(t *testing.T) {
+	cases := []struct {
+		raw      string
+		wantSPDX string
+		wantTier string
+	}{
+		// LGPL — weak-copyleft; unversioned resolves to -3.0-only, matching
+		// the existing bare "lgpl" convention.
+		{"GNU Library or Lesser General Public License (LGPL)", "LGPL-3.0-only", "weak-copyleft"},
+		{"GNU Lesser General Public License (LGPL)", "LGPL-3.0-only", "weak-copyleft"},
+		// GPL — strong-copyleft.
+		{"GNU General Public License (GPL)", "GPL-3.0-only", "strong-copyleft"},
+		{"GPL", "GPL-3.0-only", "strong-copyleft"},
+		// AGPL — strong-copyleft.
+		{"GNU Affero General Public License (AGPL)", "AGPL-3.0-only", "strong-copyleft"},
+		{"AGPL", "AGPL-3.0-only", "strong-copyleft"},
+		// Apache — permissive.
+		{"Apache", "Apache-2.0", "permissive"},
+		{"Apache License", "Apache-2.0", "permissive"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			spdx, tier := NormalizeLicense(tc.raw)
+			if spdx != tc.wantSPDX {
+				t.Errorf("NormalizeLicense(%q) spdx = %q, want %q", tc.raw, spdx, tc.wantSPDX)
+			}
+			if tier != tc.wantTier {
+				t.Errorf("NormalizeLicense(%q) tier = %q, want %q", tc.raw, tier, tc.wantTier)
+			}
+			if tier == "unknown" {
+				t.Errorf("NormalizeLicense(%q) regressed to tier=unknown", tc.raw)
+			}
+		})
+	}
+}
+
+// TestExtractLicenseFromMetadata_TroveCopyleftClassifiers drives the same
+// strings through the production Trove-classifier fallback path — the real
+// consumer of these bare license names in pip METADATA.
+func TestExtractLicenseFromMetadata_TroveCopyleftClassifiers(t *testing.T) {
+	cases := []struct {
+		classifier string
+		wantRaw    string
+		wantSPDX   string
+		wantTier   string
+	}{
+		{
+			"Classifier: License :: OSI Approved :: GNU Library or Lesser General Public License (LGPL)\n",
+			"GNU Library or Lesser General Public License (LGPL)", "LGPL-3.0-only", "weak-copyleft",
+		},
+		{
+			"Classifier: License :: OSI Approved :: GNU General Public License (GPL)\n",
+			"GNU General Public License (GPL)", "GPL-3.0-only", "strong-copyleft",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.wantSPDX, func(t *testing.T) {
+			raw, spdx, tier := ExtractLicenseFromMetadata(tc.classifier)
+			if raw != tc.wantRaw {
+				t.Errorf("raw = %q, want %q", raw, tc.wantRaw)
+			}
+			if spdx != tc.wantSPDX {
+				t.Errorf("spdx = %q, want %q", spdx, tc.wantSPDX)
+			}
+			if tier != tc.wantTier {
+				t.Errorf("tier = %q, want %q", tier, tc.wantTier)
+			}
+		})
 	}
 }
 

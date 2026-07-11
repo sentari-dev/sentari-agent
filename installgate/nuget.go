@@ -1,18 +1,18 @@
 // NuGet / .NET writer.
 //
-// Fourth ecosystem after pip, npm, and Maven.  ``NuGet.Config``
+// Fourth ecosystem after pip, npm, and Maven.  `NuGet.Config`
 // is structurally similar to Maven's settings.xml — XML with a
 // few well-known elements — but its semantics are simpler:
-// ``<packageSources>`` with ``<clear/>`` removes inherited
-// defaults, and a single ``<add>`` element points NuGet at
+// `<packageSources>` with `<clear/>` removes inherited
+// defaults, and a single `<add>` element points NuGet at
 // Sentari-Proxy.
 //
 // Operator-curated NuGet.Config can carry cleartext credentials
-// in ``<packageSourceCredentials>`` blocks, so the same
+// in `<packageSourceCredentials>` blocks, so the same
 // SkippedOperator guard the Maven writer applies is in force
 // here: an existing config without the Sentari marker is left
-// untouched and surfaces as ``SkippedOperator=true``.  Merge
-// support — splicing a ``<packageSource>`` into an existing
+// untouched and surfaces as `SkippedOperator=true`.  Merge
+// support — splicing a `<packageSource>` into an existing
 // document — is deferred to a follow-up PR alongside Maven's.
 
 package installgate
@@ -32,13 +32,13 @@ type NuGetScope int
 
 const (
 	// NuGetScopeUser writes:
-	//   - ``%APPDATA%\NuGet\NuGet.Config`` on Windows
-	//   - ``~/.nuget/NuGet/NuGet.Config`` on Linux/macOS
+	//   - `%APPDATA%\NuGet\NuGet.Config` on Windows
+	//   - `~/.nuget/NuGet/NuGet.Config` on Linux/macOS
 	// These are the canonical per-user paths NuGet itself reads.
 	NuGetScopeUser NuGetScope = iota
 
-	// NuGetScopeSystem writes ``%ProgramData%\NuGet\Config\Sentari.Config``
-	// on Windows (NuGet auto-loads every ``*.Config`` in that dir).
+	// NuGetScopeSystem writes `%ProgramData%\NuGet\Config\Sentari.Config`
+	// on Windows (NuGet auto-loads every `*.Config` in that dir).
 	// On POSIX, NuGet has no equivalent system-wide config
 	// directory; the writer soft-no-ops there.
 	NuGetScopeSystem
@@ -60,7 +60,7 @@ func NuGetPath(scope NuGetScope) string {
 				return filepath.Join(dir, "NuGet", "Config", "Sentari.Config")
 			}
 			// Hard-coded fallback: %ProgramData% defaults to
-			// ``C:\ProgramData`` on every supported Windows
+			// `C:\ProgramData` on every supported Windows
 			// version.  Same approach the pip writer takes.
 			return `C:\ProgramData\NuGet\Config\Sentari.Config`
 		}
@@ -80,7 +80,7 @@ func NuGetPath(scope NuGetScope) string {
 	return ""
 }
 
-// WriteNuGetResult mirrors WriteMavenResult.  ``SkippedOperator``
+// WriteNuGetResult mirrors WriteMavenResult.  `SkippedOperator`
 // matters here for the same reason it does in Maven — an
 // operator-curated NuGet.Config commonly carries package source
 // credentials that MUST survive install-gate enrolment intact.
@@ -94,7 +94,7 @@ type WriteNuGetResult struct {
 // WriteNuGet applies the NuGet section of a verified policy-map.
 // Behaviour matrix matches WriteMaven exactly — see that
 // function's docstring; the only difference is the rendered
-// content (``<configuration><packageSources>...``).
+// content (`<configuration><packageSources>...`).
 func WriteNuGet(m *scanner.InstallGateMap, scope NuGetScope, marker MarkerFields) (WriteNuGetResult, error) {
 	res := WriteNuGetResult{Path: NuGetPath(scope)}
 	if res.Path == "" {
@@ -149,7 +149,7 @@ func WriteNuGet(m *scanner.InstallGateMap, scope NuGetScope, marker MarkerFields
 	if err != nil {
 		return res, err
 	}
-	// 0o600: NuGet.Config can carry ``ClearTextPassword``
+	// 0o600: NuGet.Config can carry `ClearTextPassword`
 	// credentials, so it gets the same owner-only mode as the pip
 	// netrc (policy-map contract: credential-bearing files MUST be
 	// 0600).  WriteAtomic chmods the temp file before the rename,
@@ -168,26 +168,26 @@ func WriteNuGet(m *scanner.InstallGateMap, scope NuGetScope, marker MarkerFields
 }
 
 // renderNuGetConfig produces the bytes for a fresh Sentari-managed
-// NuGet.Config.  Layout per design doc §4.4: ``<packageSources>``
-// with ``<clear/>`` to drop inherited defaults, then a single
-// ``<add>`` element pointing at Sentari-Proxy.
+// NuGet.Config.  Layout per design doc §4.4: `<packageSources>`
+// with `<clear/>` to drop inherited defaults, then a single
+// `<add>` element pointing at Sentari-Proxy.
 //
-// When ``auth`` is usable, a ``<packageSourceCredentials>`` block is
-// emitted with one ``<feed>`` element whose tag matches the
-// ``<packageSources>`` key.  NuGet's credential resolution binds the
+// When `auth` is usable, a `<packageSourceCredentials>` block is
+// emitted with one `<feed>` element whose tag matches the
+// `<packageSources>` key.  NuGet's credential resolution binds the
 // two by element name (the source key becomes the wrapping element's
-// XML local name), so we use a constant key — ``sentari-proxy`` —
+// XML local name), so we use a constant key — `sentari-proxy` —
 // for both the source and the credentials entry.
 //
 // Bearer mode: NuGet has no native bearer concept; the documented
 // idiom (Artifactory, Azure Artifacts, GitHub Packages) is to use a
 // literal username of "any" (some servers accept anything) and put
-// the token in ``ClearTextPassword``.  We render with username
-// ``__token__`` for symmetry with pip's netrc bearer convention so
+// the token in `ClearTextPassword`.  We render with username
+// `__token__` for symmetry with pip's netrc bearer convention so
 // the same string identifies a bearer credential across writers.
 //
-// Basic mode: ``Username`` + ``ClearTextPassword``.  NuGet also
-// supports ``Password`` (DPAPI-encrypted on Windows), but DPAPI is
+// Basic mode: `Username` + `ClearTextPassword`.  NuGet also
+// supports `Password` (DPAPI-encrypted on Windows), but DPAPI is
 // per-user reversible and not portable to POSIX hosts — cleartext is
 // the universal mechanism.
 func renderNuGetConfig(endpoint string, auth *scanner.RegistryAuth, marker MarkerFields) ([]byte, error) {
@@ -220,13 +220,13 @@ func renderNuGetConfig(endpoint string, auth *scanner.RegistryAuth, marker Marke
 	return []byte(b.String()), nil
 }
 
-// renderNuGetCredentialsBlock emits the ``<packageSourceCredentials>``
-// element binding ``auth`` to the source whose key is ``sourceKey``.
-// NuGet's resolution rule: ``<packageSourceCredentials>`` carries one
+// renderNuGetCredentialsBlock emits the `<packageSourceCredentials>`
+// element binding `auth` to the source whose key is `sourceKey`.
+// NuGet's resolution rule: `<packageSourceCredentials>` carries one
 // child element per source, NAMED after the source's key — so for a
-// source ``sentari-proxy`` we emit ``<sentari-proxy>``.  Inside that
-// element, ``<add key="Username" value="…" />`` and
-// ``<add key="ClearTextPassword" value="…" />`` carry the values.
+// source `sentari-proxy` we emit `<sentari-proxy>`.  Inside that
+// element, `<add key="Username" value="…" />` and
+// `<add key="ClearTextPassword" value="…" />` carry the values.
 func renderNuGetCredentialsBlock(b *strings.Builder, sourceKey string, auth *scanner.RegistryAuth) error {
 	var username, password string
 	switch auth.Mode {

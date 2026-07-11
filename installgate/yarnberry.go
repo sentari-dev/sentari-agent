@@ -1,13 +1,13 @@
 // Yarn Berry writer — Yarn 2 / 3 / 4.
 //
-// Yarn classic (1.x) reads ``.npmrc`` and is therefore covered by
-// the npm writer (PR-4).  Yarn Berry (2+) does NOT read ``.npmrc``
-// — it has its own ``.yarnrc.yml`` config namespace.  Without a
+// Yarn classic (1.x) reads `.npmrc` and is therefore covered by
+// the npm writer (PR-4).  Yarn Berry (2+) does NOT read `.npmrc`
+// — it has its own `.yarnrc.yml` config namespace.  Without a
 // dedicated writer, yarn-berry projects on a host bypass the
 // install-gate even when npm is fully gated.  This is the same
 // class of gap as uv/pdm on the Python side.
 //
-// Reads ``proxy_endpoints["npm"]`` since yarn-berry consumes the
+// Reads `proxy_endpoints["npm"]` since yarn-berry consumes the
 // npm registry layout.
 
 package installgate
@@ -28,7 +28,7 @@ import (
 type YarnBerryScope int
 
 const (
-	// YarnBerryScopeUser writes ``~/.yarnrc.yml``.  Same path on
+	// YarnBerryScopeUser writes `~/.yarnrc.yml`.  Same path on
 	// every supported OS.
 	YarnBerryScopeUser YarnBerryScope = iota
 
@@ -37,7 +37,7 @@ const (
 	YarnBerryScopeSystem
 )
 
-// YarnBerryPath returns the absolute ``.yarnrc.yml`` path.
+// YarnBerryPath returns the absolute `.yarnrc.yml` path.
 // Empty return → soft no-op upstream.
 func YarnBerryPath(scope YarnBerryScope) string {
 	if scope == YarnBerryScopeSystem {
@@ -51,7 +51,7 @@ func YarnBerryPath(scope YarnBerryScope) string {
 }
 
 // WriteYarnBerryResult — same shape as the other writer-result
-// types.  ``.yarnrc.yml`` commonly carries operator-curated
+// types.  `.yarnrc.yml` commonly carries operator-curated
 // settings (custom resolution behaviour, plugin config, scoped
 // registry tokens) so the SkippedOperator guard applies.
 type WriteYarnBerryResult struct {
@@ -62,7 +62,7 @@ type WriteYarnBerryResult struct {
 }
 
 // WriteYarnBerry applies the npm section of the policy-map to
-// yarn berry's ``.yarnrc.yml``.  Operator-curated files are
+// yarn berry's `.yarnrc.yml`.  Operator-curated files are
 // preserved.
 func WriteYarnBerry(m *scanner.InstallGateMap, scope YarnBerryScope, marker MarkerFields) (WriteYarnBerryResult, error) {
 	res := WriteYarnBerryResult{Path: YarnBerryPath(scope)}
@@ -124,14 +124,14 @@ func WriteYarnBerry(m *scanner.InstallGateMap, scope YarnBerryScope, marker Mark
 }
 
 // renderYarnrcYML produces a fresh Sentari-managed
-// ``.yarnrc.yml``.  YAML is whitespace-sensitive so we keep the
+// `.yarnrc.yml`.  YAML is whitespace-sensitive so we keep the
 // rendered file flat (top-level mappings only) and emit a
-// trailing newline.  ``npmRegistryServer`` is yarn-berry's
-// equivalent of npm's ``registry=`` setting and is the only
+// trailing newline.  `npmRegistryServer` is yarn-berry's
+// equivalent of npm's `registry=` setting and is the only
 // registry key emitted here.
 //
 // YAML rules: the URL value is double-quoted so YAML treats it as
-// a plain scalar regardless of embedded ``:`` characters (which
+// a plain scalar regardless of embedded `:` characters (which
 // otherwise terminate a mapping key).
 func renderYarnrcYML(endpoint string, marker MarkerFields) ([]byte, error) {
 	endpoint = strings.TrimSpace(endpoint)
@@ -142,7 +142,7 @@ func renderYarnrcYML(endpoint string, marker MarkerFields) ([]byte, error) {
 		return nil, fmt.Errorf("renderYarnrcYML: %w", err)
 	}
 	// YAML double-quoted strings honour backslash escapes; an
-	// embedded ``"`` would terminate the string and let an attacker
+	// embedded `"` would terminate the string and let an attacker
 	// smuggle additional YAML keys.
 	if strings.ContainsAny(endpoint, "\"\\") {
 		return nil, fmt.Errorf("renderYarnrcYML: endpoint contains YAML-quoting-hostile characters")

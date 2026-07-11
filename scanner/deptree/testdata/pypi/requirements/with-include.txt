@@ -1,0 +1,3 @@
+# Layered requirements: an -r include plus one direct dep.
+-r nested.txt
+flask==3.0.0

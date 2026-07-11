@@ -1,6 +1,7 @@
-// Tag parsing + validation for the ``[agent] tags = ...`` section.
+// Tag parsing + validation for the `[agent] tags = ...` section.
 //
-// Mirrors the server's tag-validation rules so an operator who copies a tag string from one
+// Mirrors the server's validation rules (sentari/server/services/
+// device_tags.py) so an operator who copies a tag string from one
 // to the other doesn't get surprised by a parser disagreement.
 // Server is the ultimate authority — invalid tags would round-trip
 // through the wire and be rejected with a 400 anyway — but doing
@@ -16,24 +17,25 @@ import (
 	"strings"
 )
 
-// tagRegex matches the same shape as the server's tag-validation regex.
+// tagRegex matches the same shape as
+// `server/services/device_tags.py:_TAG_RE`.
 var tagRegex = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}:[A-Za-z0-9._-]{1,128}$`)
 
 // maxAgentTags caps the per-source tag count.  Mirrors the server's
-// ``MAX_TAGS_PER_SOURCE`` (32).  If an operator's agent.conf goes
+// `MAX_TAGS_PER_SOURCE` (32).  If an operator's agent.conf goes
 // over, we keep the first 32 (post-dedupe + sort) and drop the rest
 // with a warning rather than failing config-load — agent startup
 // must succeed even on a sloppy edit.
 const maxAgentTags = 32
 
-// parseAgentTags splits an ``[agent] tags`` line on commas, trims
+// parseAgentTags splits an `[agent] tags` line on commas, trims
 // whitespace, validates each entry against the regex, dedupes, and
 // sorts.  Invalid entries are logged at WARN and dropped (don't
 // block startup on a typo).
 //
 // Returns a *pointer* to a (possibly empty) slice — see
-// ``AgentSection.Tags`` for the wire-state semantics.  This
-// function is only called when the ``tags`` key was actually
+// `AgentSection.Tags` for the wire-state semantics.  This
+// function is only called when the `tags` key was actually
 // present in the config, so the return value is always non-nil
 // (caller treats absence-of-key as nil at the AgentSection level).
 func parseAgentTags(value string) *[]string {

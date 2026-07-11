@@ -4,36 +4,37 @@
 // The flow is deliberately split into three commands so a fleet
 // operator can stage upgrades safely:
 //
-//   1. Check  — fetch /api/v1/agent/release/manifest, verify the
-//      signed envelope against the install-gate pubkey pinned at
-//      registration time, compare versions, return a Plan struct.
-//      No filesystem mutation.
+//  1. Check  — fetch /api/v1/agent/release/manifest, verify the
+//     signed envelope against the install-gate pubkey pinned at
+//     registration time, compare versions, return a Plan struct.
+//     No filesystem mutation.
 //
-//   2. Apply  — download the per-platform binary from the URL in the
-//      verified manifest, verify the SHA256 from the manifest matches
-//      the downloaded bytes, write into a "staged" file, then move-
-//      rename onto the install path while keeping the previous binary
-//      as .prev for rollback.  Triggers a service restart via the
-//      platform's service manager.
+//  2. Apply  — download the per-platform binary from the URL in the
+//     verified manifest, verify the SHA256 from the manifest matches
+//     the downloaded bytes, write into a "staged" file, then move-
+//     rename onto the install path while keeping the previous binary
+//     as .prev for rollback.  Triggers a service restart via the
+//     platform's service manager.
 //
-//   3. Rollback — swap .prev back into place and restart.  Used when
-//      the upgraded agent fails health checks post-restart.
+//  3. Rollback — swap .prev back into place and restart.  Used when
+//     the upgraded agent fails health checks post-restart.
 //
 // Trust model:
 //
-//   * The install-gate ed25519 pubkey was learned at /register time
+//   - The install-gate ed25519 pubkey was learned at /register time
 //     and persisted in the cert dir; this package re-uses that pin —
 //     no new trust anchor is introduced.
-//   * The downloaded binary is verified against a SHA256 contained
+//   - The downloaded binary is verified against a SHA256 contained
 //     inside the signed envelope.  A compromised release directory
 //     therefore cannot serve a forged binary that an enrolled agent
 //     will trust.
-//   * mTLS protects the wire path; only the holder of a valid agent
+//   - mTLS protects the wire path; only the holder of a valid agent
 //     client certificate can ask for the manifest or binary.
 package update
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -59,6 +60,18 @@ const maxManifestBytes = 1 * 1024 * 1024
 // maxBinaryBytes caps a single downloaded binary.  Matches the
 // server's hashing cap.
 const maxBinaryBytes = 256 * 1024 * 1024
+
+// defaultDownloadStallTimeout bounds how long the binary download may
+// go without receiving ANY bytes before it is aborted.  It is a
+// progress/idle watchdog, NOT a whole-request deadline: a 256 MiB
+// binary over a slow air-gap proxy can take many minutes to arrive, and
+// the shared mTLS client's 60s whole-request Timeout would guillotine
+// it mid-stream — self-update would then be permanently broken on slow
+// links.  The download path (downloadAndVerify) drops the whole-request
+// timeout and relies on ctx cancellation plus this per-read stall
+// timeout so a slow-but-steady link runs to completion while a truly
+// wedged connection is still bounded.
+const defaultDownloadStallTimeout = 60 * time.Second
 
 // envelope is the wire shape — payload kept as raw JSON so we can
 // re-canonicalize it byte-for-byte and verify the signature without
@@ -107,12 +120,12 @@ type Plan struct {
 // caller), the server base URL, and the trust anchor needed to
 // verify the signed manifest envelope.
 type Client struct {
-	HTTPClient   *http.Client
-	ServerURL    string
-	TrustedKeys  map[string]ed25519.PublicKey
-	CurrentVer   string
-	GOOS         string
-	GOARCH       string
+	HTTPClient  *http.Client
+	ServerURL   string
+	TrustedKeys map[string]ed25519.PublicKey
+	CurrentVer  string
+	GOOS        string
+	GOARCH      string
 	// StateDir is where the last-applied high-water mark (version +
 	// served_at) is persisted for replay/freshness enforcement.
 	// Normally the agent data dir.  When empty, the freshness check is
@@ -125,6 +138,12 @@ type Client struct {
 	// the only rollback binary).  Cross-process serialization is layered
 	// on top via an OS-advisory lockfile in StateDir (see applyLock).
 	applyMu sync.Mutex
+
+	// downloadStallTimeout overrides defaultDownloadStallTimeout for the
+	// binary download's progress watchdog.  Zero means use the default.
+	// Exists primarily so tests can drive the stall path with a short
+	// timeout without waiting a real minute.
+	downloadStallTimeout time.Duration
 }
 
 // Check fetches and verifies the manifest, returning a Plan that the
@@ -200,7 +219,7 @@ func (c *Client) Check() (*Plan, error) {
 	}, nil
 }
 
-// verifyEnvelope checks the signature against ``trusted`` and returns
+// verifyEnvelope checks the signature against `trusted` and returns
 // the decoded Manifest.  Re-canonicalizes the payload exactly the way
 // the server signs it so the signature math agrees.
 func verifyEnvelope(raw []byte, trusted map[string]ed25519.PublicKey) (*Manifest, error) {
@@ -314,15 +333,22 @@ func canonicalJSON(v interface{}) ([]byte, error) {
 	return out, nil
 }
 
-// Apply downloads the binary referenced by ``plan``, verifies its
-// SHA256 against the manifest, atomically replaces ``installPath``,
-// preserves the previous binary as ``installPath + ".prev"``, and
+// Apply downloads the binary referenced by `plan`, verifies its
+// SHA256 against the manifest, atomically replaces `installPath`,
+// preserves the previous binary as `installPath + ".prev"`, and
 // triggers a service restart.  Returns an error before any
 // filesystem mutation if the download / verification step fails.
 //
 // stagedDir is where the new binary lands before activation; any
 // directory the agent can write to is fine.
-func (c *Client) Apply(plan *Plan, installPath, stagedDir string) error {
+//
+// ctx bounds the (potentially long, multi-hundred-MB) binary download:
+// a cancelled ctx — operator Ctrl-C or a service-manager SIGTERM during
+// shutdown — aborts the download promptly rather than being wedged
+// behind an untimed read.  The freshness/downgrade guards and the
+// atomic swap run synchronously and are not themselves ctx-cancellable
+// (they are fast and must not be interrupted mid-swap).
+func (c *Client) Apply(ctx context.Context, plan *Plan, installPath, stagedDir string) error {
 	if plan == nil || !plan.UpgradeAvailable {
 		return errors.New("apply called with no upgrade available")
 	}
@@ -397,7 +423,7 @@ func (c *Client) Apply(plan *Plan, installPath, stagedDir string) error {
 	}
 	stagedPath := filepath.Join(stagedDir, "sentari-agent."+plan.LatestVersion+".new")
 
-	if err := c.downloadAndVerify(plan, stagedPath); err != nil {
+	if err := c.downloadAndVerify(ctx, plan, stagedPath); err != nil {
 		return err
 	}
 	if err := os.Chmod(stagedPath, 0o755); err != nil {
@@ -428,17 +454,97 @@ func (c *Client) Apply(plan *Plan, installPath, stagedDir string) error {
 	return nil
 }
 
+// downloadHTTPClient returns an http.Client tuned for streaming a large
+// binary.  It reuses the caller-configured (mTLS) transport — so the
+// same client certificate and pinned CA still gate the wire — but drops
+// the whole-request Timeout that the shared client carries (60s in the
+// CLI path).  A whole-request deadline is wrong for a 256 MiB download
+// over a slow link: it fires regardless of progress.  Liveness is
+// instead enforced by the request context plus the per-read stall
+// watchdog in downloadAndVerify, which tears the connection down only
+// when it goes genuinely silent.
+func (c *Client) downloadHTTPClient() *http.Client {
+	base := c.HTTPClient
+	if base == nil {
+		base = http.DefaultClient
+	}
+	return &http.Client{
+		Transport:     base.Transport,
+		CheckRedirect: base.CheckRedirect,
+		Jar:           base.Jar,
+		// No whole-request Timeout — see docstring.
+		Timeout: 0,
+	}
+}
+
+// errDownloadStalled is returned when the binary download receives no
+// bytes within the progress/stall timeout.  Distinct from a ctx
+// cancellation so operators can tell "the link went dead" apart from
+// "we asked it to stop".
+var errDownloadStalled = errors.New("download stalled: no bytes received within progress timeout")
+
+// progressReader wraps a network body with an idle/progress watchdog.
+// If any single Read makes no progress within `timeout`, it cancels the
+// request context (unblocking the in-flight read by tearing down the
+// connection) and returns errDownloadStalled.  This replaces a
+// whole-request deadline: a slow-but-steadily-progressing download is
+// allowed to run to completion, while a wedged connection is still
+// bounded.  It waits for the spawned read to finish before returning on
+// the stall path so the caller's buffer is never written after Read
+// returns (keeps the reader race-free under io.Copy).
+type progressReader struct {
+	r       io.Reader
+	timeout time.Duration
+	cancel  context.CancelFunc
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	type result struct {
+		n   int
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		n, err := pr.r.Read(p)
+		ch <- result{n, err}
+	}()
+	timer := time.NewTimer(pr.timeout)
+	defer timer.Stop()
+	select {
+	case res := <-ch:
+		return res.n, res.err
+	case <-timer.C:
+		// Cancel the request so the blocked network read unwinds, then
+		// wait for the goroutine to finish touching p before returning.
+		pr.cancel()
+		<-ch
+		return 0, errDownloadStalled
+	}
+}
+
 // downloadAndVerify streams the binary from the URL in the manifest
-// and writes it to ``dest`` only if the SHA256 matches.  Uses a
-// scratch file alongside ``dest`` so a partial download cannot
+// and writes it to `dest` only if the SHA256 matches.  Uses a
+// scratch file alongside `dest` so a partial download cannot
 // pretend to be a complete one if the process is killed mid-write.
-func (c *Client) downloadAndVerify(plan *Plan, dest string) error {
+//
+// The download uses a dedicated no-whole-request-timeout client plus a
+// progress watchdog and honours ctx cancellation, so a large binary
+// over a slow air-gap proxy is not guillotined by the shared client's
+// 60s deadline.  Every integrity check (size cap, SHA256, atomic
+// rename) is unchanged.
+func (c *Client) downloadAndVerify(ctx context.Context, plan *Plan, dest string) error {
 	url := strings.TrimRight(c.ServerURL, "/") + plan.Platform.URL
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+
+	// Child context so the stall watchdog can abort just this download by
+	// tearing down the request without cancelling the caller's ctx.
+	dlCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("build binary request: %w", err)
 	}
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.downloadHTTPClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("fetch binary: %w", err)
 	}
@@ -447,6 +553,12 @@ func (c *Client) downloadAndVerify(plan *Plan, dest string) error {
 		return fmt.Errorf("binary endpoint returned HTTP %d", resp.StatusCode)
 	}
 
+	stall := c.downloadStallTimeout
+	if stall <= 0 {
+		stall = defaultDownloadStallTimeout
+	}
+	body := io.Reader(&progressReader{r: resp.Body, timeout: stall, cancel: cancel})
+
 	scratch := dest + ".part"
 	f, err := os.OpenFile(scratch, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -454,7 +566,7 @@ func (c *Client) downloadAndVerify(plan *Plan, dest string) error {
 	}
 	hash := sha256.New()
 	multi := io.MultiWriter(f, hash)
-	written, err := io.Copy(multi, io.LimitReader(resp.Body, maxBinaryBytes+1))
+	written, err := io.Copy(multi, io.LimitReader(body, maxBinaryBytes+1))
 	closeErr := f.Close()
 	if err != nil {
 		os.Remove(scratch)
@@ -482,23 +594,23 @@ func (c *Client) downloadAndVerify(plan *Plan, dest string) error {
 	return nil
 }
 
-// atomicReplace moves ``src`` onto ``dst`` while keeping the previous
-// ``dst`` as ``dst.prev`` for rollback.
+// atomicReplace moves `src` onto `dst` while keeping the previous
+// `dst` as `dst.prev` for rollback.
 //
-// ``src`` is typically staged under the agent data dir (e.g.
+// `src` is typically staged under the agent data dir (e.g.
 // /var/lib/...), which is frequently a *different* filesystem from the
-// install path (e.g. /usr/local/bin).  A naive ``os.Rename(src, dst)``
+// install path (e.g. /usr/local/bin).  A naive `os.Rename(src, dst)`
 // then fails with EXDEV — and, fatally, it fails AFTER dst has already
 // been moved to dst.prev, leaving the install path empty.  To avoid
 // this the new bytes are first landed into a temp file in the SAME
-// directory as ``dst`` so the activation rename is always intra-
+// directory as `dst` so the activation rename is always intra-
 // filesystem.  The sequence is:
 //
-//   1. Materialize src into ``<dir(dst)>/.<base(dst)>.new`` (rename if
-//      same FS, else copy+fsync) — this is where EXDEV is absorbed,
-//      BEFORE any destructive move.
-//   2. If dst exists, rename dst → dst.prev (intra-FS, atomic).
-//   3. Rename landing → dst (intra-FS, atomic).
+//  1. Materialize src into `<dir(dst)>/.<base(dst)>.new` (rename if
+//     same FS, else copy+fsync) — this is where EXDEV is absorbed,
+//     BEFORE any destructive move.
+//  2. If dst exists, rename dst → dst.prev (intra-FS, atomic).
+//  3. Rename landing → dst (intra-FS, atomic).
 //
 // Because the only cross-FS step (1) happens before dst is touched, a
 // failure there leaves the install path intact.
@@ -556,7 +668,7 @@ func atomicReplace(src, dst string) error {
 	return nil
 }
 
-// copyFileSync copies ``src`` to ``dst`` and fsyncs the destination
+// copyFileSync copies `src` to `dst` and fsyncs the destination
 // before returning, so the bytes are durable on disk prior to the
 // activation rename.  Used as the EXDEV fallback when src and dst live
 // on different filesystems and os.Rename refuses to cross the boundary.

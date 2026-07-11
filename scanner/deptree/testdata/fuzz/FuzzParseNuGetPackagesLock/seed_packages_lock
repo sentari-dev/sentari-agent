@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\n  \"version\": 1,\n  \"dependencies\": {\n    \"net6.0\": {\n      \"Newtonsoft.Json\": {\n        \"type\": \"Direct\",\n        \"requested\": \"[13.0.3, )\",\n        \"resolved\": \"13.0.3\",\n        \"contentHash\": \"test\"\n      },\n      \"Microsoft.CSharp\": {\n        \"type\": \"Transitive\",\n        \"resolved\": \"4.7.0\",\n        \"contentHash\": \"test\"\n      }\n    }\n  }\n}\n")

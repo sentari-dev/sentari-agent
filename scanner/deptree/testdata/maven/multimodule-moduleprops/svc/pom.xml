@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example.reactor</groupId>
+    <artifactId>svc</artifactId>
+    <version>3.0.0</version>
+
+    <!-- Version property defined in the MODULE, not the reactor root. -->
+    <properties>
+        <jackson.version>2.15.2</jackson.version>
+    </properties>
+
+    <dependencies>
+        <!-- Pinned via this module's OWN <properties> — must resolve to 2.15.2. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+            <scope>compile</scope>
+        </dependency>
+        <!-- Pinned via ${project.version} — the root/project-version path must
+             still resolve (to the module version, 3.0.0). -->
+        <dependency>
+            <groupId>com.example.reactor</groupId>
+            <artifactId>svc-api</artifactId>
+            <version>${project.version}</version>
+            <scope>compile</scope>
+        </dependency>
+    </dependencies>
+</project>

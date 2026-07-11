@@ -36,10 +36,10 @@ func TestSafePath_fallsBackOnNilOrShortPath(t *testing.T) {
 
 // TestContractV3_nilIntroducedByPath_failsSchemaValidation is the
 // regression guard for the 2026-05-20 walkthrough finding: an agent
-// emitted ``introduced_by_path: null`` for orphaned dep_edges and the
+// emitted `introduced_by_path: null` for orphaned dep_edges and the
 // server rejected the whole payload with HTTP 422.  After SafePath, no
 // emitter can produce a nil/empty path; this test exists so the schema
-// itself stays the hard contract.  If anyone relaxes ``minItems: 2``
+// itself stays the hard contract.  If anyone relaxes `minItems: 2`
 // or adds an emitter that bypasses SafePath, this test goes red.
 func TestContractV3_nilIntroducedByPath_failsSchemaValidation(t *testing.T) {
 	schemaPath := mustResolveSchemaPath(t)
@@ -50,7 +50,7 @@ func TestContractV3_nilIntroducedByPath_failsSchemaValidation(t *testing.T) {
 
 	// Construct an edge whose IntroducedByPath is nil — the exact shape
 	// the orphan emitters used to produce.  json.Marshal turns nil
-	// slices into ``null``, so this exercises both the JSON encoding
+	// slices into `null`, so this exercises both the JSON encoding
 	// behaviour and the schema's strictness in one go.
 	payload := map[string]any{
 		"dep_edges": []DepEdge{
@@ -124,13 +124,13 @@ func TestContractV3_safePathOutput_validatesAgainstSchema(t *testing.T) {
 
 // TestBuildPypiEdges_orphanParent_emitsValidPath exercises the BFS
 // path-lookup site that produced the 2,749 nil paths on the
-// walkthrough Mac: a parent in ``pkgs`` whose dependency chain never
+// walkthrough Mac: a parent in `pkgs` whose dependency chain never
 // originates from the rootName.  Before the SafePath fix this
 // returned an edge with IntroducedByPath=nil.
 func TestBuildPypiEdges_orphanParent_emitsValidPath(t *testing.T) {
 	pkgs := map[string]pypiPkgInfo{
-		"app":    {version: "1.0", deps: []string{"reachable"}},
-		"reachable":  {version: "2.0", deps: nil},
+		"app":       {version: "1.0", deps: []string{"reachable"}},
+		"reachable": {version: "2.0", deps: nil},
 		// Orphan: not reachable from "app" via BFS, but listed as a parent.
 		"orphan-parent": {version: "9.9", deps: []string{"orphan-child"}},
 		"orphan-child":  {version: "0.1", deps: nil},

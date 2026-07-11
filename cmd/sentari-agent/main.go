@@ -4,9 +4,9 @@
 //
 // Runs a one-shot scan of the local host, formats the result, and
 // exits.  No server, no mTLS, no scheduling — the enterprise build
-// (main_enterprise.go) adds those on top.  Under the
-// ``OSS ⊆ Enterprise`` principle, every feature in this build is also
-// available in the enterprise build; the split is additive, not divergent.
+// (main_enterprise.go) adds those on top.  Per the 2026-04-24
+// roadmap decision, every feature in this build is also available
+// in the enterprise build; the split is additive, not divergent.
 package main
 
 import (
@@ -34,9 +34,9 @@ func main() {
 	//
 	// Output format default note: when writing to stdout we want a
 	// human-friendly summary by default (developer-first); when
-	// writing to a file (``--output``) we default to JSON because
+	// writing to a file (`--output`) we default to JSON because
 	// the most common use case is piping into a script or SIEM.
-	// Either default can be overridden with ``--format``.
+	// Either default can be overridden with `--format`.
 	scanFlag := flag.Bool("scan", false, "Run a scan of every supported ecosystem on this host")
 	outputFlag := flag.String("output", "", "Output file path (default: stdout)")
 	formatFlag := flag.String("format", "",

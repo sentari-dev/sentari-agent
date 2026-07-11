@@ -140,7 +140,7 @@ func TestRenderSettingsXML_NoAuthNoServersBlock(t *testing.T) {
 // --- xml escape: token with XML-significant chars survives intact --------
 
 func TestRenderSettingsXML_BearerTokenWithSpecialCharsEscaped(t *testing.T) {
-	// Tokens containing ``&``, ``<``, ``>`` MUST be XML-escaped so
+	// Tokens containing `&`, `<`, `>` MUST be XML-escaped so
 	// settings.xml stays well-formed.  Maven's parser unescapes on
 	// read, so the credential round-trips correctly.
 	got, err := renderSettingsXML(

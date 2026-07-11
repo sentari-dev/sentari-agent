@@ -1,6 +1,43 @@
 package runtimeversions
 
-import "regexp"
+import (
+	"regexp"
+	"sort"
+)
+
+// Language-runtime name constants. These are the single source of the names
+// the agent places in InstalledRuntime.Name for language runtimes; the
+// producing detectors (python.go, python_system.go, node.go, jdk.go) reference
+// them, and the v3-contract drift guard derives its emitted-name set from
+// LanguageRuntimeNames() rather than a hand-maintained literal list.
+const (
+	RuntimePython = "python"
+	RuntimeNode   = "node"
+	RuntimeJDK    = "jdk"
+)
+
+// LanguageRuntimeNames returns the language-runtime names the agent can emit,
+// in stable display order.
+func LanguageRuntimeNames() []string {
+	return []string{RuntimePython, RuntimeNode, RuntimeJDK}
+}
+
+// AppServerRuntimeNames returns the sorted set of JVM application-server
+// runtime names the agent can emit — the keys of the appServers map, which is
+// the single source classify() (appserver.go) draws its identities from.
+//
+// The v3-contract drift guard derives its cross-check set from this, so adding
+// a new app-server value to appServers automatically forces the shared schema
+// enum (docs/contracts/agent-scan-payload-v3.json) to list it or the guard
+// fails — the class of drift that let "glassfish" ship unlisted (round 8).
+func AppServerRuntimeNames() []string {
+	names := make([]string, 0, len(appServers))
+	for n := range appServers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
 
 var (
 	pythonRe     = regexp.MustCompile(`^(\d+)\.(\d+)`)
@@ -17,12 +54,13 @@ var (
 // so a fixed regex cannot derive it — see runtime_eol_cycle.py resolve_feed_cycle).
 var appServers = map[string]bool{
 	"wildfly": true, "jboss-eap": true, "tomcat": true,
-	"jetty": true, "payara": true, "weblogic": true, "websphere": true,
+	"jetty": true, "payara": true, "glassfish": true,
+	"weblogic": true, "websphere": true,
 }
 
 // CycleFor returns the EOL cycle for a (runtime, version) tuple, or "unknown" on
 // parse failure. Language-runtime derivation matches the server's
-// EOL-cycle derivation exactly. App-server derivation is a
+// server/services/runtime_eol_cycle.py exactly. App-server derivation is a
 // best-effort fallback (major.minor, then major) the server may override.
 func CycleFor(runtime, version string) string {
 	switch runtime {

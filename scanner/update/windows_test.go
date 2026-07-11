@@ -1,6 +1,7 @@
 package update
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -43,7 +44,7 @@ func TestApply_refusesOnWindows(t *testing.T) {
 		},
 	}
 
-	err := c.Apply(plan, installPath, filepath.Join(tmp, "staged"))
+	err := c.Apply(context.Background(), plan, installPath, filepath.Join(tmp, "staged"))
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "windows") {
 		t.Fatalf("expected Windows-not-supported refusal, got %v", err)
 	}

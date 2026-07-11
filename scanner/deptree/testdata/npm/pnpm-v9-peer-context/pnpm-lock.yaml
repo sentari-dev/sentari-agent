@@ -1,0 +1,63 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+# foo@1.0.0 is installed under TWO peer contexts (react@17 and react@18).
+# pnpm >= 9 records each context as a separate snapshot key that differs
+# ONLY by the parenthesised peer suffix, and each carries a DIFFERENT
+# resolved child set.  The peer suffix is stripped when keying the graph,
+# so both collapse to the single concrete node foo@1.0.0 — its adjacency
+# MUST be the deterministic union of both contexts' children.
+importers:
+
+  .:
+    dependencies:
+      foo:
+        specifier: ^1.0.0
+        version: 1.0.0(react@18.0.0)
+
+packages:
+
+  foo@1.0.0:
+    resolution: {integrity: sha512-foo}
+
+  bar@1.0.0:
+    resolution: {integrity: sha512-bar}
+
+  baz@2.0.0:
+    resolution: {integrity: sha512-baz}
+
+  common@3.0.0:
+    resolution: {integrity: sha512-common}
+
+  react@17.0.0:
+    resolution: {integrity: sha512-react17}
+
+  react@18.0.0:
+    resolution: {integrity: sha512-react18}
+
+snapshots:
+
+  foo@1.0.0(react@17.0.0):
+    dependencies:
+      bar: 1.0.0
+      common: 3.0.0
+      react: 17.0.0
+
+  foo@1.0.0(react@18.0.0):
+    dependencies:
+      baz: 2.0.0
+      common: 3.0.0
+      react: 18.0.0
+
+  bar@1.0.0: {}
+
+  baz@2.0.0: {}
+
+  common@3.0.0: {}
+
+  react@17.0.0: {}
+
+  react@18.0.0: {}

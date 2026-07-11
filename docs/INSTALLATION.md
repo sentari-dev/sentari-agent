@@ -456,6 +456,28 @@ Get-Content install.ps1  # Review the script
 | `-InstallDir` | No | `C:\Program Files\Sentari` | Installation directory |
 | `-ServiceName` | No | `SentariAgent` | Windows service name |
 
+#### How the Windows service runs
+
+The installer registers the agent as a native Windows service (`New-Service …
+--serve`, Automatic start, auto-restart on failure). When the Service Control
+Manager (SCM) launches it, the agent runs under the SCM service dispatcher and
+answers the manager's lifecycle callbacks (StartPending → Running → StopPending →
+Stopped), so `sc start` / `sc stop`, `Start-Service` / `Stop-Service`, and reboot
+auto-start all behave correctly. A stop request drains the in-flight scan cycle
+before the process exits — the same graceful shutdown the Linux systemd unit gets
+from SIGTERM. Running the same binary with `--serve` directly in a console (not
+via the SCM) still works and shuts down on Ctrl-C, which is convenient for
+troubleshooting.
+
+Manage the service after install:
+
+```powershell
+Get-Service SentariAgent          # status
+Stop-Service  SentariAgent        # graceful stop (drains current cycle)
+Start-Service SentariAgent        # start
+# Diagnostics live in Event Viewer > Windows Logs > Application (source: SentariAgent)
+```
+
 #### Fleet Install (GPO / SCCM)
 
 For deploying across many Windows machines, use Group Policy or SCCM to run the installer silently.

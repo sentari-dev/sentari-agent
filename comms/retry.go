@@ -8,17 +8,22 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
-	"syscall"
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/common/logging"
 )
 
-// RetryConfig controls the exponential-backoff retry loop.  The zero
-// value is a reasonable default (5 attempts, base 500 ms, cap 60 s).
+// RetryConfig controls the exponential-backoff retry loop.  Callers
+// normally start from defaultRetryConfig and override individual
+// fields; the backoff math (nextBackoff / clampWaitHint) falls back to
+// the package defaults for any non-positive BaseDelay/MaxDelay so a
+// misconfigured cap can never collapse into a zero-delay retry burst.
+// doRequest, however, honours MaxAttempts verbatim, so the bare zero
+// value runs zero attempts and is NOT a usable config on its own.
 // Exposed so tests can shrink it.
 type RetryConfig struct {
 	MaxAttempts  int           // total attempts, including the first
@@ -40,13 +45,19 @@ var defaultRetryConfig = RetryConfig{
 
 // isRetryable classifies an outbound-request error as worth retrying.
 // We retry on transient network conditions (connection reset/refused,
-// i/o timeout, DNS flakes the OS reports as temporary).  Any
-// non-network error (4xx-class after parsing the body, protocol
-// errors, URL parse failures, context cancellation) is NOT retryable
-// and the caller handles it.
+// i/o timeout, EOF mid-body) and on transient DNS resolution failures
+// (SERVFAIL, resolver-timeout, resolver-not-yet-reachable) — the latter
+// matters for air-gap link recovery, where DNS routinely fails for a
+// beat after the link returns before the name resolves.  The only DNS
+// outcome we treat as permanent is a definitive NXDOMAIN (IsNotFound
+// and not flagged temporary): a name that does not exist will not start
+// existing on a retry, so that is a misconfiguration for the caller to
+// surface.  Any other non-network error (4xx-class after parsing the
+// body, protocol errors, URL parse failures, context cancellation) is
+// NOT retryable and the caller handles it.
 //
 // HTTP status codes that warrant a retry (429, 5xx) are handled
-// separately by ``retryableStatus`` — this helper is only for
+// separately by `retryableStatus` — this helper is only for
 // transport-layer errors returned from http.Client.Do.
 func isRetryable(err error) bool {
 	if err == nil {
@@ -58,16 +69,33 @@ func isRetryable(err error) bool {
 	// Network-layer errors: timeouts, refused, reset, EOF mid-body.
 	var ue *url.Error
 	if errors.As(err, &ue) {
-		if ue.Timeout() || ue.Temporary() {
+		if ue.Timeout() {
 			return true
 		}
 		// Connection refused / reset bubble up as syscall.Errno;
-		// retry those — likely server restart or pod rollover.
-		if errors.Is(err, syscall.ECONNREFUSED) ||
-			errors.Is(err, syscall.ECONNRESET) ||
-			errors.Is(err, io.ErrUnexpectedEOF) {
+		// retry those — likely server restart or pod rollover.  The
+		// errno match is platform-split (isTransientSyscallErr) so the
+		// Windows agent recognises WSA* codes, which are numerically
+		// unrelated to the POSIX errno values.  EOF mid-body is
+		// platform-independent so it stays here.  (Dropping the former
+		// ue.Temporary() check is safe: net.OpError.Temporary() reported
+		// exactly these refused/reset/timeout cases we now classify by
+		// errno, and it is deprecated in the stdlib.)
+		if isTransientSyscallErr(err) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return true
 		}
+	}
+	// DNS resolution failures.  errors.As reaches the *net.DNSError even
+	// when it is wrapped inside the url.Error/net.OpError dial chain.
+	// Everything DNS-flavoured is transient enough to retry on an
+	// air-gap recovery EXCEPT a permanent NXDOMAIN (IsNotFound with no
+	// temporary flag), which no amount of retrying will resolve.
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		if dnsErr.IsNotFound && !dnsErr.IsTemporary {
+			return false
+		}
+		return true
 	}
 	return false
 }
@@ -134,24 +162,35 @@ func clampWaitHint(hint time.Duration, cfg RetryConfig) time.Duration {
 }
 
 // nextBackoff returns the wait before attempt n (1-indexed).  Classic
-// exponential: base * 2^(n-1), capped, with ±jitter.
+// exponential: base * 2^(n-1), capped, with ±jitter.  A non-positive
+// BaseDelay or MaxDelay falls back to the package default (mirroring
+// clampWaitHint) so a zero/negative config cannot collapse the schedule
+// into a zero-delay burst that hammers the server.
 func nextBackoff(n int, cfg RetryConfig) time.Duration {
 	if n <= 0 {
 		return 0
 	}
-	d := cfg.BaseDelay
+	base := cfg.BaseDelay
+	if base <= 0 {
+		base = defaultRetryConfig.BaseDelay
+	}
+	maxDelay := cfg.MaxDelay
+	if maxDelay <= 0 {
+		maxDelay = defaultRetryConfig.MaxDelay
+	}
+	d := base
 	for i := 1; i < n; i++ {
 		d *= 2
-		if d > cfg.MaxDelay {
-			d = cfg.MaxDelay
+		if d > maxDelay {
+			d = maxDelay
 			break
 		}
 	}
 	if cfg.JitterFactor > 0 {
 		d = applyJitter(d, cfg.JitterFactor)
 	}
-	if d > cfg.MaxDelay {
-		d = cfg.MaxDelay
+	if d > maxDelay {
+		d = maxDelay
 	}
 	return d
 }
@@ -173,7 +212,7 @@ func applyJitter(d time.Duration, factor float64) time.Duration {
 }
 
 // doRequest issues req through c.httpClient with retry/backoff on
-// transport errors, 429, and 5xx.  The caller provides a ``reqBuilder``
+// transport errors, 429, and 5xx.  The caller provides a `reqBuilder`
 // — a factory that returns a *fresh* *http.Request* on every attempt
 // — because http.Request.Body is a one-shot io.Reader and reusing it
 // silently posts an empty body on the retry.
@@ -181,7 +220,7 @@ func applyJitter(d time.Duration, factor float64) time.Duration {
 // Returns the final *http.Response (which the caller must Close) and
 // nil on success, or nil and an error describing the last failure.
 // The caller is responsible for reading + classifying the status
-// code on success; ``doRequest`` only peeks to decide whether to
+// code on success; `doRequest` only peeks to decide whether to
 // retry.
 func (c *Client) doRequest(
 	ctx context.Context,
@@ -259,10 +298,16 @@ func (c *Client) doRequest(
 			slog.Duration("wait", wait),
 			slog.String("cause", lastErr.Error()),
 		)
+		// time.NewTimer + Stop (not time.After) so a ctx cancellation
+		// mid-wait doesn't leak a pending timer until it fires — the
+		// agent can loop this thousands of times over a long air-gap
+		// outage.
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return nil, fmt.Errorf("%s: %w", op, ctx.Err())
-		case <-time.After(wait):
+		case <-timer.C:
 		}
 	}
 

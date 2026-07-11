@@ -2,22 +2,22 @@
 //
 // Gradle resolves Maven artifacts from repositories declared in
 // each project's build script.  At the user/system level, init
-// scripts in ``$GRADLE_USER_HOME/init.d/*.gradle`` are auto-loaded
+// scripts in `$GRADLE_USER_HOME/init.d/*.gradle` are auto-loaded
 // before every build invocation, which makes them the natural
 // vehicle for fleet-wide repository overrides.  We drop a single
-// ``sentari-proxy.gradle`` file there that rewrites every project's
+// `sentari-proxy.gradle` file there that rewrites every project's
 // repository list to point at Sentari-Proxy.
 //
-// Reads ``proxy_endpoints["maven"]`` since gradle's repository
+// Reads `proxy_endpoints["maven"]` since gradle's repository
 // format and Sentari-Proxy's Maven mirror share the same artifact
 // layout.
 //
 // Operator-curated init scripts (custom plugin repos, mirror
 // declarations for internal Artifactory) are recognised by the
-// presence of OTHER ``.gradle`` files in the same directory — this
-// writer only owns ``sentari-proxy.gradle`` and never touches
+// presence of OTHER `.gradle` files in the same directory — this
+// writer only owns `sentari-proxy.gradle` and never touches
 // other init scripts.  An operator who hand-curated their own
-// ``99-corp.gradle`` keeps it intact.
+// `99-corp.gradle` keeps it intact.
 
 package installgate
 
@@ -33,7 +33,7 @@ import (
 
 // gradleInitFilename is the file we own under the user/system
 // init.d directory.  Naming chosen so alphabetic ordering puts
-// our script after operator-curated ones (``99-…``) by default —
+// our script after operator-curated ones (`99-…`) by default —
 // init scripts apply in lexical order and we want operator
 // overrides to take precedence over the agent's defaults.
 const gradleInitFilename = "sentari-proxy.gradle"
@@ -42,13 +42,13 @@ const gradleInitFilename = "sentari-proxy.gradle"
 type GradleScope int
 
 const (
-	// GradleScopeUser writes ``$GRADLE_USER_HOME/init.d/sentari-proxy.gradle``
-	// when ``GRADLE_USER_HOME`` is set, otherwise
-	// ``~/.gradle/init.d/sentari-proxy.gradle`` (gradle's default).
+	// GradleScopeUser writes `$GRADLE_USER_HOME/init.d/sentari-proxy.gradle`
+	// when `GRADLE_USER_HOME` is set, otherwise
+	// `~/.gradle/init.d/sentari-proxy.gradle` (gradle's default).
 	GradleScopeUser GradleScope = iota
 
-	// GradleScopeSystem writes ``$GRADLE_HOME/init.d/sentari-proxy.gradle``.
-	// Returns empty (soft no-op) when ``GRADLE_HOME`` is not set —
+	// GradleScopeSystem writes `$GRADLE_HOME/init.d/sentari-proxy.gradle`.
+	// Returns empty (soft no-op) when `GRADLE_HOME` is not set —
 	// gradle's install path varies across distros + sdkman / brew /
 	// apt installs, so guess-paths would write into a directory
 	// gradle won't read.
@@ -67,7 +67,7 @@ func GradlePath(scope GradleScope) string {
 		if err != nil || home == "" {
 			return ""
 		}
-		// gradle uses the same ``.gradle`` directory under HOME on
+		// gradle uses the same `.gradle` directory under HOME on
 		// every supported OS, including Windows (gradle is a JVM
 		// tool, paths are platform-portable inside the JVM).
 		return filepath.Join(home, ".gradle", "init.d", gradleInitFilename)
@@ -88,10 +88,10 @@ type WriteGradleResult struct {
 	Removed bool
 
 	// ReplacedOperator is true iff the writer overwrote a file that
-	// already sat at the owned ``sentari-proxy.gradle`` path WITHOUT
+	// already sat at the owned `sentari-proxy.gradle` path WITHOUT
 	// the Sentari marker (an operator hand-placed a file at that exact
 	// name).  The generated init script is a complete override; the
-	// prior content survives only in the ``.sentari-backup-*`` the
+	// prior content survives only in the `.sentari-backup-*` the
 	// writer always creates on this path.  Surfaced to the audit log
 	// so the replacement is never silent.
 	ReplacedOperator bool
@@ -169,25 +169,25 @@ func WriteGradle(m *scanner.InstallGateMap, scope GradleScope, marker MarkerFiel
 // renderGradleInit produces a fresh Sentari-managed Groovy init
 // script.  The script CLEARS every repository list before adding
 // Sentari-Proxy as the sole entry — same semantic as Maven's
-// ``<mirrorOf>*</mirrorOf>``.  Three repository surfaces are
+// `<mirrorOf>*</mirrorOf>`.  Three repository surfaces are
 // replaced (not appended to):
 //
-//  1. ``settings.pluginManagement.repositories`` — Gradle plugin
-//     resolution.  Without this, ``plugins { id 'foo' }`` still
+//  1. `settings.pluginManagement.repositories` — Gradle plugin
+//     resolution.  Without this, `plugins { id 'foo' }` still
 //     fetches from the Gradle Plugin Portal.  Hooked via
-//     ``beforeSettings`` so we intercept before settings.gradle
+//     `beforeSettings` so we intercept before settings.gradle
 //     evaluates and locks the configuration.
 //
-//  2. ``buildscript.repositories`` per-project — the classpath
-//     used by ``apply plugin:`` and similar.  Cleared inside
-//     ``allprojects`` so the rewrite applies to every subproject
+//  2. `buildscript.repositories` per-project — the classpath
+//     used by `apply plugin:` and similar.  Cleared inside
+//     `allprojects` so the rewrite applies to every subproject
 //     in a multi-module build.
 //
-//  3. ``project.repositories`` per-project — dependency
-//     resolution.  Hooked via ``afterEvaluate`` so we run AFTER
-//     the project's own ``repositories { ... }`` block; merely
+//  3. `project.repositories` per-project — dependency
+//     resolution.  Hooked via `afterEvaluate` so we run AFTER
+//     the project's own `repositories { ... }` block; merely
 //     adding our mirror earlier wouldn't override an explicit
-//     ``mavenCentral()`` call later in the script.
+//     `mavenCentral()` call later in the script.
 //
 // The clear-then-add pattern is the only reliable way to defeat
 // the "additional repositories block silently appends" bypass
@@ -202,7 +202,7 @@ func renderGradleInit(endpoint string, marker MarkerFields) ([]byte, error) {
 	}
 	// Groovy single-quoted strings are byte-faithful (no escape
 	// processing), but we embed in single-quoted strings inside
-	// the rendered script.  An embedded ``'`` would terminate
+	// the rendered script.  An embedded `'` would terminate
 	// the string and let an attacker smuggle Groovy code.
 	if strings.ContainsAny(endpoint, "'\\") {
 		return nil, fmt.Errorf("renderGradleInit: endpoint contains Groovy-string-hostile characters")
@@ -214,7 +214,7 @@ func renderGradleInit(endpoint string, marker MarkerFields) ([]byte, error) {
 	fmt.Fprintf(&b, "def sentariProxyUrl = '%s'\n\n", endpoint)
 	// Plugin resolution surface.  beforeSettings runs before
 	// settings.gradle evaluates, so clearing the pluginManagement
-	// repositories here forces every ``plugins { ... }`` block to
+	// repositories here forces every `plugins { ... }` block to
 	// resolve through Sentari-Proxy.
 	b.WriteString("beforeSettings { settings ->\n")
 	b.WriteString("    settings.pluginManagement.repositories.clear()\n")
@@ -240,8 +240,9 @@ func renderGradleInit(endpoint string, marker MarkerFields) ([]byte, error) {
 	rendered := []byte(b.String())
 
 	// Render-time structural check — paranoia + canary on top of
-	// the input gates above.  Mitigations against the gradle-writer
-	// expansion: we author Groovy that runs in gradle's JVM, so
+	// the input gates above.  See ADR 0003 (sentari repo)
+	// "Mitigations against the gradle-writer expansion" for the
+	// rationale: we author Groovy that runs in gradle's JVM, so
 	// any future regression that lets unexpected content into the
 	// rendered script must be caught before it hits disk.
 	if err := validateRenderedGradle(rendered, endpoint); err != nil {
@@ -256,18 +257,18 @@ func renderGradleInit(endpoint string, marker MarkerFields) ([]byte, error) {
 // on:
 //
 //   - the marker prefix not being present at offset zero;
-//   - the closing ``}`` not appearing at the end;
-//   - the symbolic name ``sentariProxyUrl`` appearing anything other
+//   - the closing `}` not appearing at the end;
+//   - the symbolic name `sentariProxyUrl` appearing anything other
 //     than the exact expected count of references (1 def + 3 uses
 //     across pluginManagement / buildscript / afterEvaluate = 4
 //     total, matching sentariProxyUrlOccurrences below);
-//   - the URL appearing other than once (only inside the ``def``
+//   - the URL appearing other than once (only inside the `def`
 //     line as a string literal — every other reference goes through
 //     the variable);
 //   - any of a small list of Groovy keywords associated with
-//     arbitrary code execution (``eval``, ``execute``,
-//     ``ProcessBuilder``, ``Runtime``, ``GroovyShell``,
-//     ``System.exec``).
+//     arbitrary code execution (`eval`, `execute`,
+//     `ProcessBuilder`, `Runtime`, `GroovyShell`,
+//     `System.exec`).
 //
 // The check is deliberately cheap and over-strict: the render
 // function is a constant template with one variable substitution,
@@ -283,7 +284,7 @@ func validateRenderedGradle(rendered []byte, endpoint string) error {
 	if !bytes.HasSuffix(trimmed, []byte("}")) {
 		return fmt.Errorf("rendered script does not end with closing brace")
 	}
-	// The variable name ``sentariProxyUrl`` appears 4 times in the
+	// The variable name `sentariProxyUrl` appears 4 times in the
 	// canonical render: once on the def's left-hand side, then
 	// once each as the URL argument in pluginManagement,
 	// buildscript, and afterEvaluate (3 uses).  Total = 4.
@@ -311,8 +312,8 @@ func validateRenderedGradle(rendered []byte, endpoint string) error {
 	// the endpoint URL (in the def's right-hand side), neither
 	// of which is restricted to a keyword-free alphabet by
 	// upstream validators.  A legitimate proxy URL like
-	// ``https://eval-proxy.corp.local/maven/`` or a KeyID like
-	// ``runtime-2026q2`` would otherwise false-positive.
+	// `https://eval-proxy.corp.local/maven/` or a KeyID like
+	// `runtime-2026q2` would otherwise false-positive.
 	body, err := gradleBodyAfterDef(rendered)
 	if err != nil {
 		return err
@@ -330,7 +331,7 @@ func validateRenderedGradle(rendered []byte, endpoint string) error {
 }
 
 // gradleBodyAfterDef returns the bytes of the rendered script
-// that follow the ``def sentariProxyUrl = '<URL>'`` line.  Used
+// that follow the `def sentariProxyUrl = '<URL>'` line.  Used
 // by the forbidden-primitive scan so an operator-supplied URL
 // or KeyID containing keyword-collision substrings can't false-
 // positive the canary.  Returns an error if the def line is

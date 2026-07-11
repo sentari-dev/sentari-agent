@@ -13,7 +13,7 @@ import (
 // table-driven test harness covers all six — each row customises
 // the per-server specifics.
 //
-// Server-specific marker files are created by ``setupMarker`` closures;
+// Server-specific marker files are created by `setupMarker` closures;
 // the table keeps the test body uniform while letting each server's
 // marker-shape quirks live near that server's row.
 

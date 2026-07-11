@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -14,14 +15,14 @@ import (
 // added to the expected set.
 func TestScannerRegistry_AllBuiltinsRegistered(t *testing.T) {
 	want := map[string]bool{
-		EnvPip:              true,
-		EnvVenv:             true,
-		EnvConda:            true,
-		EnvPoetry:           true,
-		EnvPipenv:           true,
-		EnvSystemDeb:        true,
-		EnvSystemRpm:        true,
-		envWindowsRegistry:  true,
+		EnvPip:             true,
+		EnvVenv:            true,
+		EnvConda:           true,
+		EnvPoetry:          true,
+		EnvPipenv:          true,
+		EnvSystemDeb:       true,
+		EnvSystemRpm:       true,
+		envWindowsRegistry: true,
 	}
 	got := map[string]bool{}
 	for _, s := range RegisteredScanners() {
@@ -161,6 +162,13 @@ func TestMarkerScanners_RoundTripFixtures(t *testing.T) {
 
 	for _, f := range fixtures {
 		t.Run(f.name, func(t *testing.T) {
+			if f.envType == EnvVenv && runtime.GOOS == "windows" {
+				// The venv fixture's pyvenv.cfg uses a Unix base (home=/usr/bin),
+				// which isVenvDangling rejects on Windows (that path does not
+				// exist), so the venv is dropped and emits no packages. Windows
+				// venv detection uses Scripts\ + home=C:\ and is exercised natively.
+				t.Skip("venv fixture uses Unix layout (/usr/bin base, bin/ symlink); Windows venv detection uses Scripts\\ + home=C:\\ and is exercised natively")
+			}
 			tmp := t.TempDir()
 			f.build(t, tmp)
 

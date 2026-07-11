@@ -1,8 +1,8 @@
 package deptree
 
 import (
+	"context"
 	"path/filepath"
-	"sort"
 	"testing"
 )
 
@@ -21,10 +21,15 @@ func TestParseMavenPom_reactorWalksChildModules(t *testing.T) {
 	// each child module's pom; transitive recursion needs no .m2 here.
 	emptyM2 := filepath.Join(fixtureDir, "nonexistent-m2")
 
-	edges, err := ParseMavenPom(filepath.Join(fixtureDir, "pom.xml"), emptyM2)
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(fixtureDir, "pom.xml"), emptyM2)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
+
+	// Reactor-module direct edges are depth-2 (root→module→dep) by design;
+	// assert the Maven-aware contract invariants rather than the blanket
+	// direct⟺depth1 rule that applies to the non-workspace ecosystems.
+	assertMavenEdgeContractInvariants(t, edges, "com.example.reactor:my-reactor", "maven-reactor")
 
 	// Expected child-module deps:
 	//   api      → com.example:http-client      4.5.13
@@ -113,6 +118,58 @@ func TestParseMavenPom_reactorWalksChildModules(t *testing.T) {
 	}
 }
 
+// TestParseMavenPom_reactorModuleOwnPropertyResolves covers Finding
+// scanner-2: a reactor module that pins a dependency version via a property
+// declared in the MODULE's own <properties> (not the reactor root) must resolve
+// to the concrete version — pre-fix collectReactorModules interpolated only the
+// literal ${project.version} and left ${jackson.version} verbatim + Resolved=false.
+// The ${project.version} path must keep resolving too (root/project-version build).
+func TestParseMavenPom_reactorModuleOwnPropertyResolves(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "maven", "multimodule-moduleprops")
+	// Empty m2 dir — only the module's direct (depth-2) edges are asserted;
+	// no transitive recursion / parent-chain lookups are needed here.
+	emptyM2 := filepath.Join(fixtureDir, "nonexistent-m2")
+
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(fixtureDir, "pom.xml"), emptyM2)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	// Module-property-pinned dep must resolve to the concrete version.
+	// ${project.version}-pinned dep must resolve to the module version.
+	wantVersions := map[string]string{
+		"com.fasterxml.jackson.core:jackson-databind": "2.15.2", // ${jackson.version} (module <properties>)
+		"com.example.reactor:svc-api":                 "3.0.0",  // ${project.version}
+	}
+
+	got := map[string]struct {
+		version  string
+		resolved bool
+		found    bool
+	}{}
+	for _, e := range edges {
+		got[e.ChildName] = struct {
+			version  string
+			resolved bool
+			found    bool
+		}{version: e.ChildVersion, resolved: e.Resolved, found: true}
+	}
+
+	for child, wantVer := range wantVersions {
+		g := got[child]
+		if !g.found {
+			t.Errorf("missing reactor edge %q; all edges=%+v", child, edges)
+			continue
+		}
+		if g.version != wantVer {
+			t.Errorf("reactor edge %q: version=%q want %q (placeholder left unresolved?)", child, g.version, wantVer)
+		}
+		if !g.resolved {
+			t.Errorf("reactor edge %q: Resolved=false; a module-property-pinned version must resolve", child)
+		}
+	}
+}
+
 // TestParseMavenPom_reactorEmptyModuleListIsNoOp guards against a
 // regression where a reactor with no actual modules entries still tries
 // to walk the filesystem.  The simple fixture has no <modules>, so the
@@ -120,7 +177,7 @@ func TestParseMavenPom_reactorWalksChildModules(t *testing.T) {
 func TestParseMavenPom_reactorEmptyModuleListIsNoOp(t *testing.T) {
 	fixtureDir := filepath.Join("testdata", "maven", "simple")
 	m2Dir := filepath.Join(fixtureDir, ".m2", "repository")
-	edges, err := ParseMavenPom(filepath.Join(fixtureDir, "pom.xml"), m2Dir)
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(fixtureDir, "pom.xml"), m2Dir)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
@@ -139,13 +196,4 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
-}
-
-// sortStrings is used internally to compare unordered slices in error msgs.
-//
-//nolint:unused // kept for clearer assertions if more comparisons are added.
-func sortStrings(s []string) []string {
-	out := append([]string{}, s...)
-	sort.Strings(out)
-	return out
 }

@@ -1,11 +1,11 @@
 // pdm writer — Python development environment manager.
 //
 // pdm reads its config from a TOML file at a platformdirs-derived
-// path (Linux: ``~/.config/pdm/config.toml``, macOS: ``~/Library/
-// Application Support/pdm/config.toml``, Windows: ``%LOCALAPPDATA%
-// \pdm\pdm\config.toml``).  The ``[pypi].url`` setting redirects
+// path (Linux: `~/.config/pdm/config.toml`, macOS: `~/Library/
+// Application Support/pdm/config.toml`, Windows: `%LOCALAPPDATA%
+// \pdm\pdm\config.toml`).  The `[pypi].url` setting redirects
 // every package install through Sentari-Proxy globally — same
-// semantic as pip's ``index-url``.
+// semantic as pip's `index-url`.
 //
 // pdm has no system-wide config path; it's per-user only.  The
 // scope enum keeps the System variant for symmetry with the other
@@ -30,10 +30,10 @@ type PdmScope int
 const (
 	// PdmScopeUser writes pdm's per-user config:
 	//
-	//   - ``$XDG_CONFIG_HOME/pdm/config.toml`` (Linux, fallback
-	//     to ``~/.config/pdm/config.toml``)
-	//   - ``~/Library/Application Support/pdm/config.toml`` (macOS)
-	//   - ``%LOCALAPPDATA%\pdm\pdm\config.toml`` (Windows)
+	//   - `$XDG_CONFIG_HOME/pdm/config.toml` (Linux, fallback
+	//     to `~/.config/pdm/config.toml`)
+	//   - `~/Library/Application Support/pdm/config.toml` (macOS)
+	//   - `%LOCALAPPDATA%\pdm\pdm\config.toml` (Windows)
 	PdmScopeUser PdmScope = iota
 
 	// PdmScopeSystem soft-no-ops on every OS because pdm itself
@@ -148,8 +148,8 @@ func WritePdm(m *scanner.InstallGateMap, scope PdmScope, marker MarkerFields) (W
 }
 
 // renderPdmConfig produces a fresh Sentari-managed pdm
-// config.toml.  Single ``[pypi]`` table with ``url`` and an
-// explicit ``verify_ssl = true`` so pdm doesn't fall back to
+// config.toml.  Single `[pypi]` table with `url` and an
+// explicit `verify_ssl = true` so pdm doesn't fall back to
 // host-default behaviour on an internal CA install.
 //
 // pdm's TOML reader is the standard Python tomllib so any TOML-

@@ -2,6 +2,7 @@ package update
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -179,6 +180,9 @@ func TestCheck_404TreatedAsNoUpgrade(t *testing.T) {
 }
 
 func TestApply_downloadAndAtomicReplaceWithRollback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apply self-update path is unix-only; Windows uses install.ps1 — see TestApply_refusesOnWindows")
+	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	body := []byte("#!fake-binary v0.2.0\n" + strings.Repeat("x", 4096))
 	srv := envelopeServer(t, "primary", priv, "0.2.0", body)
@@ -205,7 +209,7 @@ func TestApply_downloadAndAtomicReplaceWithRollback(t *testing.T) {
 	// environment, so we expect the binary swap to succeed but the
 	// restart to surface as a wrapped error.  Either way we verify
 	// the install path holds the new bytes.
-	applyErr := c.Apply(plan, installPath, filepath.Join(tmp, "staged"))
+	applyErr := c.Apply(context.Background(), plan, installPath, filepath.Join(tmp, "staged"))
 	// applyErr might be nil (linux/CI sometimes), or the wrapped
 	// "service restart failed" — accept both.  What MUST be true is
 	// the binary swap completed before the restart attempt.
@@ -246,6 +250,9 @@ func TestApply_downloadAndAtomicReplaceWithRollback(t *testing.T) {
 }
 
 func TestApply_sha256MismatchAborts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apply self-update path is unix-only; Windows uses install.ps1 — see TestApply_refusesOnWindows")
+	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	body := []byte("real-body")
 	srv := envelopeServer(t, "primary", priv, "0.2.0", body)
@@ -267,7 +274,7 @@ func TestApply_sha256MismatchAborts(t *testing.T) {
 	// binary in the release dir between hash and serve.
 	plan.Platform.SHA256 = strings.Repeat("00", 32)
 
-	err = c.Apply(plan, installPath, filepath.Join(tmp, "staged"))
+	err = c.Apply(context.Background(), plan, installPath, filepath.Join(tmp, "staged"))
 	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("expected sha256 mismatch error, got %v", err)
 	}

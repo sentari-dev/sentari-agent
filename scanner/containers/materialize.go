@@ -1,6 +1,7 @@
 package containers
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -20,8 +21,17 @@ import (
 // non-fatal ScanError rather than copied.
 const copyRegularFileMaxBytes int64 = 512 << 20 // 512 MiB
 
+// defaultMaterializeByteBudget is the cumulative ceiling on bytes
+// attached to a single container's materialised tree.  The per-file
+// ceiling (copyRegularFileMaxBytes) bounds one file; this bounds their
+// sum, so an image of thousands of just-under-ceiling files can't fill
+// the host's disk (or, on a tmpfs fallback, its RAM).  2 GiB clears
+// any realistic runtime rootfs while capping the pathological case.
+// Materialize treats a byteBudget <= 0 as "use this default".
+const defaultMaterializeByteBudget int64 = 2 << 30 // 2 GiB
+
 // Materialize walks the given MergedTree and reconstructs it inside
-// ``dest`` as a single coherent directory tree that the normal
+// `dest` as a single coherent directory tree that the normal
 // scanner walker can consume.  Directories are created mkdir-p style;
 // regular files are attached via hardlinks where possible (so the
 // materialisation doesn't duplicate bytes on disk) and fall back to
@@ -39,24 +49,43 @@ const copyRegularFileMaxBytes int64 = 512 << 20 // 512 MiB
 // and capped at 100 targets per cycle, so the budget holds.
 //
 // Invariant: Materialize never follows a symlink.  The Phase-A
-// walker drops them, so ``dest`` contains only regular files and
+// walker drops them, so `dest` contains only regular files and
 // directories.  safeio's leaf-symlink refusal still applies when
-// plugins read from ``dest``.
+// plugins read from `dest`.
 // Materialize returns the list of non-fatal ScanErrors it accumulated
-// (oversize files skipped, individual copy failures) plus a single
-// fatal error for an unrecoverable condition (dest unmakeable, Walk
-// abort).  Oversize files are skipped — never attached to ``dest`` —
-// so a multi-GB layer file can't exhaust the host's disk; each skip
-// is recorded as a ScanError so operators see why a path is absent.
-func Materialize(tree *MergedTree, dest string) ([]scanner.ScanError, error) {
+// (oversize files skipped, individual copy failures, merged-tree
+// truncation) plus a single fatal error for an unrecoverable condition
+// (dest unmakeable, ctx cancelled/expired, cumulative-budget breach,
+// Walk abort).  Oversize files are skipped — never attached to `dest`
+// — so a single multi-GB layer file can't exhaust the host's disk;
+// each skip is recorded as a ScanError so operators see why a path is
+// absent.
+//
+// ctx bounds the copy loop: a cancelled or deadline-expired context
+// (the orchestrator passes the per-container timeout) aborts the walk
+// promptly with ctx.Err().  byteBudget caps the cumulative bytes
+// attached to `dest`; a value <= 0 means defaultMaterializeByteBudget.
+// A breach is fatal (the partial tree is torn down by the caller's
+// deferred RemoveAll) rather than a per-file skip, because a tree that
+// hit the cumulative cap is not a faithful view worth sub-scanning.
+func Materialize(ctx context.Context, tree *MergedTree, dest string, byteBudget int64) ([]scanner.ScanError, error) {
 	if tree == nil || len(tree.Layers) == 0 {
 		return nil, nil
+	}
+	if byteBudget <= 0 {
+		byteBudget = defaultMaterializeByteBudget
 	}
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir dest: %w", err)
 	}
 	var errs []scanner.ScanError
-	walkErr := tree.Walk(func(e MergedEntry) error {
+	var attached int64 // cumulative bytes attached to dest
+	truncated, walkErr := tree.Walk(ctx, func(e MergedEntry) error {
+		// Honour cancellation/deadline before touching the filesystem so
+		// a wedged or timed-out sub-scan stops copying promptly.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		target := filepath.Join(dest, filepath.FromSlash(e.Path))
 		if e.IsDir {
 			return os.MkdirAll(target, 0o755)
@@ -70,7 +99,7 @@ func Materialize(tree *MergedTree, dest string) ([]scanner.ScanError, error) {
 		// Per-file size ceiling, enforced BEFORE link/copy so the
 		// outcome is deterministic regardless of hardlink support: a
 		// file above the ceiling is skipped and recorded, never
-		// attached to ``dest``.  Lstat (not Stat) so a symlink that
+		// attached to `dest`.  Lstat (not Stat) so a symlink that
 		// the walker should already have dropped can't redirect the
 		// size check at a small decoy — though the walker never emits
 		// symlinks, this keeps the guard self-contained.
@@ -93,6 +122,19 @@ func Materialize(tree *MergedTree, dest string) ([]scanner.ScanError, error) {
 			})
 			return nil
 		}
+		// Cumulative byte budget — enforced BEFORE attaching this file so
+		// the sum of attached bytes never crosses the ceiling.  A breach
+		// is fatal: it aborts the walk and Materialize returns the error
+		// (the caller tears down the partial tree).  Counting attached
+		// (not skipped) bytes means oversize skips above don't consume
+		// the budget.
+		if attached+info.Size() > byteBudget {
+			return fmt.Errorf(
+				"materialise: cumulative byte budget exceeded (%d + %d > %d bytes) at %s; aborting to bound host disk/RAM",
+				attached, info.Size(), byteBudget, e.Path,
+			)
+		}
+		attached += info.Size()
 		// Try hardlink first — cheap, no bytes moved.
 		if err := os.Link(e.Abs, target); err == nil {
 			return nil
@@ -114,14 +156,27 @@ func Materialize(tree *MergedTree, dest string) ([]scanner.ScanError, error) {
 		}
 		return nil
 	})
+	// The merged-tree walk hit its cumulative entry cap and stopped
+	// short — some layer content was never emitted (hence never
+	// materialised).  Non-fatal (we materialise what we got), but
+	// surfaced as a ScanError so operators know the container view is
+	// partial rather than assuming a clean scan.
+	if truncated {
+		errs = append(errs, scanner.ScanError{
+			Path:      dest,
+			EnvType:   "container",
+			Error:     fmt.Sprintf("materialise: merged-tree walk truncated at %d entries; container view is partial", walkLayerMaxEntries),
+			Timestamp: time.Now().UTC(),
+		})
+	}
 	return errs, walkErr
 }
 
-// copyRegularFile writes ``src`` to ``dst`` byte-for-byte, preserving
+// copyRegularFile writes `src` to `dst` byte-for-byte, preserving
 // the mode bits, refusing any source above copyRegularFileMaxBytes.
 // Materialize enforces the same ceiling before calling here; this is
 // defence-in-depth so a direct caller (or a file that grows between
-// Materialize's stat and this open) still can't balloon ``dst`` to an
+// Materialize's stat and this open) still can't balloon `dst` to an
 // arbitrary size.  The io.Copy is itself bounded with a LimitReader
 // (+1) so a post-stat growth is detected rather than streamed whole.
 func copyRegularFile(src, dst string) error {

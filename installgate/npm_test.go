@@ -10,10 +10,10 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
-// makeNpmMap returns a verified-shape map with one ``npm``
+// makeNpmMap returns a verified-shape map with one `npm`
 // ecosystem entry and matching proxy endpoint.  Single-ecosystem
 // fixture for npm-specific tests; orchestrator tests build their
-// own multi-ecosystem fixture in ``orchestrator_test.go``.
+// own multi-ecosystem fixture in `orchestrator_test.go`.
 func makeNpmMap(npmEndpoint string) *scanner.InstallGateMap {
 	return &scanner.InstallGateMap{
 		Version: 1730901234,
@@ -28,7 +28,7 @@ func makeNpmMap(npmEndpoint string) *scanner.InstallGateMap {
 
 // npmHomeOverride redirects USERPROFILE / HOME so NpmPath resolves
 // inside a test-owned temp dir.  Mirrors the pip writer's
-// ``userHomeOverride`` but for npm-specific path resolution.
+// `userHomeOverride` but for npm-specific path resolution.
 func npmHomeOverride(t *testing.T, dir string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -199,7 +199,7 @@ func TestWriteNpm_NoProxyExistingSentariConfigRemoved(t *testing.T) {
 
 // Regression for the operator-config-clobber finding: writing the
 // Sentari registry over an existing operator-curated .npmrc that
-// carries an ``_authToken`` line (and other settings) MUST preserve
+// carries an `_authToken` line (and other settings) MUST preserve
 // those lines in the ACTIVE file — not just in a side backup.  npm
 // reads the active .npmrc; dropping the auth token there breaks the
 // operator's private-registry auth even though a backup exists.  The
@@ -316,7 +316,7 @@ func TestWriteNpm_NilMapRejected(t *testing.T) {
 
 // Endpoint-injection guard: a CR/LF in the proxy URL would let a
 // tampered policy-map (or a buggy server config) inject a second
-// ``registry=`` line that npm would honour over ours.  The
+// `registry=` line that npm would honour over ours.  The
 // validateEndpoint gate refuses control bytes before the renderer
 // emits anything.  Defence-in-depth — even though signature
 // verification + dashboard UI both validate the URL upstream.

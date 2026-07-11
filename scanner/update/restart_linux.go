@@ -31,7 +31,7 @@ var cmdRunner = func(name string, args ...string) ([]byte, error) {
 // Operators who run the agent under sysvinit / a custom supervisor
 // need to wire their own post-install hook; that path is rare enough
 // to defer to a follow-up (the cross-platform interface accepts a
-// future ``--restart-cmd`` plug-in point without breaking callers).
+// future `--restart-cmd` plug-in point without breaking callers).
 //
 // The unit name can be overridden via SENTARI_AGENT_SYSTEMD_UNIT.
 func restartService(_ string) error {

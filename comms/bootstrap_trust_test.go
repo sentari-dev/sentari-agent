@@ -23,7 +23,7 @@ import (
 	"time"
 )
 
-// Bootstrap trust precedence tests.
+// Bootstrap trust precedence tests (ADR 0004).
 //
 // The trust ladder the client must implement:
 //  1. CACertFile configured  -> standard chain validation against that pool;
@@ -139,7 +139,7 @@ func TestBootstrapTrust_CAOnly_UsesChainValidation(t *testing.T) {
 }
 
 // 2. CA + fingerprint: chain validation stays ON and the pin is enforced on
-// top of it — fingerprint mode must not disable RootCAs (CA first,
+// top of it — fingerprint mode must not disable RootCAs (ADR 0004: CA first,
 // fingerprint composes).
 func TestBootstrapTrust_CAPlusFingerprint_PinComposesWithChain(t *testing.T) {
 	caPEM, caKey, caCert := makeCA(t, "trusted-ca")

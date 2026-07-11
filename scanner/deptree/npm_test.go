@@ -3,6 +3,7 @@ package deptree
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -144,10 +145,13 @@ func TestParseNpmPackageLock_devTransitives(t *testing.T) {
 	}
 }
 
-// TestParseNpmPackageLock_orphanParentFallsBackToSafePath pins the
-// orphan-edge convention: a packages-map entry not reachable from root
-// still emits a schema-valid 2-element [parent, child] path via SafePath.
-func TestParseNpmPackageLock_orphanParentFallsBackToSafePath(t *testing.T) {
+// TestParseNpmPackageLock_unreachableOrphanIsDropped pins the
+// orphan-edge convention: a packages-map entry not reachable from the
+// root project (an extraneous install, "ghost", that nothing depends
+// on) is DROPPED rather than emitted with a fabricated depth-0,
+// 2-element path. This matches what the pypi/pnpm/nuget parsers do and
+// keeps every emitted edge root-anchored (depth==len(path)-1).
+func TestParseNpmPackageLock_unreachableOrphanIsDropped(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "package-lock.json")
 	lock := `{
@@ -167,15 +171,81 @@ func TestParseNpmPackageLock_orphanParentFallsBackToSafePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if len(edges) != 1 {
-		t.Fatalf("expected 1 edge, got %d: %+v", len(edges), edges)
+	if len(edges) != 0 {
+		t.Fatalf("expected the unreachable ghost subtree to be dropped (0 edges), got %d: %+v", len(edges), edges)
 	}
-	e := edges[0]
-	if e.ParentName != "ghost" || e.ChildName != "react" {
-		t.Errorf("wrong edge: %s -> %s", e.ParentName, e.ChildName)
+}
+
+// TestParseNpmPackageLock_workspaceMembers pins the npm-workspaces fix:
+//   - workspace-member subtrees are seeded as depth-1 roots so their deps
+//     get a real root-anchored introduced_by_path (no fabricated depth-0)
+//   - the local workspace lockfile key ("packages/liba") never leaks as a
+//     package name; the member's own "name" field is used instead
+func TestParseNpmPackageLock_workspaceMembers(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "package-lock.json")
+	// Root has a workspace member "liba" (linked at node_modules/liba,
+	// real entry at packages/liba) that depends on a hoisted lodash. The
+	// member's dependency subtree is unreachable from "" via node_modules
+	// resolution alone — the seed makes it root-anchored.
+	lock := `{
+  "name": "ws-root",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "ws-root", "version": "1.0.0", "dependencies": {"liba": "*"}},
+    "node_modules/liba": {"resolved": "packages/liba", "link": true},
+    "packages/liba": {"name": "liba", "version": "2.3.4", "dependencies": {"lodash": "^4.0.0"}},
+    "node_modules/lodash": {"version": "4.17.21"}
+  }
+}`
+	if err := writeFile(p, lock); err != nil {
+		t.Fatal(err)
 	}
-	if len(e.IntroducedByPath) != 2 || e.IntroducedByPath[0] != "ghost" || e.IntroducedByPath[1] != "react" {
-		t.Errorf("orphan edge should fall back to [ghost react], got %v", e.IntroducedByPath)
+	edges, err := ParseNpmPackageLock(p)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	assertEdgeContractInvariants(t, edges, "npm-workspace")
+
+	type key struct{ parent, child string }
+	byEdge := map[key]DepEdge{}
+	for _, e := range edges {
+		byEdge[key{e.ParentName, e.ChildName}] = e
+		// No key must ever leak as a package name.
+		if strings.Contains(e.ParentName, "packages/") || strings.Contains(e.ChildName, "packages/") {
+			t.Errorf("workspace lockfile key leaked as a package name: %+v", e)
+		}
+		for _, n := range e.IntroducedByPath {
+			if strings.Contains(n, "packages/") {
+				t.Errorf("workspace lockfile key leaked into introduced_by_path: %v", e.IntroducedByPath)
+			}
+		}
+	}
+
+	// Root → liba direct edge (root declares the member).
+	rootLiba, ok := byEdge[key{"ws-root", "liba"}]
+	if !ok {
+		t.Fatalf("expected ws-root->liba direct edge; edges=%+v", edges)
+	}
+	if rootLiba.Type != "direct" || rootLiba.Depth != 1 {
+		t.Errorf("ws-root->liba must be direct at depth 1, got %+v", rootLiba)
+	}
+
+	// The member's own dep is root-anchored: [ws-root, liba, lodash] @depth2.
+	libaLodash, ok := byEdge[key{"liba", "lodash"}]
+	if !ok {
+		t.Fatalf("expected liba->lodash edge from the workspace member subtree; edges=%+v", edges)
+	}
+	if libaLodash.Depth != 2 || libaLodash.Type != "transitive" {
+		t.Errorf("liba->lodash must be transitive at depth 2, got %+v", libaLodash)
+	}
+	wantPath := []string{"ws-root", "liba", "lodash"}
+	if !equalPath(libaLodash.IntroducedByPath, wantPath) {
+		t.Errorf("liba->lodash path must be %v, got %v", wantPath, libaLodash.IntroducedByPath)
+	}
+	if libaLodash.ChildVersion != "4.17.21" {
+		t.Errorf("liba->lodash child version must resolve to hoisted 4.17.21, got %q", libaLodash.ChildVersion)
 	}
 }
 

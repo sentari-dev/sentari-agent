@@ -2,6 +2,7 @@ package runtimeversions
 
 import (
 	"archive/zip"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,7 +31,7 @@ func TestDetectAllAppServers_WildFly(t *testing.T) {
 		"bin/product.conf":  "slot=main\n",
 		"modules/.keep":     "",
 	})
-	got := DetectAllAppServers([]string{parent})
+	got := DetectAllAppServers(context.Background(), []string{parent})
 	if len(got) != 1 {
 		t.Fatalf("want 1 runtime, got %d: %+v", len(got), got)
 	}
@@ -52,7 +53,7 @@ func TestDetectAllAppServers_EAPviaProductConf(t *testing.T) {
 		"bin/product.conf":  "slot=eap\n",
 		"modules/.keep":     "",
 	})
-	got := DetectAllAppServers([]string{parent})
+	got := DetectAllAppServers(context.Background(), []string{parent})
 	if len(got) != 1 || got[0].Name != "jboss-eap" || got[0].Cycle != "7.4" {
 		t.Fatalf("got %+v", got)
 	}
@@ -65,7 +66,7 @@ func TestDetectAllAppServers_Jetty(t *testing.T) {
 		"VERSION.txt": "jetty-12.0.5 - 20 December 2023\n",
 		"start.jar":   "PK\x03\x04",
 	})
-	got := DetectAllAppServers([]string{parent})
+	got := DetectAllAppServers(context.Background(), []string{parent})
 	if len(got) != 1 || got[0].Name != "jetty" || got[0].Version != "12.0.5" || got[0].Cycle != "12.0" {
 		t.Fatalf("got %+v", got)
 	}
@@ -79,7 +80,7 @@ func TestDetectAllAppServers_JettyNoVersionTxt(t *testing.T) {
 		"lib/jetty-server-12.0.5.jar": "PK\x03\x04",
 		"etc/jetty.xml":               "<Configure/>",
 	})
-	got := DetectAllAppServers([]string{parent})
+	got := DetectAllAppServers(context.Background(), []string{parent})
 	if len(got) != 1 || got[0].Name != "jetty" || got[0].Version != "12.0.5" || got[0].Cycle != "12.0" {
 		t.Fatalf("got %+v", got)
 	}
@@ -93,7 +94,7 @@ func TestDetectAllAppServers_VersionUnknownStillEmitted(t *testing.T) {
 		"bin/standalone.sh": "#!/bin/sh\n",
 		"modules/.keep":     "",
 	})
-	got := DetectAllAppServers([]string{parent})
+	got := DetectAllAppServers(context.Background(), []string{parent})
 	if len(got) != 1 || got[0].Version != "unknown" || got[0].Cycle != "unknown" {
 		t.Fatalf("want presence with unknown version, got %+v", got)
 	}
@@ -124,11 +125,31 @@ func writeJarWithVersion(t *testing.T, path, version string) {
 	}
 }
 
+// jarImplementationVersion must open the path exactly once via safeio.Open,
+// which refuses a symlink at the leaf — so a jar path swapped for a symlink
+// yields no version rather than following the link (TOCTOU hardening).
+func TestJarImplementationVersion_SymlinkRefused(t *testing.T) {
+	dir := t.TempDir()
+	realJar := filepath.Join(dir, "real.jar")
+	writeJarWithVersion(t, realJar, "9.9.9")
+	// Positive control: the real jar resolves.
+	if got := jarImplementationVersion(realJar); got != "9.9.9" {
+		t.Fatalf("real jar version = %q, want 9.9.9", got)
+	}
+	link := filepath.Join(dir, "link.jar")
+	if err := os.Symlink(realJar, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if got := jarImplementationVersion(link); got != "" {
+		t.Errorf("symlinked jar path must be refused, got version %q", got)
+	}
+}
+
 func TestDetectAllAppServers_Tomcat(t *testing.T) {
 	parent := t.TempDir()
 	home := filepath.Join(parent, "apache-tomcat-10.1.18")
 	writeJarWithVersion(t, filepath.Join(home, "lib", "catalina.jar"), "10.1.18")
-	got := DetectAllAppServers([]string{parent})
+	got := DetectAllAppServers(context.Background(), []string{parent})
 	if len(got) != 1 || got[0].Name != "tomcat" || got[0].Version != "10.1.18" || got[0].Cycle != "10.1" {
 		t.Fatalf("got %+v", got)
 	}
@@ -138,10 +159,41 @@ func TestDetectAllAppServers_Payara(t *testing.T) {
 	parent := t.TempDir()
 	home := filepath.Join(parent, "payara6")
 	writeTree(t, home, map[string]string{
-		"glassfish/config/branding/glassfish-version.properties": "product_version=6.2024.5\n",
+		"glassfish/config/branding/glassfish-version.properties": "product_name=Payara Server\nproduct_version=6.2024.5\n",
 	})
-	got := DetectAllAppServers([]string{parent})
-	if len(got) != 1 || got[0].Name != "payara" || got[0].Version != "6.2024.5" || got[0].Cycle != "6.2024" {
+	got := DetectAllAppServers(context.Background(), []string{parent})
+	if len(got) != 1 || got[0].Name != "payara" || got[0].Distro != "Payara" || got[0].Version != "6.2024.5" || got[0].Cycle != "6.2024" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+// TestDetectAllAppServers_PayaraViaModuleJar covers the fallback signal: a
+// Payara install whose branding file carries no Payara-specific product name
+// is still identified as Payara by a Payara-only module jar.
+func TestDetectAllAppServers_PayaraViaModuleJar(t *testing.T) {
+	parent := t.TempDir()
+	home := filepath.Join(parent, "payara6")
+	writeTree(t, home, map[string]string{
+		"glassfish/config/branding/glassfish-version.properties": "product_version=6.2024.5\n",
+		"glassfish/modules/payara-micro-boot.jar":                "PK\x03\x04",
+	})
+	got := DetectAllAppServers(context.Background(), []string{parent})
+	if len(got) != 1 || got[0].Name != "payara" || got[0].Distro != "Payara" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+// TestDetectAllAppServers_EclipseGlassFish covers a stock upstream Eclipse
+// GlassFish install: it ships the SAME branding file as Payara but must NOT be
+// mislabeled "payara" — it maps to a neutral glassfish identity.
+func TestDetectAllAppServers_EclipseGlassFish(t *testing.T) {
+	parent := t.TempDir()
+	home := filepath.Join(parent, "glassfish7")
+	writeTree(t, home, map[string]string{
+		"glassfish/config/branding/glassfish-version.properties": "product_name=Eclipse GlassFish\nproduct_version=7.0.11\n",
+	})
+	got := DetectAllAppServers(context.Background(), []string{parent})
+	if len(got) != 1 || got[0].Name != "glassfish" || got[0].Distro != "Eclipse GlassFish" || got[0].Version != "7.0.11" || got[0].Cycle != "7.0" {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -151,7 +203,7 @@ func TestDetectAllAppServers_WebLogic(t *testing.T) {
 	home := filepath.Join(parent, "wls14")
 	writeTree(t, home, map[string]string{"server/bin/startWebLogic.sh": "#!/bin/sh\n"})
 	writeJarWithVersion(t, filepath.Join(home, "server", "lib", "weblogic.jar"), "14.1.1.0")
-	got := DetectAllAppServers([]string{parent})
+	got := DetectAllAppServers(context.Background(), []string{parent})
 	if len(got) != 1 || got[0].Name != "weblogic" || got[0].Distro != "Oracle" {
 		t.Fatalf("got %+v", got)
 	}
@@ -161,7 +213,7 @@ func TestDetectAllAppServers_WebSpherePresenceOnly(t *testing.T) {
 	parent := t.TempDir()
 	home := filepath.Join(parent, "AppServer")
 	writeTree(t, home, map[string]string{"bin/versionInfo.sh": "#!/bin/sh\n"})
-	got := DetectAllAppServers([]string{parent})
+	got := DetectAllAppServers(context.Background(), []string{parent})
 	// Presence recorded even though version can't be read without running a binary.
 	if len(got) != 1 || got[0].Name != "websphere" || got[0].Version != "unknown" || got[0].Distro != "IBM" {
 		t.Fatalf("got %+v", got)

@@ -244,6 +244,23 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 			continue // root deps already covered above
 		}
 		parentVersion := e.version
+		// Resolve the path/depth PER EMITTING PARENT rather than looking up
+		// a single child-keyed global BFS result. A (child@version) node can
+		// be reached through several parents (e.g. root→a→shared and
+		// root→c→shared); the child-keyed lookup returned whichever path BFS
+		// stored first, so an edge emitted with ParentName=c could carry a
+		// path [root,a,shared] that never traverses c — violating the
+		// contract invariant path[len-2]==parent. Anchoring each edge on the
+		// parent's own resolution path (parentPath + [child]) keeps every
+		// edge's path/depth self-consistent. Mirrors npm.go/npm_pnpm.go/
+		// pypi.go/nuget.go.
+		parentPath := pathFor(parentName, parentVersion)
+		if len(parentPath) == 0 {
+			// Parent not reachable from the declared root — drop its edges
+			// instead of fabricating a path that doesn't traverse it (same
+			// convention the other ecosystem parsers follow).
+			continue
+		}
 		for childName, childRange := range e.dependencies {
 			childVersion, ok := resolveSpec(childName, childRange)
 			if !ok {
@@ -262,6 +279,7 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 				continue
 			}
 			emitted[ek] = true
+			childPath := append(append([]string{}, parentPath...), childName)
 			edges = append(edges, DepEdge{
 				ParentName:       parentName,
 				ParentVersion:    parentVersion,
@@ -270,8 +288,8 @@ func ParseYarnLock(yarnLockPath, packageJsonPath string) ([]DepEdge, error) {
 				Ecosystem:        "npm",
 				Type:             "transitive",
 				Scope:            "",
-				Depth:            depthFor(childName, childVersion),
-				IntroducedByPath: SafePath(pathFor(childName, childVersion), parentName, childName),
+				Depth:            len(childPath) - 1,
+				IntroducedByPath: childPath,
 				Resolved:         true,
 			})
 		}
@@ -386,7 +404,13 @@ func parseYarnV1(content string) ([]yarnEntry, error) {
 			inDeps = false
 			if strings.HasPrefix(trimmed, "version ") {
 				current.version = strings.Trim(strings.TrimPrefix(trimmed, "version "), "\"")
-			} else if trimmed == "dependencies:" {
+			} else if trimmed == "dependencies:" || trimmed == "optionalDependencies:" {
+				// Fold optionalDependencies into the same child map as
+				// dependencies: yarn.lock lists them in an indented block
+				// with identical "name range" shape, and downstream the edge
+				// is emitted as a transitive dep regardless of the optional
+				// flag (the root-level optional classification comes from
+				// package.json, not the lockfile block).
 				inDeps = true
 			}
 		} else if indent == 4 && inDeps {

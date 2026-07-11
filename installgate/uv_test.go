@@ -10,7 +10,7 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
-// makeUvMap reuses ``proxy_endpoints["pypi"]`` because uv consumes
+// makeUvMap reuses `proxy_endpoints["pypi"]` because uv consumes
 // the PyPI ecosystem — there's no separate "uv" endpoint slot in
 // the policy-map shape (and adding one would over-fit the schema
 // to a single tool).
@@ -238,10 +238,10 @@ func TestWriteUv_NoProxyOperatorCuratedSurvives(t *testing.T) {
 	}
 }
 
-// TOML is double-quote-sensitive; an embedded ``"`` in the
+// TOML is double-quote-sensitive; an embedded `"` in the
 // endpoint URL would terminate the quoted string and produce
 // invalid TOML.  validateEndpoint already refuses control chars +
-// spaces, but ``"`` and ``\`` are a separate class — uv's
+// spaces, but `"` and `\` are a separate class — uv's
 // renderer guards them explicitly.
 func TestWriteUv_RejectsTOMLHostileChars(t *testing.T) {
 	dir := t.TempDir()

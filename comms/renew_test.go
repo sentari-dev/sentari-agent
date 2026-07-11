@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -201,21 +202,24 @@ func TestSaveCertificatesAtomic_WritesAllNoResidue(t *testing.T) {
 		}
 	}
 
-	// Key must be 0600.
-	info, err := os.Stat(filepath.Join(dir, "device.key"))
-	if err != nil {
-		t.Fatalf("stat device.key: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Fatalf("device.key perms: want 0600, got %o", perm)
-	}
-	// device.crt must be 0600 too (matches SaveCertificates).
-	info, err = os.Stat(filepath.Join(dir, "device.crt"))
-	if err != nil {
-		t.Fatalf("stat device.crt: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Fatalf("device.crt perms: want 0600, got %o", perm)
+	// Key and cert must be 0600.
+	// NTFS cannot represent Unix perm bits; enforced on unix, product sets 0600 via os.Chmod.
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(filepath.Join(dir, "device.key"))
+		if err != nil {
+			t.Fatalf("stat device.key: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Fatalf("device.key perms: want 0600, got %o", perm)
+		}
+		// device.crt must be 0600 too (matches SaveCertificates).
+		info, err = os.Stat(filepath.Join(dir, "device.crt"))
+		if err != nil {
+			t.Fatalf("stat device.crt: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Fatalf("device.crt perms: want 0600, got %o", perm)
+		}
 	}
 
 	// No .tmp residue must remain.
@@ -251,41 +255,6 @@ func TestSaveCertificatesAtomic_OverwritesExisting(t *testing.T) {
 		if strings.HasSuffix(e.Name(), ".tmp") {
 			t.Fatalf("leftover temp file after overwrite: %s", e.Name())
 		}
-	}
-}
-
-// DeviceCertNotAfter must parse the NotAfter from device.crt.
-func TestDeviceCertNotAfter_ParsesNotAfter(t *testing.T) {
-	caPEM, caKey, caCert := makeCA(t, "ca-na")
-	want := time.Now().Add(100 * 24 * time.Hour).Truncate(time.Second)
-
-	// Issue a device cert with a known NotAfter via a CSR.
-	csrPEM, keyPEM, err := buildCSR("host")
-	if err != nil {
-		t.Fatalf("buildCSR: %v", err)
-	}
-	_ = keyPEM
-	deviceCert := signCSRWithCA(t, csrPEM, caKey, caCert, "host", want)
-
-	dir := t.TempDir()
-	if err := SaveCertificatesAtomic(dir, caPEM, deviceCert, []byte("key")); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
-	got, err := DeviceCertNotAfter(dir)
-	if err != nil {
-		t.Fatalf("DeviceCertNotAfter: %v", err)
-	}
-	if !got.Equal(want.UTC()) {
-		t.Fatalf("NotAfter: want %v got %v", want.UTC(), got)
-	}
-}
-
-// DeviceCertNotAfter on a missing/invalid cert must return an error, not panic.
-func TestDeviceCertNotAfter_MissingErrors(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := DeviceCertNotAfter(dir); err == nil {
-		t.Fatalf("want error for missing device.crt, got nil")
 	}
 }
 

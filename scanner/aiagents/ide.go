@@ -2,6 +2,7 @@ package aiagents
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
+	"github.com/sentari-dev/sentari-agent/scanner/safeio"
 )
 
 // layoutIDEExtensions tags Environments from the IDE-extension
@@ -29,31 +31,31 @@ const maxExtensionManifestBytes = 512 * 1024
 // Adding to this list is how the list grows — keep it explicit.
 var knownAIExtensions = map[string]struct{}{
 	// GitHub Copilot family.
-	"github.copilot":                {},
-	"github.copilot-chat":           {},
-	"github.copilot-labs":           {},
+	"github.copilot":      {},
+	"github.copilot-chat": {},
+	"github.copilot-labs": {},
 	// Anthropic's Claude Code VS Code extension.
-	"anthropic.claude-code":         {},
-	"anthropic.claude-dev":          {},
+	"anthropic.claude-code": {},
+	"anthropic.claude-dev":  {},
 	// Cursor's in-IDE agents (when run inside VS Code variants).
-	"saoudrizwan.claude-dev":        {},
-	"anysphere.cursor":              {},
+	"saoudrizwan.claude-dev": {},
+	"anysphere.cursor":       {},
 	// Continue — open-source AI pair-programming.
-	"continue.continue":             {},
+	"continue.continue": {},
 	// Cline — autonomous coding agent.
-	"saoudrizwan.cline":             {},
+	"saoudrizwan.cline": {},
 	// Codeium — AI autocomplete (now Windsurf).
-	"codeium.codeium":               {},
-	"codeium.windsurf":              {},
+	"codeium.codeium":  {},
+	"codeium.windsurf": {},
 	// Sourcegraph Cody.
-	"sourcegraph.cody-ai":           {},
+	"sourcegraph.cody-ai": {},
 	// TabNine.
-	"tabnine.tabnine-vscode":        {},
+	"tabnine.tabnine-vscode": {},
 	// Amazon Q / CodeWhisperer.
 	"amazonwebservices.aws-toolkit-vscode": {},
 	"amazonwebservices.amazon-q-vscode":    {},
 	// JetBrains AI Assistant (when VS Code compat mode)
-	"jetbrains.jetbrains-ai":        {},
+	"jetbrains.jetbrains-ai": {},
 }
 
 // ideExtensionPaths returns the well-known extension directories
@@ -100,7 +102,7 @@ type extensionManifest struct {
 	DisplayName string `json:"displayName"`
 }
 
-// scanIDEExtensions walks ``root`` one level deep (each extension
+// scanIDEExtensions walks `root` one level deep (each extension
 // lives in its own sub-dir) and emits a PackageRecord per directory
 // whose manifest publisher.name is in the known-AI allowlist.
 // Non-AI extensions are deliberately NOT emitted — this is a
@@ -125,14 +127,14 @@ func scanIDEExtensions(root string) ([]scanner.PackageRecord, []scanner.ScanErro
 		}
 		dir := filepath.Join(root, e.Name())
 		manifest := filepath.Join(dir, "package.json")
-		// readFileWithMTime opens once via safeio (refuses symlinks)
-		// and derives both the bytes and the mtime from the same fd
-		// — no path-based TOCTOU window for the install-date proxy.
-		// Missing manifest = not an extension dir (common case);
-		// silent skip rather than emit a ScanError.
-		data, mtime, err := readFileWithMTime(manifest, maxExtensionManifestBytes)
+		// safeio.ReadFileWithMTime opens once (refuses symlinks and
+		// non-regular files) and derives both the bytes and the mtime
+		// from the same fd — no path-based TOCTOU window for the
+		// install-date proxy.  Missing manifest = not an extension dir
+		// (common case); silent skip rather than emit a ScanError.
+		data, mtime, err := safeio.ReadFileWithMTime(manifest, maxExtensionManifestBytes)
 		if err != nil {
-			if isNotExist(err) {
+			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			errs = append(errs, scanner.ScanError{

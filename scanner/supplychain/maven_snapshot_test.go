@@ -1,6 +1,7 @@
 package supplychain
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -44,7 +45,7 @@ func TestSnapshotInRelease_emitsSignal(t *testing.T) {
 	mustMkdir(t, pomDir)
 	mustWrite(t, filepath.Join(pomDir, "myapp-1.0.0.pom"), snapshotDepPOM)
 
-	signals, err := DetectSnapshotInRelease(m2)
+	signals, err := DetectSnapshotInRelease(context.Background(), m2)
 	if err != nil {
 		t.Fatalf("DetectSnapshotInRelease failed: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestSnapshotInRelease_allReleaseNoSignal(t *testing.T) {
 	mustMkdir(t, pomDir)
 	mustWrite(t, filepath.Join(pomDir, "myapp-1.0.0.pom"), allReleasePOM)
 
-	signals, err := DetectSnapshotInRelease(m2)
+	signals, err := DetectSnapshotInRelease(context.Background(), m2)
 	if err != nil {
 		t.Fatalf("DetectSnapshotInRelease failed: %v", err)
 	}
@@ -112,7 +113,7 @@ func TestSnapshotInRelease_snapshotRootSkipped(t *testing.T) {
 	mustMkdir(t, pomDir)
 	mustWrite(t, filepath.Join(pomDir, "myapp-1.0.0-SNAPSHOT.pom"), snapshotDepPOM)
 
-	signals, err := DetectSnapshotInRelease(m2)
+	signals, err := DetectSnapshotInRelease(context.Background(), m2)
 	if err != nil {
 		t.Fatalf("DetectSnapshotInRelease failed: %v", err)
 	}

@@ -12,9 +12,9 @@ import (
 )
 
 // seedJDKFixture creates a minimal on-disk tree that looks like a
-// JDK install: a ``release`` file with the standard Oracle / OpenJDK
-// key=value shape, a couple of classic ``.jar`` files under ``lib/``,
-// and one ``.jmod`` file under ``jmods/``.  The JARs carry real
+// JDK install: a `release` file with the standard Oracle / OpenJDK
+// key=value shape, a couple of classic `.jar` files under `lib/`,
+// and one `.jmod` file under `jmods/`.  The JARs carry real
 // Maven coordinates via pom.properties so the assertion side can
 // recognise them; the JMOD is plain (no metadata) so the version-
 // stamping path is exercised.
@@ -57,9 +57,9 @@ func seedJDKFixture(t *testing.T, root string, jdkVersion string) {
 
 // TestDiscoverJDK_JavaHomeWins: when JAVA_HOME is set and points at a
 // directory that looks like a JDK, discovery emits a single
-// Environment for it.  The ``looks like a JDK'' test is a heuristic —
-// we check for the presence of a ``release`` file or a
-// ``lib/modules`` image, either of which uniquely identifies an
+// Environment for it.  The "looks like a JDK" test is a heuristic —
+// we check for the presence of a `release` file or a
+// `lib/modules` image, either of which uniquely identifies an
 // installed JDK vs, say, a random directory a user set JAVA_HOME to
 // by mistake.
 func TestDiscoverJDK_JavaHomeWins(t *testing.T) {
@@ -225,7 +225,7 @@ func TestScanner_Scan_JDKLayoutUsesReleaseFileVersion(t *testing.T) {
 }
 
 // TestReadJDKVersion covers the release-file parsing directly.
-// ``release`` files use a key="value" syntax with optional quotes;
+// `release` files use a key="value" syntax with optional quotes;
 // some non-OpenJDK builds (GraalVM, Azul Zulu) omit the quotes.
 // Parser must tolerate both.
 func TestReadJDKVersion(t *testing.T) {

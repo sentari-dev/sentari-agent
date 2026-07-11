@@ -1,6 +1,7 @@
 package deptree
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -78,7 +79,10 @@ func deptreeParsers() []parserUnderTest {
 		{
 			name: "pom.xml",
 			body: `<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version></project>`,
-			call: func(p string) error { _, err := ParseMavenPom(p, filepath.Join(filepath.Dir(p), ".m2")); return err },
+			call: func(p string) error {
+				_, err := ParseMavenPom(context.Background(), p, filepath.Join(filepath.Dir(p), ".m2"))
+				return err
+			},
 		},
 	}
 }

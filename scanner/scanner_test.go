@@ -132,6 +132,16 @@ func TestParseEggInfoMetadata(t *testing.T) {
 }
 
 func TestScannerEmptyDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The Windows registry RootScanner fires unconditionally by design
+		// (see discoverEnvironments: registry lookup is cheap and yields real
+		// site-packages paths, so even a scoped scan surfaces host Python
+		// installs). On a shared Windows CI runner with hosted-tool Python
+		// installed via MSI/registry, an empty temp root therefore still
+		// discovers system environments — an empty-environment assertion
+		// cannot hold. System detection is exercised natively on Windows.
+		t.Skip("Windows registry RootScanner surfaces host Python system-wide; a scoped temp scan is not empty on a shared runner")
+	}
 	tmpDir := t.TempDir()
 	cfg := Config{
 		ScanRoot:   tmpDir,
@@ -139,7 +149,7 @@ func TestScannerEmptyDirectory(t *testing.T) {
 		MaxWorkers: 2,
 	}
 
-	s := NewScanner(cfg)
+	s := NewRunner(cfg)
 	result, err := s.Run(context.Background())
 	if err != nil {
 		t.Fatalf("scan failed: %v", err)
@@ -170,7 +180,7 @@ func TestScannerContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately.
 
-	s := NewScanner(cfg)
+	s := NewRunner(cfg)
 	result, err := s.Run(ctx)
 	// A cancelled scan must surface ctx.Err() rather than returning a
 	// silently-truncated "successful" result: discovery bails on
@@ -208,7 +218,7 @@ func TestScannerContextCancellationSurfacedAfterDiscovery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately.
 
-	s := NewScanner(cfg)
+	s := NewRunner(cfg)
 	result, err := s.Run(ctx)
 	if err == nil {
 		t.Fatal("expected Run to surface ctx.Err() on a cancelled scan with discovered envs")
@@ -233,7 +243,7 @@ func TestScannerBrokenEnvironment(t *testing.T) {
 		MaxWorkers: 2,
 	}
 
-	s := NewScanner(cfg)
+	s := NewRunner(cfg)
 	result, err := s.Run(context.Background())
 	if err != nil {
 		t.Fatalf("scan should not fail on broken env: %v", err)
@@ -249,6 +259,9 @@ func TestScannerBrokenEnvironment(t *testing.T) {
 }
 
 func TestScannerDotVenvNotSkipped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("venv fixture uses Unix layout (/usr/bin base, bin/ symlink); Windows venv detection uses Scripts\\ + home=C:\\ and is exercised natively")
+	}
 	// Ensure .venv directories are NOT skipped (they are valid venvs).
 	tmpDir := t.TempDir()
 	venvDir := filepath.Join(tmpDir, ".venv")
@@ -261,7 +274,7 @@ func TestScannerDotVenvNotSkipped(t *testing.T) {
 		MaxWorkers: 2,
 	}
 
-	s := NewScanner(cfg)
+	s := NewRunner(cfg)
 	envs, _ := s.discoverEnvironments(context.Background())
 
 	found := false
@@ -277,9 +290,16 @@ func TestScannerDotVenvNotSkipped(t *testing.T) {
 }
 
 func TestScannerSkipDirs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Two Windows-specific effects break the "0 discovered" premise: the
+		// planted pyvenv.cfg fixtures use a Unix base (home=/usr/bin) and the
+		// Windows registry RootScanner surfaces host Python system-wide, so the
+		// walk discovers the runner's hosted Python regardless of scan root.
+		t.Skip("venv fixture uses Unix layout (/usr/bin base, bin/ symlink); Windows venv detection uses Scripts\\ + home=C:\\ and is exercised natively")
+	}
 	// Ensure .git and __pycache__ are skipped unconditionally —
 	// no plugin has a legitimate reason to see them.  node_modules
-	// is intentionally NOT in this test any more: the npm
+	// is intentionally NOT in this test any more: Sprint-17's npm
 	// plugin claims it as a scan root (returns Matched+Terminal
 	// on Match), so the walker DOES visit node_modules now.  A
 	// pathological pyvenv.cfg planted there surfaces as a venv
@@ -299,7 +319,7 @@ func TestScannerSkipDirs(t *testing.T) {
 		MaxWorkers: 2,
 	}
 
-	s := NewScanner(cfg)
+	s := NewRunner(cfg)
 	envs, _ := s.discoverEnvironments(context.Background())
 	if len(envs) != 0 {
 		t.Errorf("expected 0 discovered envs in skip dirs, got %d", len(envs))
@@ -329,7 +349,7 @@ func TestScannerVenvDiscovery(t *testing.T) {
 		MaxWorkers: 2,
 	}
 
-	s := NewScanner(cfg)
+	s := NewRunner(cfg)
 	envs, errs := s.discoverEnvironments(context.Background())
 
 	if len(errs) != 0 {
@@ -341,7 +361,12 @@ func TestScannerVenvDiscovery(t *testing.T) {
 		types[env.EnvType] = true
 	}
 
-	if !types[EnvVenv] {
+	// The venv fixture uses a Unix base (home=/usr/bin), which isVenvDangling
+	// rejects on Windows (that path does not exist there), so the venv is not
+	// discovered. Windows venv detection (Scripts\ + home=C:\) is exercised
+	// natively. The conda/poetry markers below are layout-independent and stay
+	// enforced on every OS.
+	if !types[EnvVenv] && runtime.GOOS != "windows" {
 		t.Error("expected to discover a venv environment")
 	}
 	if !types[EnvConda] {
@@ -352,8 +377,8 @@ func TestScannerVenvDiscovery(t *testing.T) {
 	}
 }
 
-func TestNewScannerDefaults(t *testing.T) {
-	s := NewScanner(Config{})
+func TestNewRunnerDefaults(t *testing.T) {
+	s := NewRunner(Config{})
 	if s.cfg.MaxDepth != 12 {
 		t.Errorf("expected MaxDepth=12, got %d", s.cfg.MaxDepth)
 	}
@@ -459,9 +484,9 @@ content-hash = "abc123"
 		t.Fatal(err)
 	}
 
-	packages, errors := scanPoetryEnvironment(tmpDir)
-	if len(errors) != 0 {
-		t.Errorf("unexpected errors: %v", errors)
+	packages, scanErrs := scanPoetryEnvironment(tmpDir)
+	if len(scanErrs) != 0 {
+		t.Errorf("unexpected errors: %v", scanErrs)
 	}
 	if len(packages) != 3 {
 		t.Fatalf("expected 3 packages, got %d", len(packages))
@@ -488,12 +513,12 @@ content-hash = "abc123"
 
 func TestScanPoetryMissingFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	packages, errors := scanPoetryEnvironment(tmpDir)
+	packages, scanErrs := scanPoetryEnvironment(tmpDir)
 	if len(packages) != 0 {
 		t.Error("expected 0 packages for missing poetry.lock")
 	}
-	if len(errors) != 1 {
-		t.Errorf("expected 1 error, got %d", len(errors))
+	if len(scanErrs) != 1 {
+		t.Errorf("expected 1 error, got %d", len(scanErrs))
 	}
 }
 
@@ -516,12 +541,47 @@ func TestScanCondaEnvironment(t *testing.T) {
 		os.WriteFile(filepath.Join(condaMeta, fmt.Sprintf("%s-%s-py311.json", pkg.name, pkg.version)), data, 0644)
 	}
 
-	packages, errors := scanCondaEnvironment(tmpDir)
-	if len(errors) != 0 {
-		t.Errorf("unexpected errors: %v", errors)
+	packages, scanErrs := scanCondaEnvironment(tmpDir)
+	if len(scanErrs) != 0 {
+		t.Errorf("unexpected errors: %v", scanErrs)
 	}
 	if len(packages) != 2 {
 		t.Fatalf("expected 2 packages, got %d", len(packages))
+	}
+}
+
+// A valid-JSON but identity-less conda-meta file (e.g. "{}", or a name-less
+// but versioned file) must NOT be emitted as a ghost package (Name=""); it is
+// reported as a ScanError instead, matching npm/nuget behaviour.  A real,
+// named package alongside it is still emitted.
+func TestScanCondaEnvironmentSkipsGhostRecords(t *testing.T) {
+	tmpDir := t.TempDir()
+	condaMeta := filepath.Join(tmpDir, "conda-meta")
+	os.Mkdir(condaMeta, 0755)
+
+	// Empty object — no name, no version.
+	os.WriteFile(filepath.Join(condaMeta, "empty.json"), []byte("{}"), 0644)
+	// Name-less but versioned — still identity-less on the wire.
+	os.WriteFile(filepath.Join(condaMeta, "nameless.json"), []byte(`{"version":"1.2.3"}`), 0644)
+	// A genuine package that must still come through.
+	valid, _ := json.Marshal(map[string]string{"name": "numpy", "version": "1.26.2"})
+	os.WriteFile(filepath.Join(condaMeta, "numpy-1.26.2-py311.json"), valid, 0644)
+
+	packages, scanErrs := scanCondaEnvironment(tmpDir)
+
+	if len(packages) != 1 {
+		t.Fatalf("expected exactly 1 real package, got %d: %+v", len(packages), packages)
+	}
+	if packages[0].Name != "numpy" {
+		t.Errorf("expected numpy, got %q", packages[0].Name)
+	}
+	for _, p := range packages {
+		if p.Name == "" {
+			t.Errorf("ghost package with empty name emitted: %+v", p)
+		}
+	}
+	if len(scanErrs) != 2 {
+		t.Errorf("expected 2 ScanErrors for the identity-less files, got %d: %v", len(scanErrs), scanErrs)
 	}
 }
 
@@ -542,9 +602,9 @@ func TestScanPipenvEnvironment(t *testing.T) {
 }`
 	os.WriteFile(filepath.Join(tmpDir, "Pipfile.lock"), []byte(pipfileLock), 0644)
 
-	packages, errors := scanPipenvEnvironment(tmpDir)
-	if len(errors) != 0 {
-		t.Errorf("unexpected errors: %v", errors)
+	packages, scanErrs := scanPipenvEnvironment(tmpDir)
+	if len(scanErrs) != 0 {
+		t.Errorf("unexpected errors: %v", scanErrs)
 	}
 	if len(packages) != 3 {
 		t.Fatalf("expected 3 packages (2 default + 1 develop), got %d", len(packages))
@@ -619,7 +679,7 @@ func BenchmarkScanFullWithManyEnvironments(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		s := NewScanner(cfg)
+		s := NewRunner(cfg)
 		result, err := s.Run(context.Background())
 		if err != nil {
 			b.Fatal(err)
@@ -658,7 +718,7 @@ func BenchmarkDiscoverEnvironments(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		s := NewScanner(cfg)
+		s := NewRunner(cfg)
 		envs, _ := s.discoverEnvironments(context.Background())
 		_ = envs
 	}
@@ -673,7 +733,7 @@ func TestScanResultTimestamps(t *testing.T) {
 	}
 
 	before := time.Now().UTC()
-	s := NewScanner(cfg)
+	s := NewRunner(cfg)
 	result, _ := s.Run(context.Background())
 	after := time.Now().UTC()
 
@@ -693,11 +753,11 @@ func TestScanResultTimestamps(t *testing.T) {
 // and release strings, matching the format stored in Packages.blob.
 func buildRPMBlob(version, release string) []byte {
 	const (
-		typeString    = uint32(6)
-		tagVersion    = uint32(1001)
-		tagRelease    = uint32(1002)
-		headerOffset  = 8
-		entrySize     = 16
+		typeString   = uint32(6)
+		tagVersion   = uint32(1001)
+		tagRelease   = uint32(1002)
+		headerOffset = 8
+		entrySize    = 16
 	)
 
 	// Data store: version\0release\0
@@ -716,10 +776,22 @@ func buildRPMBlob(version, release string) []byte {
 	buf[4], buf[5], buf[6], buf[7] = byte(hsize>>24), byte(hsize>>16), byte(hsize>>8), byte(hsize)
 
 	writeEntry := func(pos int, tag, typ, offset, count uint32) {
-		buf[pos+0] = byte(tag >> 24); buf[pos+1] = byte(tag >> 16); buf[pos+2] = byte(tag >> 8); buf[pos+3] = byte(tag)
-		buf[pos+4] = byte(typ >> 24); buf[pos+5] = byte(typ >> 16); buf[pos+6] = byte(typ >> 8); buf[pos+7] = byte(typ)
-		buf[pos+8] = byte(offset >> 24); buf[pos+9] = byte(offset >> 16); buf[pos+10] = byte(offset >> 8); buf[pos+11] = byte(offset)
-		buf[pos+12] = byte(count >> 24); buf[pos+13] = byte(count >> 16); buf[pos+14] = byte(count >> 8); buf[pos+15] = byte(count)
+		buf[pos+0] = byte(tag >> 24)
+		buf[pos+1] = byte(tag >> 16)
+		buf[pos+2] = byte(tag >> 8)
+		buf[pos+3] = byte(tag)
+		buf[pos+4] = byte(typ >> 24)
+		buf[pos+5] = byte(typ >> 16)
+		buf[pos+6] = byte(typ >> 8)
+		buf[pos+7] = byte(typ)
+		buf[pos+8] = byte(offset >> 24)
+		buf[pos+9] = byte(offset >> 16)
+		buf[pos+10] = byte(offset >> 8)
+		buf[pos+11] = byte(offset)
+		buf[pos+12] = byte(count >> 24)
+		buf[pos+13] = byte(count >> 16)
+		buf[pos+14] = byte(count >> 8)
+		buf[pos+15] = byte(count)
 	}
 
 	writeEntry(headerOffset, tagVersion, typeString, 0, 1)
@@ -814,6 +886,9 @@ func TestVenvScannerScanTagsPackagesAsEnvVenv(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsVenvDangling_HealthyVenv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("venv fixture uses Unix layout (/usr/bin base, bin/ symlink); Windows venv detection uses Scripts\\ + home=C:\\ and is exercised natively")
+	}
 	// A venv whose home dir exists and has no bin/python → should NOT be
 	// flagged as dangling.
 	tmpDir := t.TempDir()
@@ -842,6 +917,9 @@ func TestIsVenvDangling_HomeMissing(t *testing.T) {
 }
 
 func TestIsVenvDangling_SymlinkBroken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("venv fixture uses Unix layout (/usr/bin base, bin/ symlink); Windows venv detection uses Scripts\\ + home=C:\\ and is exercised natively")
+	}
 	// bin/python is a symlink to a target that doesn't exist.
 	tmpDir := t.TempDir()
 	cfg := filepath.Join(tmpDir, "pyvenv.cfg")
@@ -863,6 +941,9 @@ func TestIsVenvDangling_SymlinkBroken(t *testing.T) {
 }
 
 func TestIsVenvDangling_SymlinkHealthy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("venv fixture uses Unix layout (/usr/bin base, bin/ symlink); Windows venv detection uses Scripts\\ + home=C:\\ and is exercised natively")
+	}
 	// bin/python is a symlink to a real binary — should NOT be flagged.
 	tmpDir := t.TempDir()
 	cfg := filepath.Join(tmpDir, "pyvenv.cfg")
@@ -881,6 +962,13 @@ func TestIsVenvDangling_SymlinkHealthy(t *testing.T) {
 }
 
 func TestDiscoverSkipsDanglingVenv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The "healthy" fixture uses a Unix base (home=/usr/bin) that does not
+		// exist on Windows, so it too is judged dangling and the test's
+		// healthy-vs-dangling split collapses. Windows venv detection uses
+		// Scripts\ + home=C:\ and is exercised natively.
+		t.Skip("venv fixture uses Unix layout (/usr/bin base, bin/ symlink); Windows venv detection uses Scripts\\ + home=C:\\ and is exercised natively")
+	}
 	// A dangling venv should NOT appear in discovered envs but SHOULD
 	// appear in errors.
 	tmpDir := t.TempDir()
@@ -898,7 +986,7 @@ func TestDiscoverSkipsDanglingVenv(t *testing.T) {
 		[]byte("home = /usr/bin\nversion = 3.13.0\n"), 0644)
 
 	cfg := Config{ScanRoot: tmpDir, MaxDepth: 4, MaxWorkers: 1}
-	s := NewScanner(cfg)
+	s := NewRunner(cfg)
 	envs, errs := s.discoverEnvironments(context.Background())
 
 	// The healthy venv must be discovered.
@@ -942,7 +1030,7 @@ func findSubstring(s, substr string) bool {
 }
 
 func TestDefaultMaxDepthIs12(t *testing.T) {
-	s := NewScanner(Config{})
+	s := NewRunner(Config{})
 	if s.cfg.MaxDepth != 12 {
 		t.Errorf("expected default MaxDepth=12, got %d", s.cfg.MaxDepth)
 	}
@@ -1100,7 +1188,7 @@ func TestScannerDiscoversPyenvEnvironments(t *testing.T) {
 
 	// Scan with depth 3 — too shallow for the main walk to reach site-packages.
 	// The extra roots mechanism should discover it anyway.
-	s := NewScanner(Config{ScanRoot: scanRoot, MaxDepth: 3})
+	s := NewRunner(Config{ScanRoot: scanRoot, MaxDepth: 3})
 	result, err := s.Run(context.Background())
 	if err != nil {
 		t.Fatal(err)

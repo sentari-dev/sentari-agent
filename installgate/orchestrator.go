@@ -3,7 +3,7 @@
 // structured logging.
 //
 // Every ecosystem writer (pip, npm, Maven, NuGet, uv, pdm, Gradle,
-// sbt, Yarn Berry) runs through this single ``Apply`` entry point so
+// sbt, Yarn Berry) runs through this single `Apply` entry point so
 // the caller's code path stays constant.  Writers whose target is
 // absent on the host (e.g. a system-scope config path that doesn't
 // exist for that package manager) soft-no-op internally rather than
@@ -17,7 +17,7 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
-// ApplyOptions controls one ``Apply`` invocation.  Held as a
+// ApplyOptions controls one `Apply` invocation.  Held as a
 // struct because the per-ecosystem-scope decisions (pip user vs
 // system, npm user vs system, …) accumulate fast and a positional
 // signature would be unreadable by Phase D.
@@ -27,56 +27,56 @@ type ApplyOptions struct {
 	// the writers consume internally; built once per scan cycle.
 	Marker MarkerFields
 
-	// PipScope picks ``user`` or ``system`` config target for pip.
-	// Defaults to ``user`` (laptop) when zero-valued; operators
+	// PipScope picks `user` or `system` config target for pip.
+	// Defaults to `user` (laptop) when zero-valued; operators
 	// running the agent as root on servers should set
-	// ``system`` via the agent config.
+	// `system` via the agent config.
 	PipScope PipScope
 
-	// NpmScope picks ``user`` or ``system`` ``.npmrc``.  Same
-	// defaulting story as ``PipScope``.
+	// NpmScope picks `user` or `system` `.npmrc`.  Same
+	// defaulting story as `PipScope`.
 	NpmScope NpmScope
 
-	// MavenScope picks ``user`` (~/.m2/settings.xml) or ``system``
+	// MavenScope picks `user` (~/.m2/settings.xml) or `system`
 	// ($MAVEN_HOME/conf/settings.xml).  System scope is a soft
 	// no-op when MAVEN_HOME is unset.
 	MavenScope MavenScope
 
-	// NuGetScope picks ``user`` (per-user NuGet.Config) or
-	// ``system`` (Windows-only ``%ProgramData%\NuGet\Config\``
+	// NuGetScope picks `user` (per-user NuGet.Config) or
+	// `system` (Windows-only `%ProgramData%\NuGet\Config\`
 	// drop-in).  System scope is a soft no-op on POSIX where
 	// NuGet has no system-wide config dir.
 	NuGetScope NuGetScope
 
-	// UvScope picks ``user`` or ``system`` ``uv.toml``.
+	// UvScope picks `user` or `system` `uv.toml`.
 	// Astral's uv has its own config namespace separate from
-	// pip's; without this the install-gate covers ``uv pip
-	// install`` only and silently mis-routes ``uv add`` /
-	// ``uv sync``.
+	// pip's; without this the install-gate covers `uv pip
+	// install` only and silently mis-routes `uv add` /
+	// `uv sync`.
 	UvScope UvScope
 
-	// PdmScope picks ``user`` config.  pdm has no system-wide
+	// PdmScope picks `user` config.  pdm has no system-wide
 	// config path so PdmScopeSystem is a soft no-op.
 	PdmScope PdmScope
 
-	// GradleScope picks ``user`` (~/.gradle/init.d) or ``system``
+	// GradleScope picks `user` (~/.gradle/init.d) or `system`
 	// ($GRADLE_HOME/init.d).  System is a soft no-op when
 	// GRADLE_HOME is unset.
 	GradleScope GradleScope
 
-	// SbtScope picks ``user`` (~/.sbt/repositories) or ``system``
+	// SbtScope picks `user` (~/.sbt/repositories) or `system`
 	// ($SBT_HOME/conf/repositories).  System is a soft no-op
 	// when SBT_HOME is unset.
 	SbtScope SbtScope
 
-	// YarnBerryScope picks ``user`` (~/.yarnrc.yml).  Yarn berry
+	// YarnBerryScope picks `user` (~/.yarnrc.yml).  Yarn berry
 	// has no system-wide config path so System is a soft no-op.
 	YarnBerryScope YarnBerryScope
 }
 
 // ApplyResult collects per-ecosystem outcomes.  One field per
 // ecosystem the writer package supports; every writer runs through
-// the single ``Apply`` path below and populates its field, so all
+// the single `Apply` path below and populates its field, so all
 // fields carry a real outcome (a zero-value field means that writer
 // soft-no-op'd because its target was absent on the host).
 //
@@ -104,7 +104,7 @@ type ApplyResult struct {
 // → operator wants to know) or debug-level (everything was a
 // no-op → noise).
 //
-// Maven's and NuGet's ``SkippedOperator`` flags are intentionally
+// Maven's and NuGet's `SkippedOperator` flags are intentionally
 // not counted as a change — skipping is the steady-state outcome
 // on hosts whose package configs predate enrolment and would
 // otherwise spam info-level logs every cycle.  The orchestrator's
@@ -141,7 +141,7 @@ func (r ApplyResult) AnyChanged() bool {
 	return false
 }
 
-// Apply runs every per-ecosystem writer against ``m`` and
+// Apply runs every per-ecosystem writer against `m` and
 // aggregates results.  Errors from individual writers are
 // collected and returned as a slice — one writer's failure must
 // not block another writer's success because the per-ecosystem

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
@@ -26,7 +27,7 @@ func TestMaterialize_HardlinkFastPath(t *testing.T) {
 	tree := &MergedTree{Layers: []string{layer}}
 
 	dest := t.TempDir()
-	if _, err := Materialize(tree, dest); err != nil {
+	if _, err := Materialize(context.Background(), tree, dest, 0); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	destPath := filepath.Join(dest, "usr", "lib", "file.txt")
@@ -71,7 +72,7 @@ func TestMaterialize_TopLayerOverrides(t *testing.T) {
 	}
 	tree := &MergedTree{Layers: []string{l0, l1}}
 	dest := t.TempDir()
-	if _, err := Materialize(tree, dest); err != nil {
+	if _, err := Materialize(context.Background(), tree, dest, 0); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	body, err := os.ReadFile(filepath.Join(dest, "usr", "share", "msg.txt"))
@@ -170,6 +171,108 @@ func TestTrimRootPrefix(t *testing.T) {
 		if got != c.want {
 			t.Errorf("trimRootPrefix(%q, %q) = %q, want %q", c.in, c.root, got, c.want)
 		}
+	}
+}
+
+// TestReapStaleContainerTemp: a scratch dir orphaned by a previous
+// crashed run (old mtime, our prefix) is reclaimed, while a fresh dir
+// (possibly owned by a concurrent live scan) and any non-sentari dir
+// survive.  This is the crash-recovery guarantee — without it the data
+// dir grows unboundedly across unclean process deaths.
+func TestReapStaleContainerTemp(t *testing.T) {
+	csDir := filepath.Join(t.TempDir(), "container-scan")
+	mustMkdir(t, csDir)
+
+	old := time.Now().Add(-2 * staleTempReapAge)
+
+	// Stale orphan from a crashed run — must be reaped.
+	stale := filepath.Join(csDir, containerTempPrefix+"stale")
+	mustMkdir(t, stale)
+	// Put a file inside to prove RemoveAll (not just Remove) is used.
+	if err := os.WriteFile(filepath.Join(stale, "leaked.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed stale file: %v", err)
+	}
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatalf("chtimes stale: %v", err)
+	}
+
+	// Fresh dir a concurrent scan might own — must survive.
+	fresh := filepath.Join(csDir, containerTempPrefix+"fresh")
+	mustMkdir(t, fresh)
+
+	// Old, but not one of ours — must survive regardless of age.
+	other := filepath.Join(csDir, "not-ours")
+	mustMkdir(t, other)
+	if err := os.Chtimes(other, old, old); err != nil {
+		t.Fatalf("chtimes other: %v", err)
+	}
+
+	res := &scanner.ScanResult{}
+	reapStaleContainerTemp(csDir, time.Now(), res)
+
+	if dirExists(stale) {
+		t.Errorf("stale temp dir was not reaped: %s", stale)
+	}
+	if !dirExists(fresh) {
+		t.Errorf("fresh temp dir was wrongly reaped: %s", fresh)
+	}
+	if !dirExists(other) {
+		t.Errorf("non-sentari dir was wrongly reaped: %s", other)
+	}
+	if len(res.Errors) != 0 {
+		t.Errorf("clean reap should emit no errors, got %+v", res.Errors)
+	}
+}
+
+// TestReapStaleContainerTemp_NoDir: reaping a not-yet-created
+// container-scan dir is a quiet no-op (first run on a fresh host).
+func TestReapStaleContainerTemp_NoDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "container-scan")
+	res := &scanner.ScanResult{}
+	reapStaleContainerTemp(missing, time.Now(), res)
+	if len(res.Errors) != 0 {
+		t.Errorf("missing dir should be a silent no-op, got %+v", res.Errors)
+	}
+}
+
+// TestScanAndAppend_ReapsStaleTemp: the reaper fires from the real
+// production entrypoint (ScanAndAppend) at phase startup when DataDir is
+// set, and host inventory is preserved.  Guards against the fix being a
+// dead helper never wired into the scan path.
+func TestScanAndAppend_ReapsStaleTemp(t *testing.T) {
+	dataDir := t.TempDir()
+	csDir := filepath.Join(dataDir, "container-scan")
+	mustMkdir(t, csDir)
+	stale := filepath.Join(csDir, containerTempPrefix+"orphan")
+	mustMkdir(t, stale)
+	old := time.Now().Add(-2 * staleTempReapAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	res := &scanner.ScanResult{
+		Packages: []scanner.PackageRecord{{Name: "host-pkg", Version: "1.0"}},
+	}
+	cfg := scanner.Config{
+		ScanContainers: true,
+		DataDir:        dataDir,
+		ScanRoot:       t.TempDir(), // don't walk real / during any sub-scan
+	}
+	ScanAndAppend(context.Background(), cfg, res)
+
+	if dirExists(stale) {
+		t.Errorf("ScanAndAppend did not reap stale temp dir: %s", stale)
+	}
+	if len(res.Packages) != 1 || res.Packages[0].Name != "host-pkg" {
+		t.Errorf("host inventory corrupted by reap/scan: %+v", res.Packages)
+	}
+}
+
+// mustMkdir creates dir (0700) or fails the test.
+func mustMkdir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
 	}
 }
 

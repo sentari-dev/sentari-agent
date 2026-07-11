@@ -2,6 +2,7 @@ package runtimeversions
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -39,26 +40,95 @@ func DetectJDKInDir(dir string) (*InstalledRuntime, error) {
 		return nil, nil
 	}
 	return &InstalledRuntime{
-		Name:        "jdk",
+		Name:        RuntimeJDK,
 		Version:     javaVersion,
-		Cycle:       CycleFor("jdk", javaVersion),
+		Cycle:       CycleFor(RuntimeJDK, javaVersion),
 		Distro:      parseJDKDistroFromImplementor(implementor),
 		InstallPath: dir,
 	}, nil
 }
 
+// homebrewJDKCellarRoots are the Homebrew Cellar parents under which the
+// `openjdk` (and versioned `openjdk@NN`) formulae install on macOS.
+var homebrewJDKCellarRoots = []string{
+	"/opt/homebrew/Cellar", // Apple Silicon Homebrew
+	"/usr/local/Cellar",    // Intel Homebrew
+}
+
+// homebrewJDKHomeSubpath is the fixed path from a Homebrew openjdk keg's
+// version directory down to the JDK home that holds the `release` file:
+// <cellar>/openjdk[@NN]/<version>/libexec/openjdk.jdk/Contents/Home/release.
+var homebrewJDKHomeSubpath = filepath.Join("libexec", "openjdk.jdk", "Contents", "Home")
+
 // DetectAllJDKs walks a set of candidate roots looking for JDK installs.
 // Each candidate that contains a `release` file is treated as one JDK.
 // Depth is capped at _defaultJDKWalkDepth levels below each root.
-func DetectAllJDKs(roots []string) []InstalledRuntime {
-	return detectAllJDKsWithDepth(roots, _defaultJDKWalkDepth)
+//
+// Homebrew-installed OpenJDK is handled separately: `brew install openjdk`
+// buries the release file at
+// <cellar>/openjdk/<version>/libexec/openjdk.jdk/Contents/Home/release —
+// eight levels below the Cellar root, far below the walk depth cap, and not
+// reachable from the /opt candidate root.  The `brew link` caveat symlink at
+// /Library/Java/JavaVirtualMachines/openjdk.jdk is also skipped by the
+// symlink guard in the walk, so that route is dead too.  A dedicated Cellar
+// reader probes the fixed keg sub-path directly, mirroring detectHomebrewPythons.
+func DetectAllJDKs(ctx context.Context, roots []string) []InstalledRuntime {
+	out := detectAllJDKsWithDepth(ctx, roots, _defaultJDKWalkDepth)
+	out = append(out, detectHomebrewJDKs(homebrewJDKCellarRoots)...)
+	return out
 }
 
-func detectAllJDKsWithDepth(roots []string, maxDepth int) []InstalledRuntime {
+// detectHomebrewJDKs enumerates <root>/openjdk*/<version>/ under each Homebrew
+// Cellar root and probes the fixed libexec/openjdk.jdk/Contents/Home/release
+// sub-path for every keg version, emitting one InstalledRuntime per JDK found.
+// Non-existent roots (e.g. on Linux, or Intel paths on Apple Silicon) are
+// silently skipped.  Symlinked keg entries are skipped by the IsDir() check
+// (a symlink DirEntry reports IsDir()==false), keeping the reader in step with
+// the scanner's symlink-refusing posture.
+func detectHomebrewJDKs(roots []string) []InstalledRuntime {
 	var out []InstalledRuntime
 	for _, root := range roots {
+		formulae, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, formula := range formulae {
+			name := formula.Name()
+			// `openjdk`, `openjdk@17`, `openjdk@21`, `openjdk@11`, `openjdk@8`, …
+			if !formula.IsDir() || (name != "openjdk" && !strings.HasPrefix(name, "openjdk@")) {
+				continue
+			}
+			versions, err := os.ReadDir(filepath.Join(root, name))
+			if err != nil {
+				continue
+			}
+			for _, ver := range versions {
+				if !ver.IsDir() {
+					continue
+				}
+				home := filepath.Join(root, name, ver.Name(), homebrewJDKHomeSubpath)
+				rt, derr := DetectJDKInDir(home)
+				if derr != nil || rt == nil {
+					continue
+				}
+				out = append(out, *rt)
+			}
+		}
+	}
+	return out
+}
+
+func detectAllJDKsWithDepth(ctx context.Context, roots []string, maxDepth int) []InstalledRuntime {
+	var out []InstalledRuntime
+	for _, root := range roots {
+		if ctx.Err() != nil {
+			return out
+		}
 		rootClean := filepath.Clean(root)
 		_ = filepath.WalkDir(rootClean, func(path string, d fs.DirEntry, err error) error {
+			if ctx.Err() != nil {
+				return fs.SkipAll
+			}
 			if err != nil {
 				return nil
 			}

@@ -12,8 +12,8 @@ import "github.com/sentari-dev/sentari-agent/scanner"
 //   - JETTY_HOME — the install root with binaries + default config
 //   - JETTY_BASE — a customer's overlay (different lib/ext/, etc.)
 //
-// Marker: ``start.jar`` at the install root is present in every
-// Jetty distribution since 7.  ``lib/jetty-*.jar`` is the binary
+// Marker: `start.jar` at the install root is present in every
+// Jetty distribution since 7.  `lib/jetty-*.jar` is the binary
 // equivalent check.
 // jettyWellKnown — see note in tomcatWellKnown.
 var jettyWellKnown = map[string][]string{

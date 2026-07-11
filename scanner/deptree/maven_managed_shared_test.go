@@ -1,6 +1,7 @@
 package deptree
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -20,7 +21,7 @@ import (
 func TestParseMavenPom_managedVersionAndSharedArtifact(t *testing.T) {
 	fixtureDir := filepath.Join("testdata", "maven", "managed-shared")
 	m2Dir := filepath.Join(fixtureDir, ".m2", "repository")
-	edges, err := ParseMavenPom(filepath.Join(fixtureDir, "pom.xml"), m2Dir)
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(fixtureDir, "pom.xml"), m2Dir)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}

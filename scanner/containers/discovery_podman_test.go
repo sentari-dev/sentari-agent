@@ -146,11 +146,13 @@ func TestDiscoverPodman_SingleImage(t *testing.T) {
 	if len(got.MergedRootFS.Layers) != 2 {
 		t.Fatalf("expected 2 layers, got %d: %v", len(got.MergedRootFS.Layers), got.MergedRootFS.Layers)
 	}
-	// Bottom-to-top: base first, top last.
-	if !hasSuffix(got.MergedRootFS.Layers[0], "layer-base/diff") {
+	// Bottom-to-top: base first, top last.  Compare separator-agnostically
+	// since the product builds paths with filepath.Join (OS separator) while
+	// the expected suffixes use forward slashes.
+	if !hasSuffix(filepath.ToSlash(got.MergedRootFS.Layers[0]), "layer-base/diff") {
 		t.Errorf("layer 0 should be the base; got %q", got.MergedRootFS.Layers[0])
 	}
-	if !hasSuffix(got.MergedRootFS.Layers[1], "layer-top/diff") {
+	if !hasSuffix(filepath.ToSlash(got.MergedRootFS.Layers[1]), "layer-top/diff") {
 		t.Errorf("layer 1 should be the top; got %q", got.MergedRootFS.Layers[1])
 	}
 }

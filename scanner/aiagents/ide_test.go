@@ -32,11 +32,11 @@ func writeExt(t *testing.T, root, publisher, name, version string) {
 // inventory — that's a separate concern).
 func TestScanIDEExtensions_FiltersByAllowlist(t *testing.T) {
 	tmp := t.TempDir()
-	writeExt(t, tmp, "github", "copilot", "1.200.0")          // AI — keep
-	writeExt(t, tmp, "github", "copilot-chat", "0.12.0")      // AI — keep
-	writeExt(t, tmp, "continue", "continue", "0.8.54")        // AI — keep
-	writeExt(t, tmp, "esbenp", "prettier-vscode", "10.4.0")   // not AI — drop
-	writeExt(t, tmp, "dbaeumer", "vscode-eslint", "3.0.10")   // not AI — drop
+	writeExt(t, tmp, "github", "copilot", "1.200.0")        // AI — keep
+	writeExt(t, tmp, "github", "copilot-chat", "0.12.0")    // AI — keep
+	writeExt(t, tmp, "continue", "continue", "0.8.54")      // AI — keep
+	writeExt(t, tmp, "esbenp", "prettier-vscode", "10.4.0") // not AI — drop
+	writeExt(t, tmp, "dbaeumer", "vscode-eslint", "3.0.10") // not AI — drop
 
 	records, errs := scanIDEExtensions(tmp)
 	if len(errs) != 0 {

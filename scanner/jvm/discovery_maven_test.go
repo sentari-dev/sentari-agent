@@ -7,7 +7,7 @@ import (
 )
 
 // TestDiscoverMavenCache_HOMEPath sets HOME to a temp dir containing
-// a fake ``.m2/repository`` and verifies the discoverer emits exactly
+// a fake `.m2/repository` and verifies the discoverer emits exactly
 // one Environment for it with the layout tag set.  HOME is the 99th-
 // percentile case; tests below cover MAVEN_HOME and the "no cache
 // found" fall-through.
@@ -96,7 +96,7 @@ func TestDiscoverMavenCache_NoCachePresent(t *testing.T) {
 
 // TestDiscoverMavenCache_EmptyHOMEEnv: robustness against a truly
 // empty HOME env var.  Some CI containers launch with minimal env; we
-// must not panic on those and must not walk ``./.m2/repository``
+// must not panic on those and must not walk `./.m2/repository`
 // accidentally (that would pick up arbitrary working-directory
 // content).
 func TestDiscoverMavenCache_EmptyHOMEEnv(t *testing.T) {

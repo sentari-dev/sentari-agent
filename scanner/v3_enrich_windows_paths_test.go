@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -22,10 +23,15 @@ func TestWindowsNodeCandidateBinaries(t *testing.T) {
 	got := windowsNodeCandidateBinaries()
 	joined := strings.Join(got, "\n")
 
+	// windowsNodeCandidateBinaries builds paths with filepath.Join, which emits
+	// OS-native separators: '\' on Windows (the real target), '/' on the darwin
+	// CI host. Construct the expected values the same way so the assertion is
+	// separator-agnostic and holds on both — hardcoding one separator would make
+	// this pass only on the OS it was written on.
 	mustContain := []string{
-		`C:\Program Files/nodejs/node.exe`,
-		`C:\Program Files (x86)/nodejs/node.exe`,
-		`C:\choco/bin/node.exe`,
+		filepath.Join(`C:\Program Files`, "nodejs", "node.exe"),
+		filepath.Join(`C:\Program Files (x86)`, "nodejs", "node.exe"),
+		filepath.Join(`C:\choco`, "bin", "node.exe"),
 	}
 	for _, want := range mustContain {
 		if !strings.Contains(joined, want) {

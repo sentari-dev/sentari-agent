@@ -1,6 +1,7 @@
 package deptree
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,7 +64,7 @@ func TestPropertyInterp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edges, err := ParseMavenPom(filepath.Join(pomDir, "pom.xml"), m2)
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(pomDir, "pom.xml"), m2)
 	if err != nil {
 		t.Fatalf("ParseMavenPom failed: %v", err)
 	}
@@ -187,7 +188,7 @@ func TestTransitivePropertyInterp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edges, err := ParseMavenPom(filepath.Join(rootDir, "pom.xml"), m2)
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(rootDir, "pom.xml"), m2)
 	if err != nil {
 		t.Fatalf("ParseMavenPom failed: %v", err)
 	}
@@ -254,7 +255,7 @@ func TestPropertyInterp_projectVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edges, err := ParseMavenPom(filepath.Join(pomDir, "pom.xml"), m2)
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(pomDir, "pom.xml"), m2)
 	if err != nil {
 		t.Fatalf("ParseMavenPom failed: %v", err)
 	}

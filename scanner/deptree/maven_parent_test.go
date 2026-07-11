@@ -1,6 +1,7 @@
 package deptree
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -90,7 +91,7 @@ func TestParentChain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edges, err := ParseMavenPom(filepath.Join(childDir, "pom.xml"), m2)
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(childDir, "pom.xml"), m2)
 	if err != nil {
 		t.Fatalf("ParseMavenPom failed: %v", err)
 	}
@@ -110,6 +111,74 @@ func TestParentChain(t *testing.T) {
 	}
 	if !libEdge.Resolved {
 		t.Errorf("edge to com.acme:lib should be Resolved=true; got false")
+	}
+}
+
+// TestRootInheritsCoordinateFromParent pins the reactor-child-as-scan-root
+// fix: a POM that declares only <artifactId> and inherits groupId+version
+// from its <parent> must produce a well-formed root coordinate
+// ("com.acme:my-app", not the malformed ":my-app"), and ${project.version}
+// must interpolate to the inherited parent version — so a sibling-module
+// dep pinned at ${project.version} is retained rather than silently
+// dropped as empty-version.
+func TestRootInheritsCoordinateFromParent(t *testing.T) {
+	dir := t.TempDir()
+	m2 := filepath.Join(dir, ".m2", "repository")
+	if err := os.MkdirAll(m2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Root POM: only <artifactId>; groupId + version come from <parent>.
+	// Depends on a sibling module pinned at ${project.version}.
+	projDir := filepath.Join(dir, "my-app")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootPom := `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.acme</groupId>
+        <artifactId>platform</artifactId>
+        <version>5.0</version>
+    </parent>
+    <artifactId>my-app</artifactId>
+    <dependencies>
+        <dependency>
+            <groupId>com.acme</groupId>
+            <artifactId>sibling</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+    </dependencies>
+</project>`
+	if err := os.WriteFile(filepath.Join(projDir, "pom.xml"), []byte(rootPom), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(projDir, "pom.xml"), m2)
+	if err != nil {
+		t.Fatalf("ParseMavenPom failed: %v", err)
+	}
+
+	var sib *DepEdge
+	for i := range edges {
+		if edges[i].ChildName == "com.acme:sibling" {
+			sib = &edges[i]
+		}
+	}
+	if sib == nil {
+		t.Fatalf("sibling dep pinned at ${project.version} was dropped; edges=%+v", edges)
+	}
+	// Root coordinate must be well-formed (group inherited from parent).
+	if sib.ParentName != "com.acme:my-app" {
+		t.Errorf("root coordinate = %q; want com.acme:my-app (groupId inherited from <parent>)", sib.ParentName)
+	}
+	// ${project.version} must interpolate to the inherited parent version.
+	if sib.ChildVersion != "5.0" {
+		t.Errorf("com.acme:sibling version = %q; want 5.0 (${project.version} → inherited parent version)", sib.ChildVersion)
+	}
+	if sib.IntroducedByPath[0] != "com.acme:my-app" {
+		t.Errorf("introduced_by_path root = %q; want com.acme:my-app, got path %v", sib.IntroducedByPath[0], sib.IntroducedByPath)
 	}
 }
 
@@ -152,7 +221,7 @@ func TestParentChain_missingParent(t *testing.T) {
 	}
 
 	// ParseMavenPom must not error — it should continue best-effort.
-	edges, err := ParseMavenPom(filepath.Join(childDir, "pom.xml"), m2)
+	edges, err := ParseMavenPom(context.Background(), filepath.Join(childDir, "pom.xml"), m2)
 	if err != nil {
 		t.Fatalf("ParseMavenPom should not error on missing parent: %v", err)
 	}
