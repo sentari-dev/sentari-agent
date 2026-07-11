@@ -11,9 +11,9 @@ import (
 // probeStub lets a test simulate the file-system signals detectContainer
 // reads, without needing a real container.
 type probeStub struct {
-	k8sEnv   string
-	statOK   map[string]bool   // paths that os.Stat would succeed on
-	files    map[string]string // path -> contents for ReadFile
+	k8sEnv string
+	statOK map[string]bool   // paths that os.Stat would succeed on
+	files  map[string]string // path -> contents for ReadFile
 }
 
 func (p probeStub) env(key string) string { return p.k8sEnv }

@@ -17,3 +17,7 @@ Thumbs.db
 
 # Internal design docs — kept local, not published.
 docs/adr/
+
+# graphify knowledge-graph output — generated and local-only. Never publish to
+# this OSS repo: it indexes internal audit/security notes and strategy docs.
+graphify-out/
