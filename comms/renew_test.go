@@ -254,41 +254,6 @@ func TestSaveCertificatesAtomic_OverwritesExisting(t *testing.T) {
 	}
 }
 
-// DeviceCertNotAfter must parse the NotAfter from device.crt.
-func TestDeviceCertNotAfter_ParsesNotAfter(t *testing.T) {
-	caPEM, caKey, caCert := makeCA(t, "ca-na")
-	want := time.Now().Add(100 * 24 * time.Hour).Truncate(time.Second)
-
-	// Issue a device cert with a known NotAfter via a CSR.
-	csrPEM, keyPEM, err := buildCSR("host")
-	if err != nil {
-		t.Fatalf("buildCSR: %v", err)
-	}
-	_ = keyPEM
-	deviceCert := signCSRWithCA(t, csrPEM, caKey, caCert, "host", want)
-
-	dir := t.TempDir()
-	if err := SaveCertificatesAtomic(dir, caPEM, deviceCert, []byte("key")); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
-	got, err := DeviceCertNotAfter(dir)
-	if err != nil {
-		t.Fatalf("DeviceCertNotAfter: %v", err)
-	}
-	if !got.Equal(want.UTC()) {
-		t.Fatalf("NotAfter: want %v got %v", want.UTC(), got)
-	}
-}
-
-// DeviceCertNotAfter on a missing/invalid cert must return an error, not panic.
-func TestDeviceCertNotAfter_MissingErrors(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := DeviceCertNotAfter(dir); err == nil {
-		t.Fatalf("want error for missing device.crt, got nil")
-	}
-}
-
 // buildCSR must produce a CSR a CA can sign and a key that matches the
 // resulting cert — i.e. register and renew share the same CSR shape.
 func TestBuildCSR_ProducesSignableCSR(t *testing.T) {

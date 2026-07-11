@@ -1,21 +1,21 @@
 // npm / Node.js writer.
 //
-// Second ecosystem after pip.  ``.npmrc`` is structurally the
-// simplest of the supported configs — flat ``key=value`` without
-// section headers, no ``trusted-host`` equivalent (npm trusts any
+// Second ecosystem after pip.  `.npmrc` is structurally the
+// simplest of the supported configs — flat `key=value` without
+// section headers, no `trusted-host` equivalent (npm trusts any
 // host whose TLS chain validates), and no port-stripping
 // considerations (npm honours ports in registry URLs natively).
 //
 // Scope (design doc §4.2):
 //
-//   - Honours ``proxy_endpoints["npm"]`` from the policy-map.
-//   - Writes only the top-level ``registry=`` setting.  Scoped-
-//     registry mappings (``@vendor:registry=...``) are explicitly
+//   - Honours `proxy_endpoints["npm"]` from the policy-map.
+//   - Writes only the top-level `registry=` setting.  Scoped-
+//     registry mappings (`@vendor:registry=...`) are explicitly
 //     deferred until a customer asks — the policy-map shape would
 //     need a per-scope sub-field that doesn't exist yet.
-//   - User scope (``~/.npmrc``) on Linux/macOS/Windows is the
-//     dev-laptop default; system scope (``/etc/npmrc``) lands on
-//     server hosts.  npm's per-project ``.npmrc`` overrides both
+//   - User scope (`~/.npmrc`) on Linux/macOS/Windows is the
+//     dev-laptop default; system scope (`/etc/npmrc`) lands on
+//     server hosts.  npm's per-project `.npmrc` overrides both
 //     and we deliberately do NOT walk repos to write project-local
 //     files (would be racy with repo creation + clone).
 
@@ -32,32 +32,32 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
-// NpmScope picks ``user`` or ``system`` ``.npmrc``.  Same defaulting
-// story as ``PipScope``: zero-value → user (laptop default).
+// NpmScope picks `user` or `system` `.npmrc`.  Same defaulting
+// story as `PipScope`: zero-value → user (laptop default).
 type NpmScope int
 
 const (
-	// NpmScopeUser writes ``~/.npmrc`` on every supported OS.
+	// NpmScopeUser writes `~/.npmrc` on every supported OS.
 	NpmScopeUser NpmScope = iota
 
-	// NpmScopeSystem writes ``/etc/npmrc`` on Linux/macOS.  npm's
+	// NpmScopeSystem writes `/etc/npmrc` on Linux/macOS.  npm's
 	// "system"-level config on Windows is install-prefix-relative
-	// (``${prefix}\etc\npmrc``) and the prefix moves around per
-	// install method (msi / chocolatey / nvm-windows); ``NpmPath``
+	// (`${prefix}\etc\npmrc`) and the prefix moves around per
+	// install method (msi / chocolatey / nvm-windows); `NpmPath`
 	// returns empty on Windows for system scope and the writer
 	// becomes a soft no-op rather than guessing wrong.
 	NpmScopeSystem
 )
 
-// NpmPath returns the absolute ``.npmrc`` path for the given scope
+// NpmPath returns the absolute `.npmrc` path for the given scope
 // on the running OS.  Empty return signals "skip" — the caller
-// short-circuits to a soft no-op the same way ``WritePip`` does
+// short-circuits to a soft no-op the same way `WritePip` does
 // for un-derivable paths.
 func NpmPath(scope NpmScope) string {
 	switch scope {
 	case NpmScopeUser:
-		// npm uses ``$HOME/.npmrc`` uniformly.  On Windows
-		// ``os.UserHomeDir`` consults USERPROFILE, which is what
+		// npm uses `$HOME/.npmrc` uniformly.  On Windows
+		// `os.UserHomeDir` consults USERPROFILE, which is what
 		// npm itself reads.
 		home, err := os.UserHomeDir()
 		if err != nil || home == "" {
@@ -79,7 +79,7 @@ func NpmPath(scope NpmScope) string {
 	return ""
 }
 
-// WriteNpmResult mirrors ``WritePipResult`` — same shape so the
+// WriteNpmResult mirrors `WritePipResult` — same shape so the
 // orchestrator log emits structurally-identical lines per
 // ecosystem.
 type WriteNpmResult struct {
@@ -89,7 +89,7 @@ type WriteNpmResult struct {
 }
 
 // WriteNpm applies the npm section of a verified policy-map to
-// the host.  Behaviour matrix matches ``WritePip``:
+// the host.  Behaviour matrix matches `WritePip`:
 //
 //	+----------------------+--------------------+--------------------------+
 //	| proxy_endpoints[npm] | existing           | action                   |
@@ -102,8 +102,8 @@ type WriteNpmResult struct {
 //	| empty / missing      | operator-curated   | no-op (refuse to delete) |
 //	+----------------------+--------------------+--------------------------+
 //
-// The Sentari-managed gate on the fail-open ``remove`` branch is
-// the same as pip's: an operator-curated ``.npmrc`` (auth tokens
+// The Sentari-managed gate on the fail-open `remove` branch is
+// the same as pip's: an operator-curated `.npmrc` (auth tokens
 // for private registries, custom cache locations) MUST survive
 // install-gate disablement intact.
 func WriteNpm(m *scanner.InstallGateMap, scope NpmScope, marker MarkerFields) (WriteNpmResult, error) {
@@ -119,7 +119,7 @@ func WriteNpm(m *scanner.InstallGateMap, scope NpmScope, marker MarkerFields) (W
 	// Prefer the customer-configured trusted registry (post-PR-#118
 	// on the server) over Sentari-Proxy.  npm supports per-scope
 	// registries too, but a per-tenant 'use my Nexus everywhere'
-	// override applies to the root ``registry=`` line — additional
+	// override applies to the root `registry=` line — additional
 	// trusted registries beyond the first are out of scope for the
 	// .npmrc shape (npm only resolves one root registry; multi-
 	// registry workflows use scope mappings the operator declares
@@ -149,7 +149,7 @@ func WriteNpm(m *scanner.InstallGateMap, scope NpmScope, marker MarkerFields) (W
 
 	// Read any existing .npmrc so we MERGE rather than clobber.  Unlike
 	// pip.conf (a complete Sentari override), .npmrc commonly carries
-	// the operator's ``_authToken`` lines, scoped-registry mappings and
+	// the operator's `_authToken` lines, scoped-registry mappings and
 	// cache settings; replacing the whole file would silently strip
 	// those from the ACTIVE config (a backup alone doesn't help — npm
 	// reads the live file).  We splice our registry into a delimited
@@ -165,7 +165,7 @@ func WriteNpm(m *scanner.InstallGateMap, scope NpmScope, marker MarkerFields) (W
 		return res, err
 	}
 
-	// 0o600: the .npmrc can carry ``_authToken`` / ``_auth``
+	// 0o600: the .npmrc can carry `_authToken` / `_auth`
 	// credential lines, so it gets the same owner-only mode as the
 	// pip netrc (policy-map contract: credential-bearing files MUST
 	// be 0600).  WriteAtomic chmods the temp file before the rename,
@@ -187,7 +187,7 @@ func WriteNpm(m *scanner.InstallGateMap, scope NpmScope, marker MarkerFields) (W
 // inside an .npmrc.  Everything between (and including) these two
 // lines is owned by the writer and replaced on every apply; every
 // other line in the file is operator-curated and preserved verbatim.
-// The start line carries the ``# Managed by Sentari`` substring so
+// The start line carries the `# Managed by Sentari` substring so
 // isSentariManaged still recognises a merged file as managed.
 const (
 	npmBlockStart = "# >>> Sentari-managed block — do not edit inside this block. Managed by Sentari >>>"
@@ -200,15 +200,15 @@ const (
 // settings) outside that block.
 //
 // Why merge instead of replace: npm reads the live .npmrc, and that
-// file commonly holds ``//host/:_authToken=`` lines an operator needs
+// file commonly holds `//host/:_authToken=` lines an operator needs
 // for private-registry auth.  A full overwrite (pip-style) would drop
 // those from the ACTIVE file; a side backup doesn't restore live auth.
 //
-// Strategy: strip any prior Sentari block from ``existing`` (idempotent
+// Strategy: strip any prior Sentari block from `existing` (idempotent
 // re-apply replaces the block in place), keep all other lines verbatim,
 // then append a freshly-rendered block at the end.  npm's last-wins
-// duplicate-key semantics mean our trailing ``registry=`` overrides any
-// operator ``registry=`` earlier in the file — enforcement holds while
+// duplicate-key semantics mean our trailing `registry=` overrides any
+// operator `registry=` earlier in the file — enforcement holds while
 // the operator's other settings survive.
 func renderNpmrcMerged(existing []byte, endpoint string, auth *scanner.RegistryAuth, marker MarkerFields) ([]byte, error) {
 	endpoint = strings.TrimSpace(endpoint)
@@ -218,7 +218,7 @@ func renderNpmrcMerged(existing []byte, endpoint string, auth *scanner.RegistryA
 	if err := validateMarkerKeyID(marker.KeyID); err != nil {
 		return nil, fmt.Errorf("renderNpmrcMerged: %w", err)
 	}
-	// npm's registry URL must end with ``/`` — npm appends paths
+	// npm's registry URL must end with `/` — npm appends paths
 	// directly to it without inserting a separator, so a missing
 	// trailing slash silently breaks tarball lookups.  Add one if
 	// the operator forgot.
@@ -244,7 +244,7 @@ func renderNpmrcMerged(existing []byte, endpoint string, auth *scanner.RegistryA
 
 	// Auth lines, when configured.  npm's authentication directives are
 	// keyed by the **registry URL without scheme**, with a leading
-	// ``//`` — e.g. ``//nexus.acme.com/repository/npm/:_authToken=...``.
+	// `//` — e.g. `//nexus.acme.com/repository/npm/:_authToken=...`.
 	// We derive that key once and use it for every auth directive so
 	// bearer / basic both bind to the exact endpoint we just wrote on
 	// the registry= line; a mismatch (host typo, trailing-slash drift)
@@ -268,7 +268,7 @@ func renderNpmrcMerged(existing []byte, endpoint string, auth *scanner.RegistryA
 //	basic:   //host/path/:_auth=<base64(user:password)>
 //	         //host/path/:always-auth=true
 //
-// The ``always-auth=true`` line forces npm to send credentials on
+// The `always-auth=true` line forces npm to send credentials on
 // every request (including tarball downloads) — without it, npm only
 // authenticates the metadata request and tarball fetches go
 // anonymous, which fails on a 401-requiring Nexus.
@@ -307,7 +307,7 @@ func renderNpmAuthLines(b *strings.Builder, endpoint string, auth *scanner.Regis
 	return nil
 }
 
-// npmAuthKeyPrefix converts a registry URL into the ``//host/path/``
+// npmAuthKeyPrefix converts a registry URL into the `//host/path/`
 // form npm uses to key auth directives.  Strips the scheme, keeps
 // host + port + path with a guaranteed trailing slash.
 func npmAuthKeyPrefix(endpoint string) (string, error) {
@@ -327,7 +327,7 @@ func npmAuthKeyPrefix(endpoint string) (string, error) {
 	return "//" + rest, nil
 }
 
-// stripSentariBlock returns ``content`` with any single Sentari-managed
+// stripSentariBlock returns `content` with any single Sentari-managed
 // block (the lines from npmBlockStart through npmBlockEnd, inclusive)
 // removed.  Used so an idempotent re-apply replaces the block in place
 // rather than stacking a second one.  If no block is present the input

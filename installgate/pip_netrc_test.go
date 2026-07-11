@@ -86,7 +86,7 @@ func TestWritePip_BearerCredentialWritesNetrc(t *testing.T) {
 	}
 
 	// netrc has the sentari-managed block + the bearer record per
-	// GitLab/Artifactory ``__token__`` convention.
+	// GitLab/Artifactory `__token__` convention.
 	netrcBody, err := os.ReadFile(netrcPath)
 	if err != nil {
 		t.Fatalf("read netrc: %v", err)

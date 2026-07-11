@@ -301,8 +301,8 @@ func TestWriteMaven_NilMapRejected(t *testing.T) {
 	}
 }
 
-// XML-comment safety regression: a KeyID containing ``--`` or
-// ending in ``-`` would produce ill-formed XML in the marker
+// XML-comment safety regression: a KeyID containing `--` or
+// ending in `-` would produce ill-formed XML in the marker
 // comment, breaking Maven's parser.  validateMarkerKeyID refuses
 // before the renderer emits anything.
 func TestWriteMaven_RejectsUnsafeKeyID(t *testing.T) {

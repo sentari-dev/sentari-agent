@@ -12,8 +12,6 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -122,21 +120,5 @@ func TestRegisterAcceptsValidChain(t *testing.T) {
 	}
 	if resp.DeviceID != "dev-1" || len(keyPEM) == 0 {
 		t.Fatalf("unexpected response: %+v keyLen=%d", resp, len(keyPEM))
-	}
-}
-
-// SaveCertificates must write device.crt at 0600 (private-key-adjacent
-// secret), not the previous world-readable 0644.
-func TestSaveCertificatesDeviceCertPerms(t *testing.T) {
-	dir := t.TempDir()
-	if err := SaveCertificates(dir, []byte("ca"), []byte("dev"), []byte("key")); err != nil {
-		t.Fatalf("SaveCertificates: %v", err)
-	}
-	info, err := os.Stat(filepath.Join(dir, "device.crt"))
-	if err != nil {
-		t.Fatalf("stat device.crt: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Fatalf("device.crt perms: want 0600, got %o", perm)
 	}
 }

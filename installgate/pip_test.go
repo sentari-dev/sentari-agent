@@ -113,7 +113,7 @@ func TestWritePip_FreshHostFreshConfig(t *testing.T) {
 			t.Errorf("rendered config missing %q\nfull body:\n%s", s, got)
 		}
 	}
-	// An HTTPS index keeps TLS verification ON: ``trusted-host`` (which
+	// An HTTPS index keeps TLS verification ON: `trusted-host` (which
 	// disables pip's cert + hostname checks) must NOT be emitted for an
 	// https:// endpoint.
 	if strings.Contains(got, "trusted-host") {
@@ -292,7 +292,7 @@ func TestWritePip_NilMapRejected(t *testing.T) {
 
 // Endpoint-injection guard parallel to the npm test: a CR / LF in
 // the proxy URL would let a tampered policy-map smuggle a second
-// ``index-url =`` line into pip.conf and silently swap out the
+// `index-url =` line into pip.conf and silently swap out the
 // proxy.  validateEndpoint refuses control bytes before the
 // renderer touches the file.
 func TestWritePip_RejectsControlCharsInEndpoint(t *testing.T) {
@@ -472,7 +472,7 @@ func TestRenderPipConf_DedupesIdenticalExtras(t *testing.T) {
 
 // TestRenderPipConf_HTTPSIndexOmitsTrustedHost asserts the core security
 // fix: an https:// index keeps pip's TLS certificate verification ON, so
-// no ``trusted-host`` line (which disables that verification) is emitted.
+// no `trusted-host` line (which disables that verification) is emitted.
 func TestRenderPipConf_HTTPSIndexOmitsTrustedHost(t *testing.T) {
 	got, err := renderPipConf(
 		"https://nexus.acme.com/repository/pypi/",
@@ -488,7 +488,7 @@ func TestRenderPipConf_HTTPSIndexOmitsTrustedHost(t *testing.T) {
 }
 
 // TestRenderPipConf_HTTPIndexEmitsTrustedHost asserts the complementary
-// case: a plaintext http:// index has no TLS to verify, so ``trusted-host``
+// case: a plaintext http:// index has no TLS to verify, so `trusted-host`
 // is pip's required opt-in to talk to it and IS emitted for that host.
 func TestRenderPipConf_HTTPIndexEmitsTrustedHost(t *testing.T) {
 	got, err := renderPipConf(
@@ -537,7 +537,7 @@ func TestRenderPipConf_MixedSchemesTrustsOnlyPlaintextHosts(t *testing.T) {
 }
 
 // TestRenderPipConf_HTTPSchemeIsCaseInsensitive guards the scheme gate
-// against a hand-edited ``HTTP://`` slipping past as if it were https.
+// against a hand-edited `HTTP://` slipping past as if it were https.
 func TestRenderPipConf_HTTPSchemeIsCaseInsensitive(t *testing.T) {
 	got, err := renderPipConf(
 		"HTTP://legacy.corp.local/pypi/",

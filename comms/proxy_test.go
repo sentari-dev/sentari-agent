@@ -5,8 +5,79 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// TestRedactProxyURL asserts the credential-scrubbing helper masks any embedded
+// password for both parseable and unparseable proxy URLs, so no error/log site
+// that echoes the proxy URL can leak basic-auth credentials.
+func TestRedactProxyURL(t *testing.T) {
+	const secret = "sup3rsecret"
+	tests := []struct {
+		name         string
+		raw          string
+		wantContains string // a fragment that must survive redaction
+		wantRedacted bool   // whether the "xxxxx" marker must be present
+	}{
+		{"parseable with user:pass", "https://user:" + secret + "@proxy:8080", "proxy:8080", true},
+		{"parseable no creds", "http://proxy.corp:3128", "proxy.corp:3128", false},
+		{"unparseable bad escape with creds", "http://user:" + secret + "%zz@proxy:8080", "proxy:8080", true},
+		{"unparseable missing scheme with creds", "://user:" + secret + "@invalid", "invalid", true},
+		// A bare username carries no password, so there is nothing to mask —
+		// Go's Redacted() intentionally keeps it. The invariant we care about
+		// (no password leak) still holds because there is no password.
+		{"bare user no password", "http://user@proxy:3128", "proxy:3128", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactProxyURL(tt.raw)
+			if strings.Contains(got, secret) {
+				t.Errorf("redactProxyURL(%q) = %q leaks the password %q", tt.raw, got, secret)
+			}
+			if tt.wantRedacted && !strings.Contains(got, "xxxxx") {
+				t.Errorf("redactProxyURL(%q) = %q missing redaction marker %q", tt.raw, got, "xxxxx")
+			}
+			if !strings.Contains(got, tt.wantContains) {
+				t.Errorf("redactProxyURL(%q) = %q should still contain %q", tt.raw, got, tt.wantContains)
+			}
+		})
+	}
+}
+
+// TestBuildProxyFunc_errorsRedactCredentials proves that BOTH error sites in
+// buildProxyFunc (parse failure and missing scheme) scrub an embedded proxy
+// password before it reaches the returned error string — including the reason
+// wrapped from url.Parse, whose *url.Error would otherwise print the raw URL
+// verbatim.
+func TestBuildProxyFunc_errorsRedactCredentials(t *testing.T) {
+	const secret = "sup3rsecret"
+	tests := []struct {
+		name  string
+		proxy string
+	}{
+		// Parse failure (bad percent-escape) — the wrapped *url.Error path.
+		{"parse error", "http://user:" + secret + "%zz@proxy:8080"},
+		// Scheme-relative URL parses cleanly but has an empty scheme, so it
+		// hits the missing-scheme branch with credentials attached.
+		{"missing scheme", "//user:" + secret + "@proxy:8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := buildProxyFunc(ProxyConfig{HTTPSProxy: tt.proxy})
+			if err == nil {
+				t.Fatalf("expected error for %q", tt.proxy)
+			}
+			msg := err.Error()
+			if strings.Contains(msg, secret) {
+				t.Errorf("error string leaks proxy password: %q", msg)
+			}
+			if !strings.Contains(msg, "xxxxx") {
+				t.Errorf("error string missing redaction marker: %q", msg)
+			}
+		})
+	}
+}
 
 func TestParseNoProxy(t *testing.T) {
 	tests := []struct {
@@ -125,7 +196,7 @@ func TestBuildProxyFunc(t *testing.T) {
 			t.Fatal(err)
 		}
 		proxyFunc, err := buildProxyFunc(ProxyConfig{
-			HTTPSProxy:   "http://urluser:urlpass@proxy.corp:3128",
+			HTTPSProxy:   "https://urluser:urlpass@proxy.corp:3128",
 			AuthUser:     "fileuser",
 			AuthPassFile: pwFile,
 		})
@@ -196,7 +267,7 @@ func TestBuildProxyFunc(t *testing.T) {
 
 	t.Run("auth user with missing password file returns error", func(t *testing.T) {
 		_, err := buildProxyFunc(ProxyConfig{
-			HTTPSProxy:   "http://proxy.corp:3128",
+			HTTPSProxy:   "https://proxy.corp:3128",
 			AuthUser:     "user",
 			AuthPassFile: "/nonexistent/proxy.pwd",
 		})
@@ -204,6 +275,183 @@ func TestBuildProxyFunc(t *testing.T) {
 			t.Fatal("expected error for missing auth pass file")
 		}
 	})
+}
+
+// TestBuildProxyFunc_refusesCleartextProxyAuth proves the fail-closed rule for a
+// cleartext proxy that carries credentials: an http:// proxy WITH proxy auth is
+// refused at construction (the CONNECT would send Proxy-Authorization: Basic
+// over cleartext), an http:// proxy WITHOUT auth is allowed (nothing to leak),
+// and an https:// proxy WITH auth is allowed (credential rides inside TLS). The
+// refusal must not surface any credential in its error string.
+func TestBuildProxyFunc_refusesCleartextProxyAuth(t *testing.T) {
+	const secret = "sup3rsecret"
+	dir := t.TempDir()
+	pwFile := filepath.Join(dir, "proxy.pwd")
+	if err := os.WriteFile(pwFile, []byte(secret+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("http proxy with auth user is refused", func(t *testing.T) {
+		_, err := buildProxyFunc(ProxyConfig{
+			HTTPSProxy:   "http://proxy.corp:3128",
+			AuthUser:     "user",
+			AuthPassFile: pwFile,
+		})
+		if err == nil {
+			t.Fatal("expected refusal for http:// proxy with auth")
+		}
+		if !strings.Contains(err.Error(), "refusing to send proxy credentials over a cleartext http:// proxy") {
+			t.Errorf("unexpected error message: %q", err.Error())
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("refusal error leaks the proxy credential: %q", err.Error())
+		}
+	})
+
+	t.Run("http proxy with only auth pass file is refused", func(t *testing.T) {
+		// AuthPassFile set without AuthUser is a misconfiguration; still refuse
+		// fail-closed so no cleartext-proxy-auth path can slip through.
+		_, err := buildProxyFunc(ProxyConfig{
+			HTTPSProxy:   "http://proxy.corp:3128",
+			AuthPassFile: pwFile,
+		})
+		if err == nil {
+			t.Fatal("expected refusal for http:// proxy with auth pass file")
+		}
+		if !strings.Contains(err.Error(), "refusing to send proxy credentials over a cleartext http:// proxy") {
+			t.Errorf("unexpected error message: %q", err.Error())
+		}
+	})
+
+	t.Run("http proxy without auth is allowed", func(t *testing.T) {
+		if _, err := buildProxyFunc(ProxyConfig{
+			HTTPSProxy: "http://proxy.corp:3128",
+		}); err != nil {
+			t.Fatalf("http:// proxy without auth must be allowed, got: %v", err)
+		}
+	})
+
+	t.Run("https proxy with auth is allowed", func(t *testing.T) {
+		proxyFunc, err := buildProxyFunc(ProxyConfig{
+			HTTPSProxy:   "https://proxy.corp:3128",
+			AuthUser:     "user",
+			AuthPassFile: pwFile,
+		})
+		if err != nil {
+			t.Fatalf("https:// proxy with auth must be allowed, got: %v", err)
+		}
+		req, _ := http.NewRequest("GET", "https://sentari.example.com/api", nil)
+		proxyURL, err := proxyFunc(req)
+		if err != nil {
+			t.Fatalf("proxy func error: %v", err)
+		}
+		if pw, _ := proxyURL.User.Password(); pw != secret {
+			t.Errorf("expected injected password on https proxy, got %q", pw)
+		}
+	})
+}
+
+// TestBuildProxyFunc_refusesCleartextProxyURLUserinfo covers the gap the
+// separate-config guard missed: credentials embedded directly in the proxy URL
+// userinfo (http://user:pass@proxy) with NO AuthUser/AuthPassFile set.  Go still
+// sends Proxy-Authorization from the URL userinfo over the cleartext
+// agent<->proxy segment, so this must be refused just like the config-supplied
+// case — and the refusal must not leak the embedded credential.
+func TestBuildProxyFunc_refusesCleartextProxyURLUserinfo(t *testing.T) {
+	const secret = "sup3rsecret"
+
+	t.Run("http proxy with userinfo credentials is refused", func(t *testing.T) {
+		_, err := buildProxyFunc(ProxyConfig{
+			HTTPSProxy: "http://user:" + secret + "@proxy.corp:3128",
+		})
+		if err == nil {
+			t.Fatal("expected refusal for http:// proxy with URL userinfo credentials")
+		}
+		if !strings.Contains(err.Error(), "refusing to send proxy credentials over a cleartext http:// proxy") {
+			t.Errorf("unexpected error message: %q", err.Error())
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("refusal error leaks the proxy credential: %q", err.Error())
+		}
+	})
+
+	t.Run("http proxy with bare userinfo username is refused", func(t *testing.T) {
+		// A username-only userinfo still makes Go emit Proxy-Authorization;
+		// refuse fail-closed.
+		_, err := buildProxyFunc(ProxyConfig{
+			HTTPSProxy: "http://user@proxy.corp:3128",
+		})
+		if err == nil {
+			t.Fatal("expected refusal for http:// proxy with bare userinfo username")
+		}
+		if !strings.Contains(err.Error(), "refusing to send proxy credentials over a cleartext http:// proxy") {
+			t.Errorf("unexpected error message: %q", err.Error())
+		}
+	})
+
+	t.Run("http proxy with no userinfo and no auth is allowed", func(t *testing.T) {
+		if _, err := buildProxyFunc(ProxyConfig{
+			HTTPSProxy: "http://proxy.corp:3128",
+		}); err != nil {
+			t.Fatalf("http:// proxy without any credentials must be allowed, got: %v", err)
+		}
+	})
+
+	t.Run("https proxy with userinfo credentials is allowed", func(t *testing.T) {
+		proxyFunc, err := buildProxyFunc(ProxyConfig{
+			HTTPSProxy: "https://user:" + secret + "@proxy.corp:3128",
+		})
+		if err != nil {
+			t.Fatalf("https:// proxy with URL userinfo must be allowed, got: %v", err)
+		}
+		req, _ := http.NewRequest("GET", "https://sentari.example.com/api", nil)
+		proxyURL, err := proxyFunc(req)
+		if err != nil {
+			t.Fatalf("proxy func error: %v", err)
+		}
+		if pw, _ := proxyURL.User.Password(); pw != secret {
+			t.Errorf("expected userinfo password preserved on https proxy, got %q", pw)
+		}
+	})
+}
+
+// TestNewClient_refusesCleartextProxyAuth proves the refusal fires at the real
+// client-construction chokepoint (NewClient), not only in the buildProxyFunc
+// helper, so a misconfigured agent fails loudly at startup instead of shipping
+// proxy credentials in cleartext.
+func TestNewClient_refusesCleartextProxyAuth(t *testing.T) {
+	dir := t.TempDir()
+	pwFile := filepath.Join(dir, "proxy.pwd")
+	if err := os.WriteFile(pwFile, []byte("sup3rsecret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := NewClient(ClientConfig{
+		ServerURL: "https://sentari.example.com",
+		Proxy: ProxyConfig{
+			HTTPSProxy:   "http://proxy.corp:3128",
+			AuthUser:     "user",
+			AuthPassFile: pwFile,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected NewClient to refuse an http:// proxy with auth")
+	}
+	if !strings.Contains(err.Error(), "refusing to send proxy credentials over a cleartext http:// proxy") {
+		t.Errorf("unexpected error: %q", err.Error())
+	}
+
+	// The same config over an https:// proxy must construct cleanly.
+	if _, err := NewClient(ClientConfig{
+		ServerURL: "https://sentari.example.com",
+		Proxy: ProxyConfig{
+			HTTPSProxy:   "https://proxy.corp:3128",
+			AuthUser:     "user",
+			AuthPassFile: pwFile,
+		},
+	}); err != nil {
+		t.Fatalf("https:// proxy with auth must construct, got: %v", err)
+	}
 }
 
 func TestNewClientWithProxy(t *testing.T) {

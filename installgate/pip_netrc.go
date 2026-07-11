@@ -1,11 +1,11 @@
-// Pip writer — ``~/.netrc`` credential applier.
+// Pip writer — `~/.netrc` credential applier.
 //
-// pip / pipenv / poetry / uv all read ``~/.netrc`` natively for
+// pip / pipenv / poetry / uv all read `~/.netrc` natively for
 // HTTP basic authentication against the index server.  By writing
 // per-registry credentials there instead of URL-embedding them in
-// ``pip.conf`` we keep them out of ``pip config list`` output
+// `pip.conf` we keep them out of `pip config list` output
 // (which would otherwise echo the URL) and we keep the credential
-// string out of the operator log that often captures ``pip install``
+// string out of the operator log that often captures `pip install`
 // invocations verbatim.
 //
 // Threat-model notes:
@@ -18,19 +18,19 @@
 //     pip will use that isn't ultimately cleartext on disk —
 //     industry-standard.  See the PR-B discussion in the contract
 //     doc for the alternative architecture (Sentari-Proxy injects
-//     ``Authorization`` headers; credentials never touch the
+//     `Authorization` headers; credentials never touch the
 //     device).  Today's design ships per-device credentials.
 //   - Merge-not-replace strategy: a Sentari-managed block lives
 //     between two sentinel lines; everything outside is preserved.
-//     Operator-curated ``machine github.com ...`` records survive
+//     Operator-curated `machine github.com ...` records survive
 //     unchanged.
 //
-// System-scope limitation: there is no ``/etc/netrc`` that pip
-// reads — pip resolves ``~/.netrc`` of the OS user invoking it.
-// The writer always targets the agent's own ``$HOME/.netrc``.  When
+// System-scope limitation: there is no `/etc/netrc` that pip
+// reads — pip resolves `~/.netrc` of the OS user invoking it.
+// The writer always targets the agent's own `$HOME/.netrc`.  When
 // the agent runs as root (system pip scope) and `pip install` is
 // invoked by a different user, that user does NOT see the
-// credentials — they read their own ``$HOME/.netrc``.  Document this
+// credentials — they read their own `$HOME/.netrc`.  Document this
 // for multi-user hosts; for single-service-account hosts (the common
 // install) it's fine.
 
@@ -47,9 +47,9 @@ import (
 )
 
 // netrcBlockStart / netrcBlockEnd delimit the Sentari-managed region
-// inside ``~/.netrc``.  Comment lines (``#`` prefix) are recognised
+// inside `~/.netrc`.  Comment lines (`#` prefix) are recognised
 // by every netrc parser this writer cares about (Python's
-// ``netrc`` stdlib, Go's libcurl-style parsers, libcurl itself, git).
+// `netrc` stdlib, Go's libcurl-style parsers, libcurl itself, git).
 const (
 	netrcBlockStart = "# >>> Sentari-managed block — do not edit inside this block. Managed by Sentari >>>"
 	netrcBlockEnd   = "# <<< Sentari-managed block <<<"
@@ -60,10 +60,10 @@ const (
 // be resolved (caller treats as soft no-op, same convention as
 // PipPath).
 //
-// Unlike ``PipPath`` this is **scope-independent** — pip's netrc
+// Unlike `PipPath` this is **scope-independent** — pip's netrc
 // lookup is per-OS-user, not per-system, so we always write to the
-// agent's own ``$HOME/.netrc`` regardless of whether pip.conf went
-// to ``~/.config/pip/pip.conf`` or ``/etc/pip.conf``.
+// agent's own `$HOME/.netrc` regardless of whether pip.conf went
+// to `~/.config/pip/pip.conf` or `/etc/pip.conf`.
 func PipNetrcPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -76,14 +76,14 @@ func PipNetrcPath() string {
 // for every pypi trusted-registry entry that carries usable auth.
 // Operator records outside the sentinel block are preserved.
 //
-// Returns ``(path, changed, removed, err)``:
-//   - ``path``: the resolved netrc target (empty when soft no-op).
-//   - ``changed``: file created or contents differ from prior state.
-//   - ``removed``: the file was deleted entirely (no Sentari content
+// Returns `(path, changed, removed, err)`:
+//   - `path`: the resolved netrc target (empty when soft no-op).
+//   - `changed`: file created or contents differ from prior state.
+//   - `removed`: the file was deleted entirely (no Sentari content
 //     remained AND no preserved operator content remained).
-//   - ``err``: hard failure (read/write/permission); soft failures
+//   - `err`: hard failure (read/write/permission); soft failures
 //     like "no home dir" / "no credentialed registries" return
-//     ``(path, false, false, nil)``.
+//     `(path, false, false, nil)`.
 func applyPipNetrc(m *scanner.InstallGateMap, marker MarkerFields) (path string, changed bool, removed bool, err error) {
 	path = PipNetrcPath()
 	if path == "" {
@@ -154,8 +154,8 @@ func applyPipNetrc(m *scanner.InstallGateMap, marker MarkerFields) (path string,
 }
 
 // pipNetrcCred is the resolved (host, login, password) tuple a single
-// netrc ``machine`` record requires.  Bearer mode is rendered as a
-// ``machine <host> login __token__ password <token>`` record per
+// netrc `machine` record requires.  Bearer mode is rendered as a
+// `machine <host> login __token__ password <token>` record per
 // the GitLab / Artifactory bearer-via-netrc convention pip honours.
 type pipNetrcCred struct {
 	Host     string
@@ -251,7 +251,7 @@ func renderNetrcMerged(preserved []byte, creds []pipNetrcCred, marker MarkerFiel
 	return []byte(b.String()), nil
 }
 
-// stripNetrcSentariBlock returns ``content`` with any single Sentari-
+// stripNetrcSentariBlock returns `content` with any single Sentari-
 // managed block removed.  Same shape as the npm helper, just with
 // netrc sentinels.  A start without a matching end is treated as
 // "block runs to EOF" — conservative: better to drop too much of our
@@ -286,7 +286,7 @@ func stripNetrcSentariBlock(content []byte) []byte {
 }
 
 // netrcHostOf extracts the bare host (no scheme, no port) from a
-// registry URL for netrc lookup.  Distinct from ``hostOf`` in pip.go
+// registry URL for netrc lookup.  Distinct from `hostOf` in pip.go
 // because that one is host-list-for-pip-trusted-host-line specific;
 // netrc accepts hosts with neither scheme nor port (RFC 1738
 // "machine name").

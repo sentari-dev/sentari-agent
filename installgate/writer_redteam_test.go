@@ -114,13 +114,13 @@ func TestRedTeam_TmpFileExistingRegularNotFollowed(t *testing.T) {
 }
 
 // TestRedTeam_ConfigPathSymlinkNotReadOrBackedUp models the pre-write
-// read attack: the config path itself (e.g. ``/etc/pip.conf``) is a
+// read attack: the config path itself (e.g. `/etc/pip.conf`) is a
 // symlink to a sensitive root-owned file like /etc/shadow.  Pre-fix
 // the writer's pre-write reads (isSentariManaged, readBoundedIfExists,
 // backupOriginal's source open) all used os.Open and FOLLOWED the
 // symlink — so the agent would (a) read the sensitive target to decide
 // "managed?" and (b) COPY its contents into a world-discoverable
-// ``.sentari-backup-*`` file.  Post-fix every pre-write read routes
+// `.sentari-backup-*` file.  Post-fix every pre-write read routes
 // through safeio, which refuses a symlink leaf: WriteAtomic must error
 // out and create NO backup containing the secret.
 func TestRedTeam_ConfigPathSymlinkNotReadOrBackedUp(t *testing.T) {

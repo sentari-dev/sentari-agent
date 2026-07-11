@@ -1,12 +1,12 @@
 // Maven / Java writer.
 //
-// Third ecosystem after pip and npm.  Maven's ``settings.xml`` is
+// Third ecosystem after pip and npm.  Maven's `settings.xml` is
 // the highest-stakes config in this writer family — operators
-// commonly store cleartext repository credentials in ``<servers>``
-// blocks alongside ``<mirrors>`` definitions for internal Artifactory
+// commonly store cleartext repository credentials in `<servers>`
+// blocks alongside `<mirrors>` definitions for internal Artifactory
 // or Nexus registries — so the writer is conservative by design:
 //
-//   - Fresh host (no ``settings.xml``) → write a complete
+//   - Fresh host (no `settings.xml`) → write a complete
 //     Sentari-managed document.
 //   - Existing Sentari-managed file (marker present) → rewrite.
 //   - Existing operator-curated file (no marker) → **refuse to
@@ -15,8 +15,8 @@
 //     pointing Sentari-Proxy at their existing Artifactory in the
 //     server-side install-gate config (Phase C feature).
 //
-// XML merge — splicing our ``<mirror>`` into an operator-curated
-// ``<mirrors>`` while preserving credentials and profiles
+// XML merge — splicing our `<mirror>` into an operator-curated
+// `<mirrors>` while preserving credentials and profiles
 // elsewhere in the document — is genuine engineering with its own
 // failure modes (encoding mismatches, comment preservation, attribute
 // ordering).  It's deferred to a follow-up PR so it can land with
@@ -34,17 +34,17 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
-// MavenScope picks the user-level or system-level ``settings.xml``.
+// MavenScope picks the user-level or system-level `settings.xml`.
 type MavenScope int
 
 const (
-	// MavenScopeUser writes ``~/.m2/settings.xml``.  Maven looks
+	// MavenScopeUser writes `~/.m2/settings.xml`.  Maven looks
 	// here first; a file at this path is the per-user override
 	// for whatever ships in the system-level location.
 	MavenScopeUser MavenScope = iota
 
-	// MavenScopeSystem writes ``$MAVEN_HOME/conf/settings.xml``.
-	// Returns empty (soft no-op) when ``MAVEN_HOME`` is not set —
+	// MavenScopeSystem writes `$MAVEN_HOME/conf/settings.xml`.
+	// Returns empty (soft no-op) when `MAVEN_HOME` is not set —
 	// Maven's install path is operator-decided + non-stable across
 	// distros (apt installs differently to homebrew which differs
 	// from sdkman) so guess-paths would write into a directory
@@ -168,7 +168,7 @@ func WriteMaven(m *scanner.InstallGateMap, scope MavenScope, marker MarkerFields
 	if err != nil {
 		return res, err
 	}
-	// 0o600: settings.xml can carry ``<password>`` / Authorization-
+	// 0o600: settings.xml can carry `<password>` / Authorization-
 	// header credentials, so it gets the same owner-only mode as the
 	// pip netrc (policy-map contract: credential-bearing files MUST
 	// be 0600).  WriteAtomic chmods the temp file before the rename,
@@ -190,28 +190,28 @@ func WriteMaven(m *scanner.InstallGateMap, scope MavenScope, marker MarkerFields
 // settings.xml.  The XML comment carries the Sentari-managed marker
 // (matched by isSentariManaged via sentariManagedSentinelXML).
 //
-// Output uses the design-doc §4.3 layout: ``<mirrors>`` containing
-// a single ``<mirror>`` with ``<mirrorOf>*</mirrorOf>`` so every
+// Output uses the design-doc §4.3 layout: `<mirrors>` containing
+// a single `<mirror>` with `<mirrorOf>*</mirrorOf>` so every
 // Maven repository the project resolves redirects through
 // Sentari-Proxy.
 //
-// When ``auth`` is non-nil and usable, a ``<servers>`` block is
-// emitted alongside ``<mirrors>``.  Maven's resolution rule is that
-// a ``<server>`` whose ``<id>`` matches a ``<mirror>``'s ``<id>``
+// When `auth` is non-nil and usable, a `<servers>` block is
+// emitted alongside `<mirrors>`.  Maven's resolution rule is that
+// a `<server>` whose `<id>` matches a `<mirror>`'s `<id>`
 // supplies the credentials for that mirror; we use a constant
-// ``sentari-proxy`` id for both halves so the binding is implicit.
+// `sentari-proxy` id for both halves so the binding is implicit.
 //
-// Bearer mode is rendered via Maven's ``<configuration>``
-// ``<httpHeaders>`` mechanism — Maven core has no native bearer
+// Bearer mode is rendered via Maven's `<configuration>`
+// `<httpHeaders>` mechanism — Maven core has no native bearer
 // concept, but the Wagon HTTP transport supports arbitrary headers
 // since Maven 3.5+, which is below the floor we support.  Basic
-// mode uses the long-standing ``<username>``/``<password>`` fields.
+// mode uses the long-standing `<username>`/`<password>` fields.
 func renderSettingsXML(endpoint string, auth *scanner.RegistryAuth, marker MarkerFields) ([]byte, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if err := validateEndpoint(endpoint); err != nil {
 		return nil, fmt.Errorf("renderSettingsXML: %w", err)
 	}
-	// XML-comment safety: refuse ``--`` and trailing ``-`` in the
+	// XML-comment safety: refuse `--` and trailing `-` in the
 	// KeyID so the embedded marker comment stays well-formed Maven
 	// XML.  Same gate the hash-marker uses on pip / npm via the
 	// pip render helper — keeps the failure mode consistent across
@@ -245,8 +245,8 @@ func renderSettingsXML(endpoint string, auth *scanner.RegistryAuth, marker Marke
 	return []byte(b.String()), nil
 }
 
-// renderMavenServersBlock emits the ``<servers>`` element that binds
-// credentials to the mirror's ``<id>``.  Two shapes:
+// renderMavenServersBlock emits the `<servers>` element that binds
+// credentials to the mirror's `<id>`.  Two shapes:
 //
 //	basic:
 //	  <server>
@@ -269,7 +269,7 @@ func renderSettingsXML(endpoint string, auth *scanner.RegistryAuth, marker Marke
 //	  </server>
 //
 // Bearer-via-httpHeaders is the documented Maven Wagon idiom — we
-// pick it (rather than the also-valid ``<privateKey>`` slot for
+// pick it (rather than the also-valid `<privateKey>` slot for
 // custom auth) because Wagon HTTP is the default transport and
 // httpHeaders is the most widely-supported mechanism across mvn 3.5+.
 func renderMavenServersBlock(b *strings.Builder, mirrorID string, auth *scanner.RegistryAuth) error {
@@ -279,7 +279,7 @@ func renderMavenServersBlock(b *strings.Builder, mirrorID string, auth *scanner.
 
 	switch auth.Mode {
 	case "basic":
-		// xmlEscape below handles ``&<>`` correctly; no separate guard
+		// xmlEscape below handles `&<>` correctly; no separate guard
 		// needed — Copilot flagged the earlier no-op block on PR #45.
 		fmt.Fprintf(b, "      <username>%s</username>\n", xmlEscape(auth.Username))
 		fmt.Fprintf(b, "      <password>%s</password>\n", xmlEscape(auth.Password))
@@ -301,10 +301,10 @@ func renderMavenServersBlock(b *strings.Builder, mirrorID string, auth *scanner.
 	return nil
 }
 
-// xmlEscape returns ``s`` with the five XML predefined entities
+// xmlEscape returns `s` with the five XML predefined entities
 // escaped.  URLs can legitimately carry XML-significant characters
-// (``&`` in query strings, etc.) so we always escape — the inline
-// escaper sits here rather than via ``encoding/xml`` solely to
+// (`&` in query strings, etc.) so we always escape — the inline
+// escaper sits here rather than via `encoding/xml` solely to
 // keep the writer's import surface auditable, not because the
 // caller's content is known to be safe.
 func xmlEscape(s string) string {

@@ -230,7 +230,7 @@ func TestWriteAtomic_RejectsEmptyPath(t *testing.T) {
 }
 
 func TestWriteAtomic_CreatesParentDir(t *testing.T) {
-	// Fresh user host: ``~/.config/pip/`` doesn't exist yet.  The
+	// Fresh user host: `~/.config/pip/` doesn't exist yet.  The
 	// writer must create it (mode 0755 so debug tooling running as
 	// the same user can inspect).
 	dir := t.TempDir()
@@ -320,7 +320,7 @@ func TestRemove_EmptyPath(t *testing.T) {
 }
 
 // Finding 4: when Remove deletes a Sentari-managed config that has a
-// ``.sentari-backup-*`` sibling, it must surface the restore candidate
+// `.sentari-backup-*` sibling, it must surface the restore candidate
 // to operators (info-level log) so they know a backup exists to mv
 // back.  It must NOT auto-restore.  We capture the package log output.
 func TestRemove_SurfacesBackupCandidate(t *testing.T) {

@@ -9,11 +9,11 @@
 //
 // Scope:
 //
-//   - Honours ``proxy_endpoints["pypi"]`` from the policy-map.  An
+//   - Honours `proxy_endpoints["pypi"]` from the policy-map.  An
 //     empty endpoint is a no-op (Phase-A deployments where the
 //     server has policies but no proxy URL configured).
 //   - Writes both index-url and trusted-host (pip refuses to talk
-//     to a non-PyPI HTTPS host without ``trusted-host`` even when
+//     to a non-PyPI HTTPS host without `trusted-host` even when
 //     the cert chains to a system-trusted CA).
 //   - Writes only the system-or-user config; never touches
 //     virtualenv-local pip.conf because (a) walking every venv on
@@ -33,8 +33,8 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner"
 )
 
-// PipScope is the precedence target for pip.conf.  ``user`` is the
-// dev-laptop default; ``system`` is the server-host default.  The
+// PipScope is the precedence target for pip.conf.  `user` is the
+// dev-laptop default; `system` is the server-host default.  The
 // agent's config picks one — there's no "both" mode (pip's own
 // precedence rules would resolve them, but writing two files
 // doubles the audit surface for no real benefit).
@@ -42,20 +42,20 @@ type PipScope int
 
 const (
 	// PipScopeUser writes the per-user pip config:
-	// ``~/.config/pip/pip.conf`` on Linux/macOS,
-	// ``%APPDATA%\pip\pip.ini`` on Windows.
+	// `~/.config/pip/pip.conf` on Linux/macOS,
+	// `%APPDATA%\pip\pip.ini` on Windows.
 	PipScopeUser PipScope = iota
 
 	// PipScopeSystem writes the system-wide pip config:
-	// ``/etc/pip.conf`` on Linux/macOS, ``%ProgramData%\pip\pip.ini``
+	// `/etc/pip.conf` on Linux/macOS, `%ProgramData%\pip\pip.ini`
 	// on Windows.
 	PipScopeSystem
 )
 
 // PipPath returns the absolute pip-config path for the given scope
 // on the running OS.  Returns an empty string when the path can't
-// be derived (no ``HOME`` env var on Linux user-scope, no
-// ``APPDATA`` env var on Windows).  Callers treat the empty case
+// be derived (no `HOME` env var on Linux user-scope, no
+// `APPDATA` env var on Windows).  Callers treat the empty case
 // as "skip pip writer for this scope" and emit a typed warning.
 func PipPath(scope PipScope) string {
 	switch runtime.GOOS {
@@ -104,7 +104,7 @@ type WritePipResult struct {
 	Path string
 
 	// Changed is true iff the file was created or its contents
-	// differ from what was already there.  ``false`` covers both
+	// differ from what was already there.  `false` covers both
 	// the no-op case (idempotent re-write) and the no-policy-no-
 	// proxy case (writer produced no file).
 	Changed bool
@@ -118,16 +118,16 @@ type WritePipResult struct {
 	// operator-curated pip.conf (a file present WITHOUT the Sentari
 	// marker).  pip.conf is a complete Sentari override — we do not
 	// merge — so the operator's prior settings survive only in the
-	// ``.sentari-backup-*`` the writer always creates on this path.
+	// `.sentari-backup-*` the writer always creates on this path.
 	// The orchestrator surfaces this flag to the audit log so the
 	// replacement is never a silent clobber.
 	ReplacedOperator bool
 
-	// NetrcPath is the resolved ``~/.netrc`` destination (or empty
+	// NetrcPath is the resolved `~/.netrc` destination (or empty
 	// when no home directory could be resolved on this host).
-	// Per-registry credentials are applied via ``.netrc`` — pip /
+	// Per-registry credentials are applied via `.netrc` — pip /
 	// pipenv / poetry / uv all consult it natively, and it keeps the
-	// credential string out of ``pip config list`` (which would dump
+	// credential string out of `pip config list` (which would dump
 	// the URL of a URL-embedded credential).  The Sentari-managed
 	// section is delimited by sentinel lines so operator records
 	// outside our block survive verbatim.
@@ -139,7 +139,7 @@ type WritePipResult struct {
 
 	// NetrcRemoved is true iff the policy-map carries no credentialed
 	// registries any more and the writer dropped the Sentari-managed
-	// section from an existing ``.netrc`` (preserving operator records
+	// section from an existing `.netrc` (preserving operator records
 	// outside the section).  The whole file is removed only when the
 	// preserved content is empty.
 	NetrcRemoved bool
@@ -155,7 +155,7 @@ type WritePipResult struct {
 }
 
 // applyPipNetrcFn is the seam through which WritePip applies the netrc
-// companion.  It defaults to ``applyPipNetrc`` and exists as a package
+// companion.  It defaults to `applyPipNetrc` and exists as a package
 // var ONLY so tests can inject a failing teardown to exercise the
 // fail-open visibility path (a leftover credentialed netrc must never
 // be silently swallowed).  Production code never reassigns it.
@@ -177,17 +177,17 @@ var applyPipNetrcFn = applyPipNetrc
 //	| empty / missing      | operator-curated   | no-op (refuse to delete) |
 //	+----------------------+--------------------+--------------------------+
 //
-// The fail-open ``remove`` branch is gated on the existing file
+// The fail-open `remove` branch is gated on the existing file
 // carrying the Sentari marker — we never delete an operator-curated
 // pip.conf that pre-dated install-gate enrolment, even if the
 // policy-map drops the proxy URL.  Any pre-existing content on a
 // host's first install-gate apply has already been preserved at
-// ``<path>.sentari-backup-<timestamp>``; a Sentari-managed file is
+// `<path>.sentari-backup-<timestamp>`; a Sentari-managed file is
 // the only state we own and the only thing we'll remove.
 //
-// When ``PipPath`` cannot derive a target (no ``HOME`` on Linux
-// user-scope, no ``APPDATA`` on Windows), the call is a soft no-op:
-// returns ``(res, nil)`` with empty ``Path``.  The orchestrator
+// When `PipPath` cannot derive a target (no `HOME` on Linux
+// user-scope, no `APPDATA` on Windows), the call is a soft no-op:
+// returns `(res, nil)` with empty `Path`.  The orchestrator
 // inspects the result and logs a warning — a hard error here would
 // crash the agent on a misconfigured host where pip simply isn't
 // installed.
@@ -214,7 +214,7 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 	if endpoint == "" {
 		// Fail-open: no proxy configured for pypi.  Remove only if
 		// the existing file is Sentari-managed; never touch an
-		// operator-curated pip.conf.  ``isSentariManaged`` returns
+		// operator-curated pip.conf.  `isSentariManaged` returns
 		// false for absent files, so a host that never had pip
 		// configured stays inert.
 		managed, err := isSentariManaged(res.Path)
@@ -234,18 +234,18 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 		// telling us "do nothing for pypi", so the Sentari-managed
 		// credential block must also go.  Pass an effectively empty
 		// map so applyPipNetrc strips its sentinel block from any
-		// pre-existing ``.netrc`` while preserving operator records
+		// pre-existing `.netrc` while preserving operator records
 		// outside it.  Errors here are non-fatal — pip.conf is gone,
 		// the operator's main intent is honoured.
 		//
 		// When the prior netrc had operator records + a Sentari
-		// block, the rewrite path produces ``changed=true`` AND
-		// ``removed=true`` (block dropped, file rewritten); we
+		// block, the rewrite path produces `changed=true` AND
+		// `removed=true` (block dropped, file rewritten); we
 		// surface both flags so an audit-log consumer reading
 		// NetrcChanged still sees the rewrite — Copilot, PR #45.
 		//
 		// A teardown failure here is NOT swallowed: a leftover
-		// Sentari-managed ``.netrc`` keeps credentials live on disk
+		// Sentari-managed `.netrc` keeps credentials live on disk
 		// after the policy told us to revert, which is a credential-
 		// exposure concern.  pip.conf has already been removed (the
 		// operator's primary intent is honoured) so we keep the
@@ -310,10 +310,10 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 	// written.
 	res.ReplacedOperator = changed && replacingOperator
 
-	// Apply per-registry credentials via ``~/.netrc`` companion.
+	// Apply per-registry credentials via `~/.netrc` companion.
 	// pip / pipenv / poetry / uv all read it natively; the credential
-	// string never lands in ``pip.conf`` (where it would surface in
-	// ``pip config list``).  See ``applyPipNetrc`` for failure modes
+	// string never lands in `pip.conf` (where it would surface in
+	// `pip config list`).  See `applyPipNetrc` for failure modes
 	// and the documented limitation around system-scope vs the
 	// agent's home directory.
 	netrcPath, netrcChanged, netrcRemoved, err := applyPipNetrc(m, marker)
@@ -334,7 +334,7 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 
 // renderPipConf produces the bytes for the rendered pip.conf.
 // Format matches design doc §4.1 — the marker block, then the
-// ``[global]`` section with ``index-url`` and ``trusted-host``.
+// `[global]` section with `index-url` and `trusted-host`.
 //
 // We do NOT attempt to merge with an operator-curated pip.conf:
 // the file we write is a complete Sentari-managed override.  The
@@ -345,7 +345,7 @@ func WritePip(m *scanner.InstallGateMap, scope PipScope, marker MarkerFields) (W
 func renderPipConf(endpoint string, extras []string, marker MarkerFields) ([]byte, error) {
 	// Defensive trim: a stray trailing newline in the proxy URL
 	// from a hand-edited config would land mid-INI on the
-	// ``index-url =`` line and break pip's parser.
+	// `index-url =` line and break pip's parser.
 	endpoint = strings.TrimSpace(endpoint)
 	if err := validateEndpoint(endpoint); err != nil {
 		return nil, fmt.Errorf("renderPipConf: %w", err)
@@ -359,17 +359,17 @@ func renderPipConf(endpoint string, extras []string, marker MarkerFields) ([]byt
 		return nil, fmt.Errorf("renderPipConf: derive host from endpoint: %w", err)
 	}
 
-	// ``trusted-host`` DISABLES pip's TLS certificate verification for
+	// `trusted-host` DISABLES pip's TLS certificate verification for
 	// the listed hosts — pip skips the cert chain AND the hostname
 	// check for any host on this line.  Emitting it for an HTTPS index
 	// is a silent security downgrade: a MITM with any cert (or none)
 	// can impersonate the credential-bearing mirror.  We therefore
 	// gate each host on the scheme of its endpoint and only ever trust
-	// a host reached over plaintext ``http://`` — where there is no TLS
-	// to verify in the first place, so ``trusted-host`` is pip's
+	// a host reached over plaintext `http://` — where there is no TLS
+	// to verify in the first place, so `trusted-host` is pip's
 	// required opt-in to talk to a plaintext index rather than a
-	// downgrade.  The server only ever emits ``https://`` endpoints
-	// (``_validate_url`` rejects ``http``), so in practice this line is
+	// downgrade.  The server only ever emits `https://` endpoints
+	// (`_validate_url` rejects `http`), so in practice this line is
 	// omitted entirely; the gate is defence-in-depth for a hand-edited
 	// or future plaintext-mirror deployment.
 	insecureHosts := []string{}
@@ -412,17 +412,17 @@ func renderPipConf(endpoint string, extras []string, marker MarkerFields) ([]byt
 	if len(cleaned) > 0 {
 		// pip's [global] section is parsed by Python's configparser,
 		// which rejects duplicate option names with a
-		// ``DuplicateOptionError``.  ``extra-index-url`` must therefore
+		// `DuplicateOptionError`.  `extra-index-url` must therefore
 		// be a *single* option whose value is the whitespace-separated
 		// list of URLs — pip then splits on whitespace at install
-		// time.  (Initial-PR-#44 emitted one ``extra-index-url`` line
+		// time.  (Initial-PR-#44 emitted one `extra-index-url` line
 		// per URL, which configparser would refuse before pip even
 		// saw it — Copilot flag.)
 		fmt.Fprintf(&b, "extra-index-url = %s\n", strings.Join(cleaned, " "))
 	}
 	// Only emit the line at all when at least one plaintext host needs
 	// it — an HTTPS-only config (the common case) keeps full TLS
-	// verification with no ``trusted-host`` line present.
+	// verification with no `trusted-host` line present.
 	if len(insecureHosts) > 0 {
 		fmt.Fprintf(&b, "trusted-host = %s\n", strings.Join(insecureHosts, " "))
 	}
@@ -430,10 +430,10 @@ func renderPipConf(endpoint string, extras []string, marker MarkerFields) ([]byt
 }
 
 // isInsecureScheme reports whether an endpoint URL is reached over
-// plaintext ``http://``.  Used to gate the pip ``trusted-host`` line —
-// see the comment in ``renderPipConf``.  Comparison is case-insensitive
+// plaintext `http://`.  Used to gate the pip `trusted-host` line —
+// see the comment in `renderPipConf`.  Comparison is case-insensitive
 // on the scheme because URL schemes are case-insensitive (RFC 3986
-// §3.1) and a hand-edited ``HTTP://`` must not slip past the gate.
+// §3.1) and a hand-edited `HTTP://` must not slip past the gate.
 func isInsecureScheme(endpoint string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(endpoint)), "http://")
 }
@@ -448,16 +448,16 @@ func appendUniqueHost(hosts []string, h string) []string {
 }
 
 // hostOf returns the bare host (no scheme, no port) of an endpoint
-// URL.  Used for the ``trusted-host`` line.  Implemented
-// without importing ``net/url`` because the parsing is trivial and
+// URL.  Used for the `trusted-host` line.  Implemented
+// without importing `net/url` because the parsing is trivial and
 // we want stable error messages — net/url's errors include the
 // full URL on failure, which would land in operator log files
 // alongside whatever configuration secret happens to be embedded.
 func hostOf(endpoint string) (string, error) {
 	rest := endpoint
 	// URL schemes are case-insensitive (RFC 3986 §3.1); strip the
-	// scheme regardless of case so a hand-edited ``HTTP://`` resolves
-	// the same bare host as ``http://`` (and matches isInsecureScheme,
+	// scheme regardless of case so a hand-edited `HTTP://` resolves
+	// the same bare host as `http://` (and matches isInsecureScheme,
 	// which is likewise case-insensitive).
 	lower := strings.ToLower(rest)
 	for _, scheme := range []string{"https://", "http://"} {
@@ -470,11 +470,11 @@ func hostOf(endpoint string) (string, error) {
 	if i := strings.IndexAny(rest, "/?#"); i != -1 {
 		rest = rest[:i]
 	}
-	// Trim port.  pip's ``trusted-host`` does NOT accept a port —
+	// Trim port.  pip's `trusted-host` does NOT accept a port —
 	// providing host:port silently downgrades to plain host but
 	// emits a warning, which we'd rather avoid.
 	if i := strings.LastIndex(rest, ":"); i != -1 {
-		// Keep IPv6 literals (``[::1]:8080``) intact-up-to-port:
+		// Keep IPv6 literals (`[::1]:8080`) intact-up-to-port:
 		// strip only when the remaining suffix is digits.
 		port := rest[i+1:]
 		if isAllDigits(port) {

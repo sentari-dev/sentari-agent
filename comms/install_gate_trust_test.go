@@ -75,7 +75,7 @@ func TestLoadInstallGateTrust_MissingReturnsNil(t *testing.T) {
 }
 
 // TestLoadInstallGateTrust_RejectsPartialRecord: a trust file missing
-// either ``key_id`` or ``pubkey_b64`` is corrupt; loading must fail
+// either `key_id` or `pubkey_b64` is corrupt; loading must fail
 // rather than returning a record the caller would misuse.
 func TestLoadInstallGateTrust_RejectsPartialRecord(t *testing.T) {
 	dir := t.TempDir()
