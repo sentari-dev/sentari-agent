@@ -1,0 +1,96 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:00000000-0000-0000-0000-000000000000",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-05-23T12:00:00Z",
+    "tools": [
+      {
+        "vendor": "Sentari",
+        "name": "sentari-agent",
+        "version": "1.2.3-test"
+      }
+    ],
+    "component": {
+      "type": "device",
+      "bom-ref": "device-golden-host",
+      "name": "golden-host"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/requests@2.31.0",
+      "name": "requests",
+      "version": "2.31.0",
+      "purl": "pkg:pypi/requests@2.31.0",
+      "properties": [
+        {
+          "name": "sentari:install_path",
+          "value": "/opt/venv-a"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/requests@2.31.0#1",
+      "name": "requests",
+      "version": "2.31.0",
+      "purl": "pkg:pypi/requests@2.31.0",
+      "properties": [
+        {
+          "name": "sentari:install_path",
+          "value": "/opt/venv-b"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40scope/pkg@1.0.0",
+      "name": "@scope/pkg",
+      "version": "1.0.0",
+      "purl": "pkg:npm/%40scope/pkg@1.0.0",
+      "properties": [
+        {
+          "name": "sentari:install_path",
+          "value": "/srv/app/node_modules"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:maven/org.apache.commons/commons-lang3@3.14.0",
+      "name": "org.apache.commons:commons-lang3",
+      "version": "3.14.0",
+      "purl": "pkg:maven/org.apache.commons/commons-lang3@3.14.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:nuget/Newtonsoft.Json@13.0.3",
+      "name": "Newtonsoft.Json",
+      "version": "13.0.3",
+      "purl": "pkg:nuget/Newtonsoft.Json@13.0.3"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:deb/libssl3@3.0.11-1",
+      "name": "libssl3",
+      "version": "3.0.11-1",
+      "purl": "pkg:deb/libssl3@3.0.11-1"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:rpm/openssl-libs@3.0.7-24",
+      "name": "openssl-libs",
+      "version": "3.0.7-24",
+      "purl": "pkg:rpm/openssl-libs@3.0.7-24"
+    },
+    {
+      "type": "library",
+      "bom-ref": "comp-7",
+      "name": "acme-copilot",
+      "version": "0.9.0"
+    }
+  ]
+}

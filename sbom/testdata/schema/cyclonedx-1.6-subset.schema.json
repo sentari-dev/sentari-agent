@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sentari.io/schema/cyclonedx-1.6-subset.json",
+  "title": "CycloneDX 1.6 hermetic subset (sentari-agent SBOM output)",
+  "description": "A self-contained, air-gap-safe subset of the CycloneDX 1.6 JSON Schema. The upstream CycloneDX schema pulls external $ref meta-schemas (spdx.schema.json, jsf-0.82.schema.json) that cannot resolve offline under the CGO_ENABLED=0 / air-gap charter, so this schema inlines no external refs. It asserts the STRUCTURE the agent actually emits (see sbom/cyclonedx.go): the required top-level fields and the shape of every component. additionalProperties is permitted so a future field addition is caught by the golden byte-compare, not by this structural gate.",
+  "type": "object",
+  "required": ["bomFormat", "specVersion", "version", "metadata", "components"],
+  "properties": {
+    "bomFormat": { "const": "CycloneDX" },
+    "specVersion": { "const": "1.6" },
+    "serialNumber": { "type": "string", "pattern": "^urn:uuid:[0-9a-fA-F-]{36}$" },
+    "version": { "type": "integer", "minimum": 1 },
+    "metadata": {
+      "type": "object",
+      "required": ["timestamp", "tools"],
+      "properties": {
+        "timestamp": { "type": "string", "minLength": 1 },
+        "tools": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["vendor", "name", "version"],
+            "properties": {
+              "vendor": { "type": "string" },
+              "name": { "type": "string" },
+              "version": { "type": "string" }
+            }
+          }
+        },
+        "component": {
+          "type": "object",
+          "required": ["type", "name"],
+          "properties": {
+            "type": { "type": "string" },
+            "bom-ref": { "type": "string" },
+            "name": { "type": "string" }
+          }
+        }
+      }
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "name"],
+        "properties": {
+          "type": { "type": "string", "minLength": 1 },
+          "bom-ref": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "version": { "type": "string" },
+          "purl": { "type": "string", "pattern": "^pkg:" },
+          "properties": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "value"],
+              "properties": {
+                "name": { "type": "string" },
+                "value": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

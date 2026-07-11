@@ -112,6 +112,28 @@ against an allow-list before it reaches `sc.exe`).
   confirmation — if the detached-helper timing proves unreliable, fall back to
   documenting manual restart.
 
+### 8. SCM service dispatch (start / stop) — **[host — primary]**
+When launched by the Service Control Manager, `--serve` calls the Windows
+service dispatcher (`svc.Run`) and reports StartPending → Running → StopPending →
+Stopped. Without this the SCM kills the process with **error 1053** ("the service
+did not respond to the start or control request in a timely fashion") and it
+crash-loops. A Stop request cancels the same root context that SIGTERM cancels on
+POSIX, so the current scan cycle drains before the process exits. When the binary
+is instead run from a console window (`svc.IsWindowsService()` is false) it falls
+through to the ordinary SIGINT/SIGTERM path unchanged.
+
+- **Verify (start):** `sc start SentariAgent` (or reboot with Automatic start) and
+  confirm `sc query SentariAgent` reports `STATE : 4 RUNNING` — **no error 1053**
+  in Event Viewer, no restart loop.
+- **Verify (stop):** `sc stop SentariAgent` and confirm the service transitions
+  through `STOP_PENDING` to `STOPPED` cleanly (exit code 0) rather than being
+  force-terminated after the SCM timeout.
+- **Verify (console):** run `sentari-agent.exe --serve …` directly in a console
+  and confirm Ctrl-C still shuts it down gracefully (console path unchanged).
+- The Stop→cancel→StopPending state transition is unit-tested host-independently
+  (`serviceControlLoop`, `service_state_test.go`); this checkpoint validates the
+  real SCM dispatch that can only be exercised on Windows.
+
 ## Regression surface already covered by CI (Linux, go 1.23)
 `go vet ./...`, `go test ./... -race`, and OSS + enterprise builds all pass. The
 full test suite — including the new `common/secureperm`, path-normalisation, and

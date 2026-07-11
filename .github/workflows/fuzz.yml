@@ -1,0 +1,88 @@
+name: Fuzz
+
+# Continuous fuzzing of the scan-path parsers. Each Fuzz* target reads
+# attacker-influenceable bytes off the local filesystem (yarn.lock,
+# requirements.txt, METADATA, MANIFEST.MF, rpmdb blobs, JAR members), so a
+# panic or hang in any of them is a fleet-wide DoS on the scan cycle.
+#
+# The main CI (ci.yml) only replays the inline f.Add seeds + the tracked
+# testdata/fuzz corpus during normal `go test`. This workflow actually
+# *mutates* — it runs each target under `-fuzz` for a bounded time so new
+# code paths get explored. It is green-by-default: bounded fuzztime, no
+# open-ended runs. A discovered crasher is written to
+# <pkg>/testdata/fuzz/<Name>/ and makes `go test` exit non-zero, which fails
+# the job — commit that reproducer to turn the crash into a tracked
+# regression case.
+
+on:
+  # Nightly deep-ish pass across every target.
+  schedule:
+    - cron: "0 3 * * *"
+  # Cheap bounded pass on any PR that touches the parsers or this workflow.
+  pull_request:
+    branches: [main]
+    paths:
+      - "scanner/**/*.go"
+      - ".github/workflows/fuzz.yml"
+  # Allow manual runs.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      # Run every target even if one finds a crasher, so a single failure
+      # doesn't mask crashers in the other parsers.
+      fail-fast: false
+      matrix:
+        include:
+          - { target: FuzzNormalizeLicense, pkg: ./scanner/ }
+          - { target: FuzzExtractLicenseFromMetadata, pkg: ./scanner/ }
+          - { target: FuzzExtractLicenseFromDebCopyright, pkg: ./scanner/ }
+          - { target: FuzzExtractLicenseFromCondaJSON, pkg: ./scanner/ }
+          - { target: FuzzParseCondaPackageMetadata, pkg: ./scanner/ }
+          - { target: FuzzParseRPMHeader, pkg: ./scanner/ }
+          - { target: FuzzScanDebianViaStatusFile, pkg: ./scanner/ }
+          - { target: FuzzParseYarnV1, pkg: ./scanner/deptree/ }
+          - { target: FuzzParseRequirementsTxt, pkg: ./scanner/deptree/ }
+          - { target: FuzzParseNpmPackageLock, pkg: ./scanner/deptree/ }
+          - { target: FuzzParsePnpmLock, pkg: ./scanner/deptree/ }
+          - { target: FuzzParseNuGetProjectAssets, pkg: ./scanner/deptree/ }
+          - { target: FuzzParseMavenPom, pkg: ./scanner/deptree/ }
+          - { target: FuzzParseUvLock, pkg: ./scanner/deptree/ }
+          - { target: FuzzParsePoetryLock, pkg: ./scanner/deptree/ }
+          - { target: FuzzParsePipfileLock, pkg: ./scanner/deptree/ }
+          - { target: FuzzParseNuGetPackagesLock, pkg: ./scanner/deptree/ }
+          - { target: FuzzDetectNpmManifest, pkg: ./scanner/supplychain/ }
+          - { target: FuzzDetectNuspecManifest, pkg: ./scanner/supplychain/ }
+          - { target: FuzzParsePomProperties, pkg: ./scanner/jvm/ }
+          - { target: FuzzParseManifest, pkg: ./scanner/jvm/ }
+          - { target: FuzzExtractFromJar, pkg: ./scanner/jvm/ }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.23"
+
+      # -run='^$' skips the unit tests; -fuzz is anchored to exactly one
+      # target; -fuzztime bounds the run so the job stays green-by-default.
+      # A crasher is written under testdata/fuzz/ and fails this step.
+      - name: Fuzz ${{ matrix.target }}
+        run: >-
+          go test -run='^$'
+          -fuzz='^${{ matrix.target }}$'
+          -fuzztime=30s
+          ${{ matrix.pkg }}
+
+      # Surface any reproducer the run may have written so it can be pulled
+      # from the failed run and committed as a regression seed.
+      - name: Upload discovered crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers-${{ matrix.target }}
+          path: scanner/**/testdata/fuzz/${{ matrix.target }}/
+          if-no-files-found: ignore

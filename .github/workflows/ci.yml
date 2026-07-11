@@ -18,11 +18,110 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Vet (Enterprise)
+        run: go vet -tags enterprise ./...
+
+      # Vet the enterprise build for the windows target from the fast Linux
+      # job. `go vet` type-checks (and runs its analyzers over) the
+      # windows && enterprise files — service_windows.go et al. — which a
+      # plain cross-BUILD only compiles. This surfaces vet-class issues
+      # (printf, unused, unreachable) in Windows-only enterprise code on
+      # every PR without waiting for the windows job.
+      - name: Vet (Windows, Enterprise)
+        run: GOOS=windows GOARCH=amd64 go vet -tags enterprise ./...
+
       - name: Test
         run: go test ./... -v -race
+
+      - name: Test (Enterprise)
+        run: go test -tags enterprise ./cmd/... -v -race
 
       - name: Build (OSS)
         run: CGO_ENABLED=0 go build ./cmd/sentari-agent/
 
       - name: Build (Enterprise)
         run: CGO_ENABLED=0 go build -tags enterprise ./cmd/sentari-agent/
+
+      # Cross-compile smoke tests so that _windows.go compile errors surface on
+      # every PR from the fast Linux job (the windows job below is the real
+      # test-runner, but these builds fail fast and cheaply).
+      - name: Cross-build Windows amd64 (OSS)
+        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/sentari-agent/
+
+      - name: Cross-build Windows amd64 (Enterprise)
+        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -tags enterprise -o /dev/null ./cmd/sentari-agent/
+
+      # Cross-vet the darwin target from the fast Linux job, mirroring the
+      # windows cross-vet above. `go vet` type-checks (and runs its analyzers
+      # over) the darwin-gated files — safeio_darwin.go, mounts_darwin.go,
+      # restart_darwin.go, the pathfilter darwin cloud-sync exclusions, etc. —
+      # which a plain cross-BUILD only compiles. Surfaces vet-class issues in
+      # macOS-only code on every PR without waiting for the macos job below.
+      - name: Vet (Darwin, cross)
+        run: GOOS=darwin GOARCH=arm64 go vet ./...
+
+      - name: Vet (Darwin, Enterprise, cross)
+        run: GOOS=darwin GOARCH=arm64 go vet -tags enterprise ./...
+
+  # macOS (darwin) tests have NEVER run in CI before this job was added. The
+  # _darwin.go code (safeio_darwin, mounts_darwin, restart_darwin, the
+  # pathfilter darwin cloud-sync exclusions, etc.) was only ever cross-compiled
+  # from Linux, never executed. This job runs the untagged suite plus the
+  # enterprise cmd tests natively on macOS for the first time. If it reveals
+  # genuinely macOS-only test failures, they must be FIXED, not skipped or
+  # marked continue-on-error — same rule as the windows job.
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.23"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Vet (Enterprise)
+        run: go vet -tags enterprise ./...
+
+      - name: Test
+        run: go test ./... -v -race
+
+      - name: Test (Enterprise)
+        run: go test -tags enterprise ./cmd/... -v -race
+
+      - name: Build (OSS)
+        run: CGO_ENABLED=0 go build ./cmd/sentari-agent/
+
+      - name: Build (Enterprise)
+        run: CGO_ENABLED=0 go build -tags enterprise ./cmd/sentari-agent/
+
+  # Windows tests have NEVER run in CI before this job was added. The _windows.go
+  # security code (secureperm, safeio, openexcl, service, etc.) was only ever
+  # cross-compiled from Linux, never executed. If this job reveals genuinely
+  # Windows-only test failures, they must be FIXED, not skipped or marked
+  # continue-on-error.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.23"
+
+      - name: Vet
+        run: go vet ./...
+
+      # The windows && enterprise production code (service_windows.go, the
+      # Windows service-control plumbing, etc.) is only reachable with the
+      # enterprise build tag. Without these steps it would be vetted/run
+      # nowhere: the OSS windows steps skip it and the Linux enterprise
+      # steps target a different GOOS. Vet and test it natively here.
+      - name: Vet (Enterprise)
+        run: go vet -tags enterprise ./...
+
+      - name: Test
+        run: go test ./... -v -race
+
+      - name: Test (Enterprise)
+        run: go test -tags enterprise ./cmd/... -v -race
