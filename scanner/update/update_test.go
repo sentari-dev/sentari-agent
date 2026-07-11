@@ -180,6 +180,9 @@ func TestCheck_404TreatedAsNoUpgrade(t *testing.T) {
 }
 
 func TestApply_downloadAndAtomicReplaceWithRollback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apply self-update path is unix-only; Windows uses install.ps1 — see TestApply_refusesOnWindows")
+	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	body := []byte("#!fake-binary v0.2.0\n" + strings.Repeat("x", 4096))
 	srv := envelopeServer(t, "primary", priv, "0.2.0", body)
@@ -247,6 +250,9 @@ func TestApply_downloadAndAtomicReplaceWithRollback(t *testing.T) {
 }
 
 func TestApply_sha256MismatchAborts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apply self-update path is unix-only; Windows uses install.ps1 — see TestApply_refusesOnWindows")
+	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	body := []byte("real-body")
 	srv := envelopeServer(t, "primary", priv, "0.2.0", body)

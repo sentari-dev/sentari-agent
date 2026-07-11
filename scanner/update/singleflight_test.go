@@ -71,6 +71,9 @@ func TestAcquireApplyLock_reclaimsStaleLock(t *testing.T) {
 // guard the second apply is refused as a replay (it sees the first's
 // advanced high-water mark) and never runs the destructive swap.
 func TestApply_singleFlightPreservesRollbackBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apply self-update path is unix-only; Windows uses install.ps1 — see TestApply_refusesOnWindows")
+	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	body := []byte("binary-0.3.0")
 	srv := signedManifestServer(t, "primary", priv, "0.3.0", "0.1.0", "2026-05-22T12:00:00Z", body)

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -87,13 +88,18 @@ func TestRunOneShotWritesJSONToFile(t *testing.T) {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatalf("output is not valid JSON (format not resolved to json?): %v\n%s", err, string(data))
 	}
-	// The 0600 file-perm contract for scan payloads on shared hosts.
-	info, err := os.Stat(outPath)
-	if err != nil {
-		t.Fatalf("stat output: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("output file perm = %o, want 600", perm)
+	// The 0600 file-perm contract for scan payloads on shared hosts.  Windows
+	// maps NTFS ACLs onto a fixed 0666 mode for writable files and cannot honor
+	// unix permission bits, so the perm assertion is unix-only; the rest of the
+	// test (exit code, JSON written) still runs on Windows.
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(outPath)
+		if err != nil {
+			t.Fatalf("stat output: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("output file perm = %o, want 600", perm)
+		}
 	}
 }
 

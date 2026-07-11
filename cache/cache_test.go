@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1051,6 +1052,9 @@ func TestOpenResilientHappyPathNoRecovery(t *testing.T) {
 // error would orphan weeks of pending offline scans the first time the disk
 // fills or a permission bit is wrong (finding offline-1).
 func TestOpenResilientDoesNotQuarantineOnTransientError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based transient-open-fault injection is unix-only; the transient-error handling path is exercised on linux/darwin CI")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: chmod 000 does not deny access")
 	}
@@ -1489,6 +1493,9 @@ func TestEnqueueScanErrorsOnInsertFailure(t *testing.T) {
 // after the fault clears — succeeds WITHOUT a process restart and with the
 // pending backlog INTACT (the healthy on-disk file was never quarantined).
 func TestReopenTransientFailureIsRetryableNotPermanentlyDead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based transient-open-fault injection is unix-only; the transient-error handling path is exercised on linux/darwin CI")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: chmod 000 does not deny access")
 	}

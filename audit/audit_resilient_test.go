@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -170,6 +171,9 @@ func TestAuditOpenResilientHappyPath(t *testing.T) {
 // history is never abandoned over a transient disk/permission blip (finding
 // offline-3, sharing the offline-1 corruption gate).
 func TestAuditOpenResilientDoesNotQuarantineOnTransientError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based transient-open-fault injection is unix-only; the transient-error handling path is exercised on linux/darwin CI")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: chmod 000 does not deny access")
 	}

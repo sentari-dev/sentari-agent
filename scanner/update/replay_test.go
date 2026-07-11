@@ -61,6 +61,9 @@ func TestApply_recordsAndEnforcesHighWaterMark(t *testing.T) {
 }
 
 func TestApply_refusesReplayOfOlderServedAt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apply self-update path is unix-only; Windows uses install.ps1 — see TestApply_refusesOnWindows")
+	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	tmp := t.TempDir()
 	installPath := filepath.Join(tmp, "sentari-agent")
@@ -93,6 +96,9 @@ func TestApply_refusesReplayOfOlderServedAt(t *testing.T) {
 }
 
 func TestApply_refusesReplayOfOlderVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apply self-update path is unix-only; Windows uses install.ps1 — see TestApply_refusesOnWindows")
+	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	tmp := t.TempDir()
 	installPath := filepath.Join(tmp, "sentari-agent")
