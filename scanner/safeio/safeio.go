@@ -11,20 +11,39 @@
 // through ReadFile below.
 //
 // Policy:
-//   - Refuse to read a path whose leaf entry is a symbolic link.
+//   - Refuse to read a path whose leaf entry is a symbolic link — and,
+//     on Linux 5.6+, a symbolic link at ANY path component (see below).
 //   - Refuse to read a file larger than maxSize — the caller-supplied
 //     budget is a hard ceiling; we never return a partial file.
-//   - On Linux / macOS / BSD the kernel enforces the symlink refusal
-//     via O_NOFOLLOW (returns ELOOP at open time).  On Windows we
-//     Lstat first and bail if ModeSymlink is set.
+//   - Refuse a non-regular file (directory, FIFO, device node, socket).
 //
-// Known residual risk: intermediate directory components that are
-// symbolic links.  The leaf check alone does not catch
-// ``/usr/share/doc/mypkg -> /etc`` followed by a benign leaf; a fully
-// resolved-beneath variant would require openat2 on Linux 5.6+ and
-// equivalent primitives elsewhere.  In practice the threat model we
-// care about is the single-leaf symlink attack, which the leaf check
-// fully covers.  See docs/ when that stronger primitive lands.
+// Symlink refusal is enforced by validating the object we actually
+// opened, never a prior path lookup, so there is no check-then-open
+// TOCTOU window.  The exact primitive differs per platform:
+//   - Linux (primary): openat2(2) with RESOLVE_NO_SYMLINKS refuses a
+//     symlink at EVERY component atomically in the kernel — leaf and
+//     intermediate directories alike.  See safeio_linux.go.
+//   - Linux (fallback) / macOS / BSD: no openat2, so O_NOFOLLOW refuses
+//     a symlink at the LEAF only (the kernel returns ELOOP/EMLINK at
+//     open).  Linux degrades to this only on pre-5.6 kernels or when a
+//     seccomp filter blocks openat2.  See safeio_unix.go.
+//   - Windows: there is no O_NOFOLLOW.  CreateFile with
+//     FILE_FLAG_OPEN_REPARSE_POINT opens the leaf itself rather than
+//     following it, then GetFileInformationByHandle inspects the handle
+//     we already hold; a FILE_ATTRIBUTE_REPARSE_POINT leaf is refused.
+//     This handle-validated check-after-open replaces an earlier
+//     Lstat-then-open approach that carried a TOCTOU window (a leaf
+//     swapped between the stat and the open would have been followed).
+//     See safeio_windows.go.
+//
+// Residual risk (fallback / macOS / BSD / Windows ONLY): a symlinked
+// INTERMEDIATE directory component is still resolved on those paths, so
+// `/usr/share/doc/mypkg -> /etc` followed by a benign leaf would be
+// followed.  The Linux openat2 primary path closes this gap entirely; a
+// fully resolved-beneath variant elsewhere would need a per-component
+// handle walk (no portable primitive exists).  The threat model we care
+// about — the single-leaf symlink swap — is fully covered on every
+// platform.
 package safeio
 
 import (
@@ -32,6 +51,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 )
 
 // ErrSymlink is the sentinel error returned when a path or its leaf
@@ -118,23 +138,83 @@ func ReadFile(path string, maxSize int64) ([]byte, error) {
 // symlink pointing at an arbitrary path; following it with os.ReadDir
 // would enumerate that target instead.
 //
-// ReadDir Lstat-checks the path before listing.  If path is a symlink,
-// returns (nil, ErrSymlink).  If path is not a directory, returns
-// (nil, ErrNotRegular) so callers can distinguish "absent" from
-// "wrong type".  On success the entries are sorted by name (matching
-// the os.ReadDir contract).
+// Like ReadFile, the symlink refusal is enforced on the object we
+// actually opened, never a prior path lookup: openNoFollowDir opens the
+// directory with a symlink-refusing primitive (Linux openat2 with
+// RESOLVE_NO_SYMLINKS as the primary, O_NOFOLLOW fallback; Windows
+// FILE_FLAG_OPEN_REPARSE_POINT), we fstat the HELD fd to confirm it is a
+// real directory, and we enumerate that same fd via (*os.File).ReadDir.
+// The type check and the listing therefore operate on one inode with no
+// second path resolution — closing the check-then-use TOCTOU window that
+// the earlier Lstat-then-os.ReadDir implementation left open (a leaf
+// swapped for a symlink between the Lstat and the ReadDir would have been
+// followed).
+//
+// If path's leaf is a symlink, returns (nil, ErrSymlink).  If path is not
+// a directory, returns (nil, ErrNotRegular) so callers can distinguish
+// "absent" from "wrong type".  On success the entries are sorted by name
+// (matching the os.ReadDir contract — (*os.File).ReadDir returns them in
+// directory order, so we sort here).
+//
+// Scope of the refusal — same per-platform split as ReadFile (see the
+// package doc):
+//   - Linux (primary): openat2 with RESOLVE_NO_SYMLINKS refuses a symlink
+//     at ANY path component — leaf and intermediate directories alike, so
+//     an ancestor symlink can no longer redirect the enumeration.
+//   - Linux fallback (pre-5.6 / openat2-blocked), macOS/BSD, Windows:
+//     the leaf-only O_NOFOLLOW / reparse-point guard refuses only a
+//     symlinked leaf; ancestor components are still resolved through any
+//     symlinks they contain.  This residual is identical to ReadFile's
+//     fallback residual — there is no portable resolve-beneath primitive
+//     for enumeration on these platforms.
+//
+// When to use ReadDir vs a raw os.ReadDir — a deliberate, per-callsite
+// judgment in the scanner tree:
+//   - Use ReadDir for a freshly-constructed package-manager metadata or
+//     version directory that is NEVER legitimately a symlink (e.g. an
+//     ~/.m2 groupId/artifactId dir, a conda-meta dir).  A planted
+//     symlink there can only be an attacker redirecting enumeration.
+//   - Do NOT use ReadDir for locations that are commonly REAL symlinks
+//     in the wild — venv/site-packages, pnpm's virtual store, Homebrew
+//     Cellar, JDK homes, pyenv/asdf/nvm version roots, usr-merge system
+//     dirs (/usr/lib64 -> lib), Docker data-roots, or an operator-
+//     supplied scan/data root.  Refusing those would reintroduce the
+//     false-negative (missed-package) class.  Such sites instead
+//     enumerate with os.ReadDir and skip symlinked ENTRIES per item
+//     (see the npm/nuget plugins), which guards traversal without
+//     refusing a legitimately-symlinked container directory.  Leaf FILE
+//     reads under any of these already go through ReadFile/Open, so the
+//     residual exfil risk of enumerating one is limited to filenames.
 func ReadDir(path string) ([]os.DirEntry, error) {
-	info, err := os.Lstat(path)
+	f, err := openNoFollowDir(path)
 	if err != nil {
 		return nil, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("%w: %s", ErrSymlink, path)
+	defer f.Close()
+
+	// Confirm the object we opened is a directory by inspecting the HELD
+	// fd — never a second path lookup.  On unix openNoFollowDir already
+	// passes O_DIRECTORY (a non-dir fails ENOTDIR at open), so this is
+	// defence-in-depth there; on Windows it is the primary type check for
+	// a FIFO/file/device planted at the path.
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%w: %s is not a directory", ErrNotRegular, path)
 	}
-	return os.ReadDir(path)
+
+	// Enumerate the SAME fd: no path is resolved a second time, so a swap
+	// to a symlink after the open cannot redirect the listing.
+	// (*os.File).ReadDir(-1) returns entries in directory order; sort by
+	// name to preserve the os.ReadDir contract callers depend on.
+	entries, err := f.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	return entries, nil
 }
 
 // Open opens path for reading, refusing to follow a symbolic link at

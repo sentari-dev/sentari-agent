@@ -228,6 +228,58 @@ func TestWrite_NilResult(t *testing.T) {
 	}
 }
 
+// failingWriter fails every Write after `okBytes` bytes have been
+// accepted, simulating a full disk / broken pipe partway through
+// the output.  okBytes==0 fails on the very first Write.
+type failingWriter struct {
+	okBytes int
+	written int
+}
+
+var errDiskFull = errors.New("simulated write failure")
+
+func (fw *failingWriter) Write(p []byte) (int, error) {
+	if fw.written >= fw.okBytes {
+		return 0, errDiskFull
+	}
+	remaining := fw.okBytes - fw.written
+	if len(p) <= remaining {
+		fw.written += len(p)
+		return len(p), nil
+	}
+	fw.written = fw.okBytes
+	return remaining, errDiskFull
+}
+
+// TestWrite_Pretty_PropagatesWriteError: when the underlying writer
+// fails mid-output, the summary formatter must return that error
+// rather than reporting success and silently dropping data (a full
+// disk or broken pipe must not read as a clean scan write).
+func TestWrite_Pretty_PropagatesWriteError(t *testing.T) {
+	// Fail on the very first write.
+	if err := Write(&failingWriter{okBytes: 0}, fixtureResult(), FormatPretty); !errors.Is(err, errDiskFull) {
+		t.Errorf("expected write error to propagate on first-byte failure; got %v", err)
+	}
+	// Fail partway through (after the header lines).
+	if err := Write(&failingWriter{okBytes: 40}, fixtureResult(), FormatPretty); !errors.Is(err, errDiskFull) {
+		t.Errorf("expected write error to propagate on mid-output failure; got %v", err)
+	}
+}
+
+// TestWrite_Explain_PropagatesWriteError: the explain formatter must
+// also surface a failed write, whether it fails inside the shared
+// summary prologue or later in the highlight blocks.
+func TestWrite_Explain_PropagatesWriteError(t *testing.T) {
+	// Fail on the very first write (inside the summary prologue).
+	if err := Write(&failingWriter{okBytes: 0}, fixtureResult(), FormatExplain); !errors.Is(err, errDiskFull) {
+		t.Errorf("expected write error to propagate from summary prologue; got %v", err)
+	}
+	// Let the whole summary through, then fail in the highlight blocks.
+	if err := Write(&failingWriter{okBytes: 200}, fixtureResult(), FormatExplain); !errors.Is(err, errDiskFull) {
+		t.Errorf("expected write error to propagate from explain highlights; got %v", err)
+	}
+}
+
 // TestWrite_Explain_RecentInstallsCapAt20: with 50 recent installs
 // the explain output shows at most 20 detail lines and appends
 // exactly one "and N more" footer.  Catches the regression where

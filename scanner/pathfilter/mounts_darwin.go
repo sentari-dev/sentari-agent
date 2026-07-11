@@ -16,19 +16,19 @@ import (
 // Sources:
 //   - <sys/mount.h> MNT_* defines
 //   - mount(8) man page (FILESYSTEMS section)
-//   - osxfuse / macfuse exposes ``fuse`` as the fstype
+//   - osxfuse / macfuse exposes `fuse` as the fstype
 var networkFstypes = map[string]struct{}{
-	"nfs":      {},
-	"smbfs":    {},
-	"cifs":     {},
-	"afpfs":    {}, // legacy AppleTalk Filing Protocol
-	"webdav":   {},
-	"autofs":   {},
-	"fuse":     {}, // covers sshfs, rclone, s3fs, restic, etc.
-	"macfuse":  {},
-	"osxfuse":  {},
-	"acfs":     {}, // Xsan / acfs
-	"nullfs":   {}, // sometimes wraps network mounts
+	"nfs":     {},
+	"smbfs":   {},
+	"cifs":    {},
+	"afpfs":   {}, // legacy AppleTalk Filing Protocol
+	"webdav":  {},
+	"autofs":  {},
+	"fuse":    {}, // covers sshfs, rclone, s3fs, restic, etc.
+	"macfuse": {},
+	"osxfuse": {},
+	"acfs":    {}, // Xsan / acfs
+	"nullfs":  {}, // sometimes wraps network mounts
 }
 
 // IsNetworkFilesystem reports whether path lives on a network mount.

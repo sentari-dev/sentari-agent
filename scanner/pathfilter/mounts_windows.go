@@ -26,8 +26,8 @@ func IsNetworkFilesystem(path string) (bool, error) {
 		return true, nil
 	}
 
-	// Extract the volume root (e.g. ``C:\``).  filepath.VolumeName on
-	// windows returns ``C:`` for ``C:\foo``; append a backslash so
+	// Extract the volume root (e.g. `C:\`).  filepath.VolumeName on
+	// windows returns `C:` for `C:\foo`; append a backslash so
 	// GetDriveType treats it as a root path.
 	vol := filepath.VolumeName(clean)
 	if vol == "" {
