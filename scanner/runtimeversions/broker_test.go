@@ -69,6 +69,27 @@ func TestDetectRabbitMQFromPkg_NoDuplicatesAcrossSiblingDirs(t *testing.T) {
 	}
 }
 
+// TestDetectRabbitMQ_DirVersionPreferredOverPkgVersion guards the fix for a
+// tarball install coexisting with an unrelated OS package record: a
+// versioned rabbitmq_server-<ver> directory must report the dir-encoded
+// version, not pkgVersion("rabbitmq-server"), even when both are present.
+func TestDetectRabbitMQ_DirVersionPreferredOverPkgVersion(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "rabbitmq_server-3.11.0")
+	must(t, os.MkdirAll(dir, 0o755))
+	got := DetectAllBrokers(context.Background(), []string{parent},
+		func(n string) string {
+			if n == "rabbitmq-server" {
+				return "3.12.0"
+			}
+			return ""
+		})
+	r, ok := findBroker(got, "rabbitmq")
+	if !ok || r.Version != "3.11.0" {
+		t.Fatalf("expected rabbitmq 3.11.0 (dir-encoded, not pkg 3.12.0), got %+v", got)
+	}
+}
+
 func TestDetectKafkaFromJar(t *testing.T) {
 	dir := t.TempDir()
 	inst := filepath.Join(dir, "kafka")

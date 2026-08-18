@@ -10,10 +10,18 @@ import (
 func TestEnrichWithV3_DetectsKafka(t *testing.T) {
 	root := t.TempDir()
 	inst := filepath.Join(root, "kafka")
-	_ = os.MkdirAll(filepath.Join(inst, "bin"), 0o755)
-	_ = os.MkdirAll(filepath.Join(inst, "libs"), 0o755)
-	_ = os.WriteFile(filepath.Join(inst, "bin", "kafka-server-start.sh"), []byte("#!/bin/sh"), 0o644)
-	_ = os.WriteFile(filepath.Join(inst, "libs", "kafka_2.13-3.7.0.jar"), []byte("x"), 0o644)
+	if err := os.MkdirAll(filepath.Join(inst, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(inst, "libs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inst, "bin", "kafka-server-start.sh"), []byte("#!/bin/sh"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inst, "libs", "kafka_2.13-3.7.0.jar"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	result := &ScanResult{}
 	enrichWithV3(context.Background(), result, []string{root}, root)

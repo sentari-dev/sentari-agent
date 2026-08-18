@@ -93,11 +93,16 @@ func classifyBroker(dir string, pkgVersion func(name string) string) (InstalledR
 	// layout) is instead handled once in DetectAllBrokers below.
 	if isFile(filepath.Join(dir, "sbin", "rabbitmq-server")) ||
 		_rabbitDirRE.MatchString(filepath.Base(dir)) {
-		v := pkgVersion("rabbitmq-server")
+		// Prefer the directory-encoded version over the OS-package version:
+		// a versioned tarball dir (e.g. /opt/rabbitmq_server-3.11.0) can
+		// coexist with an unrelated OS package install, and the dir name is
+		// the more specific signal for what's actually installed at dir.
+		v := ""
+		if m := _rabbitDirRE.FindStringSubmatch(filepath.Base(dir)); m != nil {
+			v = m[1]
+		}
 		if v == "" {
-			if m := _rabbitDirRE.FindStringSubmatch(filepath.Base(dir)); m != nil {
-				v = m[1]
-			}
+			v = pkgVersion("rabbitmq-server")
 		}
 		return mk("rabbitmq", v, "RabbitMQ", dir), true
 	}

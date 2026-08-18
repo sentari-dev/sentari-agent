@@ -217,8 +217,8 @@ Other runtimes are reserved for future phases.
 | activemq         | `5.18.3`  | `5.18` | Major.minor, then major.¹ |
 | activemq-artemis | `2.33.0`  | `2.33` | Major.minor, then major.¹ |
 
-¹ For application servers and web servers the agent-derived `cycle` is
-**advisory**.
+¹ For application servers, web servers, and message brokers the
+agent-derived `cycle` is **advisory**.
 endoflife.date cohort granularity is inconsistent per product (Tomcat `10.1`
 but also `7`; JBoss EAP `7` but also `4.3`; Jetty `12.0` but also `11`), so the
 server resolves the authoritative cohort against the synced feed by

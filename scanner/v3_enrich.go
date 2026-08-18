@@ -555,25 +555,27 @@ func enrichWithV3(ctx context.Context, result *ScanResult, roots []string, scanR
 		)
 	})
 
+	// sysPkgVersion cross-references the already-scanned OS packages so
+	// apt/yum installs report an exact version. Computed once and shared by
+	// the web-server and broker detectors below (each used to call
+	// indexSystemPackageVersions separately, walking result.Packages twice).
+	sysPkgVersion := indexSystemPackageVersions(result.Packages)
+
 	// --- web servers (nginx, Apache HTTPD, IIS) ---
-	// Detected for runtime-EOL correlation. pkgVersion cross-references the
-	// already-scanned OS packages so apt/yum installs report an exact version.
+	// Detected for runtime-EOL correlation.
 	safeCall("runtimeversions.WebServers", func() {
-		pkgVersion := indexSystemPackageVersions(result.Packages)
 		result.InstalledRuntimes = append(
 			result.InstalledRuntimes,
-			runtimeversions.DetectAllWebServers(ctx, webServerCandidateRoots(roots), pkgVersion)...,
+			runtimeversions.DetectAllWebServers(ctx, webServerCandidateRoots(roots), sysPkgVersion)...,
 		)
 	})
 
 	// --- message brokers (RabbitMQ, Kafka, ActiveMQ Classic/Artemis) ---
-	// Detected for runtime-EOL correlation. pkgVersion cross-references the
-	// already-scanned OS packages so apt/yum installs report an exact version.
+	// Detected for runtime-EOL correlation.
 	safeCall("runtimeversions.Brokers", func() {
-		pkgVersion := indexSystemPackageVersions(result.Packages)
 		result.InstalledRuntimes = append(
 			result.InstalledRuntimes,
-			runtimeversions.DetectAllBrokers(ctx, brokerCandidateRoots(roots), pkgVersion)...,
+			runtimeversions.DetectAllBrokers(ctx, brokerCandidateRoots(roots), sysPkgVersion)...,
 		)
 	})
 }
