@@ -81,6 +81,29 @@ func WebServerRuntimeNames() []string {
 	return names
 }
 
+// brokers is the set of message-broker runtime names. Their cycle, like the
+// app-server and web-server sets, is derived best-effort here (major.minor,
+// then major).
+var brokers = map[string]bool{
+	"rabbitmq": true, "kafka": true, "activemq": true, "activemq-artemis": true,
+}
+
+// BrokerRuntimeNames returns the sorted set of message-broker runtime names
+// the agent can emit — the keys of the brokers map. Mirrors
+// WebServerRuntimeNames(): the v3-contract drift guard derives its
+// cross-check set from this, so adding a new broker value to brokers
+// automatically forces the shared schema enum
+// (docs/contracts/agent-scan-payload-v3.json) to list it or the guard
+// fails.
+func BrokerRuntimeNames() []string {
+	names := make([]string, 0, len(brokers))
+	for n := range brokers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // CycleFor returns the EOL cycle for a (runtime, version) tuple, or "unknown" on
 // parse failure. Language-runtime derivation matches the server's
 // server/services/runtime_eol_cycle.py exactly. App-server derivation is a
@@ -108,7 +131,7 @@ func CycleFor(runtime, version string) string {
 			return m[1]
 		}
 	default:
-		if appServers[runtime] || webServers[runtime] {
+		if appServers[runtime] || webServers[runtime] || brokers[runtime] {
 			if m := majorMinorRe.FindStringSubmatch(version); m != nil {
 				return m[1] + "." + m[2]
 			}

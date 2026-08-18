@@ -57,6 +57,30 @@ import (
 	"github.com/sentari-dev/sentari-agent/scanner/supplychain"
 )
 
+// indexSystemPackageVersions pre-indexes pkgs by OS-package (deb/rpm) name
+// so per-directory runtime detectors (web servers, message brokers) can
+// cross-reference an already-scanned package version without an O(dirs*pkgs)
+// rescan. Versions are epoch-stripped ("1:2.4.58" -> "2.4.58") so cycle
+// derivation and server-side feed matching see a clean version. First
+// occurrence of a given package name wins.
+func indexSystemPackageVersions(pkgs []PackageRecord) func(name string) string {
+	m := make(map[string]string)
+	for _, pkg := range pkgs {
+		if pkg.EnvType != EnvSystemDeb && pkg.EnvType != EnvSystemRpm {
+			continue
+		}
+		if _, seen := m[pkg.Name]; seen {
+			continue
+		}
+		v := pkg.Version
+		if i := strings.IndexByte(v, ':'); i >= 0 {
+			v = v[i+1:]
+		}
+		m[pkg.Name] = v
+	}
+	return func(name string) string { return m[name] }
+}
+
 // safeCall runs fn and absorbs any panic, logging it with a label so
 // the underlying bug surfaces in fleet telemetry without aborting the
 // scan.  This is the implementation of the panic-safety guarantee
@@ -531,31 +555,27 @@ func enrichWithV3(ctx context.Context, result *ScanResult, roots []string, scanR
 		)
 	})
 
+	// sysPkgVersion cross-references the already-scanned OS packages so
+	// apt/yum installs report an exact version. Computed once and shared by
+	// the web-server and broker detectors below (each used to call
+	// indexSystemPackageVersions separately, walking result.Packages twice).
+	sysPkgVersion := indexSystemPackageVersions(result.Packages)
+
 	// --- web servers (nginx, Apache HTTPD, IIS) ---
-	// Detected for runtime-EOL correlation. pkgVersion cross-references the
-	// already-scanned OS packages so apt/yum installs report an exact version.
+	// Detected for runtime-EOL correlation.
 	safeCall("runtimeversions.WebServers", func() {
-		// Pre-index OS-package versions once (avoid O(dirs*pkgs) rescans) and
-		// strip any dpkg/rpm epoch prefix ("1:2.4.58" -> "2.4.58") so cycle
-		// derivation and server-side feed matching see a clean version.
-		sysPkgVer := make(map[string]string)
-		for _, pkg := range result.Packages {
-			if pkg.EnvType != EnvSystemDeb && pkg.EnvType != EnvSystemRpm {
-				continue
-			}
-			if _, seen := sysPkgVer[pkg.Name]; seen {
-				continue
-			}
-			v := pkg.Version
-			if i := strings.IndexByte(v, ':'); i >= 0 {
-				v = v[i+1:]
-			}
-			sysPkgVer[pkg.Name] = v
-		}
-		pkgVersion := func(name string) string { return sysPkgVer[name] }
 		result.InstalledRuntimes = append(
 			result.InstalledRuntimes,
-			runtimeversions.DetectAllWebServers(ctx, webServerCandidateRoots(roots), pkgVersion)...,
+			runtimeversions.DetectAllWebServers(ctx, webServerCandidateRoots(roots), sysPkgVersion)...,
+		)
+	})
+
+	// --- message brokers (RabbitMQ, Kafka, ActiveMQ Classic/Artemis) ---
+	// Detected for runtime-EOL correlation.
+	safeCall("runtimeversions.Brokers", func() {
+		result.InstalledRuntimes = append(
+			result.InstalledRuntimes,
+			runtimeversions.DetectAllBrokers(ctx, brokerCandidateRoots(roots), sysPkgVersion)...,
 		)
 	})
 }
@@ -668,6 +688,25 @@ func webServerCandidateRoots(roots []string) []string {
 		candidates = []string{`C:\Program Files`, `C:\nginx`, `C:\inetpub`}
 	default: // linux and friends
 		candidates = []string{"/etc", "/usr/sbin", "/usr/local", "/opt"}
+	}
+	candidates = append(candidates, roots...)
+	return existingDirs(candidates)
+}
+
+// brokerCandidateRoots returns the well-known parent directories under
+// which message brokers (RabbitMQ, Kafka, ActiveMQ Classic/Artemis) are
+// installed, plus the caller-supplied scan roots — mirroring
+// webServerCandidateRoots so integration tests (and any configured
+// non-default scan root) are picked up deterministically.
+func brokerCandidateRoots(roots []string) []string {
+	var candidates []string
+	switch runtime.GOOS {
+	case "darwin":
+		candidates = []string{"/opt", "/usr/local", "/usr/local/opt"}
+	case "windows":
+		candidates = []string{`C:\Program Files`}
+	default: // linux and friends
+		candidates = []string{"/opt", "/usr/share", "/usr/local", "/etc"}
 	}
 	candidates = append(candidates, roots...)
 	return existingDirs(candidates)
