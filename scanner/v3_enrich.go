@@ -530,6 +530,24 @@ func enrichWithV3(ctx context.Context, result *ScanResult, roots []string, scanR
 			runtimeversions.DetectAllAppServers(ctx, appServerCandidateRoots())...,
 		)
 	})
+
+	// --- web servers (nginx, Apache HTTPD, IIS) ---
+	// Detected for runtime-EOL correlation. pkgVersion cross-references the
+	// already-scanned OS packages so apt/yum installs report an exact version.
+	safeCall("runtimeversions.WebServers", func() {
+		pkgVersion := func(name string) string {
+			for _, pkg := range result.Packages {
+				if (pkg.EnvType == EnvSystemDeb || pkg.EnvType == EnvSystemRpm) && pkg.Name == name {
+					return pkg.Version
+				}
+			}
+			return ""
+		}
+		result.InstalledRuntimes = append(
+			result.InstalledRuntimes,
+			runtimeversions.DetectAllWebServers(ctx, webServerCandidateRoots(roots), pkgVersion)...,
+		)
+	})
 }
 
 // candidateSitePackages returns plausible site-packages dirs under
@@ -622,6 +640,26 @@ func appServerCandidateRoots() []string {
 	default: // linux and friends
 		candidates = []string{"/opt", "/usr/share"}
 	}
+	return existingDirs(candidates)
+}
+
+// webServerCandidateRoots returns the well-known parent directories under
+// which web servers (nginx, Apache HTTPD, IIS) are installed, plus the
+// caller-supplied scan roots. Unlike appServerCandidateRoots, the scan
+// roots are included so integration tests (and any configured non-default
+// scan root) are picked up deterministically rather than relying solely on
+// fixed OS install locations.
+func webServerCandidateRoots(roots []string) []string {
+	var candidates []string
+	switch runtime.GOOS {
+	case "darwin":
+		candidates = []string{"/opt", "/usr/local", "/usr/local/opt"}
+	case "windows":
+		candidates = []string{`C:\Program Files`, `C:\nginx`, `C:\inetpub`}
+	default: // linux and friends
+		candidates = []string{"/etc", "/usr/sbin", "/usr/local", "/opt"}
+	}
+	candidates = append(candidates, roots...)
 	return existingDirs(candidates)
 }
 
