@@ -2,6 +2,7 @@ package runtimeversions
 
 import (
 	"context"
+	"io"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -53,7 +54,8 @@ func DetectAllWebServers(ctx context.Context, parents []string, pkgVersion func(
 
 func classifyWebServer(dir string, pkgVersion func(name string) string) (InstalledRuntime, bool) {
 	switch {
-	case isFile(filepath.Join(dir, "sbin", "nginx")) || isFile(filepath.Join(dir, "conf", "nginx.conf")):
+	case isFile(filepath.Join(dir, "sbin", "nginx")) || isFile(filepath.Join(dir, "conf", "nginx.conf")) ||
+		isFile(filepath.Join(dir, "nginx.conf")):
 		ver := pkgVersion("nginx")
 		if ver == "" {
 			ver = scanBinaryVersion(filepath.Join(dir, "sbin", "nginx"), _nginxVerRE)
@@ -61,6 +63,7 @@ func classifyWebServer(dir string, pkgVersion func(name string) string) (Install
 		return mk("nginx", ver, "nginx", dir), true
 	case isFile(filepath.Join(dir, "conf", "httpd.conf")) ||
 		isFile(filepath.Join(dir, "conf", "apache2.conf")) ||
+		isFile(filepath.Join(dir, "httpd.conf")) || isFile(filepath.Join(dir, "apache2.conf")) ||
 		isFile(filepath.Join(dir, "httpd")) || isFile(filepath.Join(dir, "apache2")):
 		ver := pkgVersion("httpd")
 		if ver == "" {
@@ -68,6 +71,9 @@ func classifyWebServer(dir string, pkgVersion func(name string) string) (Install
 		}
 		if ver == "" {
 			ver = scanBinaryVersion(filepath.Join(dir, "httpd"), _apacheVerRE)
+		}
+		if ver == "" {
+			ver = scanBinaryVersion(filepath.Join(dir, "apache2"), _apacheVerRE)
 		}
 		return mk("apache-httpd", ver, "Apache", dir), true
 	}
@@ -92,7 +98,13 @@ func scanBinaryVersion(path string, re *regexp.Regexp) string {
 		size = _maxBinaryScanBytes
 	}
 	buf := make([]byte, size)
-	n, _ := f.Read(buf)
+	// io.ReadFull is short-read-safe: it returns the actual byte count even
+	// on a partial read (io.EOF/io.ErrUnexpectedEOF), unlike a single Read
+	// whose short reads are legal and would silently drop data.
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return ""
+	}
 	if m := re.FindSubmatch(buf[:n]); m != nil {
 		// [\w.]* is greedy over the character class, so trailing binary
 		// noise made of literal dots (e.g. "1.25.3...") would otherwise

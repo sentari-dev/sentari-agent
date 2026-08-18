@@ -55,3 +55,41 @@ func TestDetectApacheFromPkg(t *testing.T) {
 		t.Fatalf("expected apache-httpd 2.4.58, got %+v", got)
 	}
 }
+
+func TestDetectNginxFlatEtcLayout(t *testing.T) {
+	root := t.TempDir()
+	// Debian/Ubuntu and RHEL nginx package layout: flat /etc/nginx/nginx.conf,
+	// no conf/ subdirectory and no sbin/nginx alongside the config.
+	must(t, os.MkdirAll(filepath.Join(root, "nginx"), 0o755))
+	writeFile(t, filepath.Join(root, "nginx", "nginx.conf"), "worker_processes auto;")
+
+	got := DetectAllWebServers(context.Background(), []string{root},
+		func(name string) string {
+			if name == "nginx" {
+				return "1.24.0"
+			}
+			return ""
+		})
+	if len(got) != 1 || got[0].Name != "nginx" || got[0].Version != "1.24.0" {
+		t.Fatalf("expected nginx 1.24.0, got %+v", got)
+	}
+}
+
+func TestDetectApache2FlatDebianLayout(t *testing.T) {
+	root := t.TempDir()
+	// Debian/Ubuntu apache2 package layout: flat /etc/apache2/apache2.conf,
+	// no conf/ subdirectory.
+	must(t, os.MkdirAll(filepath.Join(root, "apache2"), 0o755))
+	writeFile(t, filepath.Join(root, "apache2", "apache2.conf"), "ServerRoot /etc/apache2")
+
+	got := DetectAllWebServers(context.Background(), []string{root},
+		func(name string) string {
+			if name == "apache2" {
+				return "2.4.58"
+			}
+			return ""
+		})
+	if len(got) != 1 || got[0].Name != "apache-httpd" || got[0].Version != "2.4.58" {
+		t.Fatalf("expected apache-httpd 2.4.58, got %+v", got)
+	}
+}
