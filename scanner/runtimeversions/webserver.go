@@ -58,7 +58,16 @@ func classifyWebServer(dir string, pkgVersion func(name string) string) (Install
 		isFile(filepath.Join(dir, "nginx.conf")):
 		ver := pkgVersion("nginx")
 		if ver == "" {
-			ver = scanBinaryVersion(filepath.Join(dir, "sbin", "nginx"), _nginxVerRE)
+			for _, bin := range []string{
+				filepath.Join(dir, "sbin", "nginx"),
+				filepath.Join(dir, "bin", "nginx"),
+				"/usr/sbin/nginx",
+				"/usr/local/sbin/nginx",
+			} {
+				if ver = scanBinaryVersion(bin, _nginxVerRE); ver != "" {
+					break
+				}
+			}
 		}
 		return mk("nginx", ver, "nginx", dir), true
 	case isFile(filepath.Join(dir, "conf", "httpd.conf")) ||
@@ -70,10 +79,18 @@ func classifyWebServer(dir string, pkgVersion func(name string) string) (Install
 			ver = pkgVersion("apache2")
 		}
 		if ver == "" {
-			ver = scanBinaryVersion(filepath.Join(dir, "httpd"), _apacheVerRE)
-		}
-		if ver == "" {
-			ver = scanBinaryVersion(filepath.Join(dir, "apache2"), _apacheVerRE)
+			for _, bin := range []string{
+				filepath.Join(dir, "httpd"),
+				filepath.Join(dir, "apache2"),
+				filepath.Join(dir, "bin", "httpd"),
+				filepath.Join(dir, "bin", "apache2"),
+				"/usr/sbin/httpd",
+				"/usr/sbin/apache2",
+			} {
+				if ver = scanBinaryVersion(bin, _apacheVerRE); ver != "" {
+					break
+				}
+			}
 		}
 		return mk("apache-httpd", ver, "Apache", dir), true
 	}

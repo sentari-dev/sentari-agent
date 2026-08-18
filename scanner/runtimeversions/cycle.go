@@ -3,6 +3,7 @@ package runtimeversions
 import (
 	"regexp"
 	"sort"
+	"strings"
 )
 
 // Language-runtime name constants. These are the single source of the names
@@ -85,6 +86,11 @@ func WebServerRuntimeNames() []string {
 // server/services/runtime_eol_cycle.py exactly. App-server derivation is a
 // best-effort fallback (major.minor, then major) the server may override.
 func CycleFor(runtime, version string) string {
+	// Strip a dpkg/rpm epoch prefix ("1:2.4.58" -> "2.4.58") so the
+	// ^-anchored major/minor regexes see the real version.
+	if i := strings.IndexByte(version, ':'); i >= 0 {
+		version = version[i+1:]
+	}
 	switch runtime {
 	case "python":
 		if m := pythonRe.FindStringSubmatch(version); m != nil {

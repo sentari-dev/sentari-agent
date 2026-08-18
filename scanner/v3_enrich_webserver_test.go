@@ -26,7 +26,7 @@ func TestEnrichWithV3_DetectsNginx(t *testing.T) {
 
 	found := false
 	for _, r := range result.InstalledRuntimes {
-		if r.Name == "nginx" && r.Version == "1.24.0" {
+		if r.Name == "nginx" && r.Version == "1.24.0" && r.InstallPath == inst {
 			found = true
 		}
 	}

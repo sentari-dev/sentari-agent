@@ -12,6 +12,21 @@ func TestCycleForWebServers(t *testing.T) {
 	}
 }
 
+func TestCycleForWebServers_EpochStripped(t *testing.T) {
+	cases := map[string]struct {
+		version string
+		want    string
+	}{
+		"apache-httpd": {"1:2.4.58", "2.4"},
+		"nginx":        {"1:1.24.0", "1.24"},
+	}
+	for name, c := range cases {
+		if got := CycleFor(name, c.version); got != c.want {
+			t.Fatalf("CycleFor(%q,%q)=%q want %q", name, c.version, got, c.want)
+		}
+	}
+}
+
 func TestWebServerRuntimeNames(t *testing.T) {
 	got := WebServerRuntimeNames()
 	want := []string{"apache-httpd", "iis", "nginx"}
