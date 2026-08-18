@@ -178,8 +178,9 @@ ingests these rows directly — see `services/license_ingest.py`.
 ### `installed_runtimes: InstalledRuntime[]`
 
 Per-device runtime detections. Covers language runtimes (`python`, `node`,
-`jdk`) and JVM application servers (`wildfly`, `jboss-eap`, `tomcat`,
-`jetty`, `payara`, `glassfish`, and presence-only `weblogic`/`websphere`).
+`jdk`), JVM application servers (`wildfly`, `jboss-eap`, `tomcat`,
+`jetty`, `payara`, `glassfish`, and presence-only `weblogic`/`websphere`),
+and web servers (`nginx`, `apache-httpd`, `iis`).
 Other runtimes are reserved for future phases.
 
 ```json
@@ -207,8 +208,12 @@ Other runtimes are reserved for future phases.
 | payara    | `6.2024.5`      | `6.2024` | Major.minor, then major.¹ |
 | glassfish | `7.0.11`        | `7.0`    | Major.minor, then major.¹ Eclipse GlassFish (upstream of Payara). |
 | weblogic / websphere | `14.1.1.0` / `unknown` | `14.1` / `unknown`¹ | Presence-only; no public EOL feed. |
+| nginx         | `1.24.0`        | `1.24`   | Major.minor, then major.¹ |
+| apache-httpd  | `2.4.58`        | `2.4`    | Major.minor, then major.¹ |
+| iis           | `10.0`          | `10.0`   | Major.minor, then major.¹ |
 
-¹ For application servers the agent-derived `cycle` is **advisory**.
+¹ For application servers and web servers the agent-derived `cycle` is
+**advisory**.
 endoflife.date cohort granularity is inconsistent per product (Tomcat `10.1`
 but also `7`; JBoss EAP `7` but also `4.3`; Jetty `12.0` but also `11`), so the
 server resolves the authoritative cohort against the synced feed by

@@ -3,6 +3,7 @@ package runtimeversions
 import (
 	"regexp"
 	"sort"
+	"strings"
 )
 
 // Language-runtime name constants. These are the single source of the names
@@ -58,11 +59,38 @@ var appServers = map[string]bool{
 	"weblogic": true, "websphere": true,
 }
 
+// webServers is the set of web-server runtime names. Their cycle, like the
+// app-server set, is derived best-effort here (major.minor, then major).
+var webServers = map[string]bool{
+	"nginx": true, "apache-httpd": true, "iis": true,
+}
+
+// WebServerRuntimeNames returns the sorted set of web-server runtime names
+// the agent can emit — the keys of the webServers map. Mirrors
+// AppServerRuntimeNames(): the v3-contract drift guard derives its
+// cross-check set from this, so adding a new web-server value to
+// webServers automatically forces the shared schema enum
+// (docs/contracts/agent-scan-payload-v3.json) to list it or the guard
+// fails.
+func WebServerRuntimeNames() []string {
+	names := make([]string, 0, len(webServers))
+	for n := range webServers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // CycleFor returns the EOL cycle for a (runtime, version) tuple, or "unknown" on
 // parse failure. Language-runtime derivation matches the server's
 // server/services/runtime_eol_cycle.py exactly. App-server derivation is a
 // best-effort fallback (major.minor, then major) the server may override.
 func CycleFor(runtime, version string) string {
+	// Strip a dpkg/rpm epoch prefix ("1:2.4.58" -> "2.4.58") so the
+	// ^-anchored major/minor regexes see the real version.
+	if i := strings.IndexByte(version, ':'); i >= 0 {
+		version = version[i+1:]
+	}
 	switch runtime {
 	case "python":
 		if m := pythonRe.FindStringSubmatch(version); m != nil {
@@ -80,7 +108,7 @@ func CycleFor(runtime, version string) string {
 			return m[1]
 		}
 	default:
-		if appServers[runtime] {
+		if appServers[runtime] || webServers[runtime] {
 			if m := majorMinorRe.FindStringSubmatch(version); m != nil {
 				return m[1] + "." + m[2]
 			}
