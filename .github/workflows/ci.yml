@@ -63,6 +63,12 @@ jobs:
       - name: Vet (Darwin, Enterprise, cross)
         run: GOOS=darwin GOARCH=arm64 go vet -tags enterprise ./...
 
+      # Aggregate statement-coverage ratchet. Fails the build below the floor;
+      # the floor only ever moves up toward the 80% org target (see
+      # scripts/coverage.sh). Runs once here in the fast Linux job.
+      - name: Coverage gate
+        run: ./scripts/coverage.sh 80
+
   # macOS (darwin) tests have NEVER run in CI before this job was added. The
   # _darwin.go code (safeio_darwin, mounts_darwin, restart_darwin, the
   # pathfilter darwin cloud-sync exclusions, etc.) was only ever cross-compiled
