@@ -180,7 +180,8 @@ ingests these rows directly — see `services/license_ingest.py`.
 Per-device runtime detections. Covers language runtimes (`python`, `node`,
 `jdk`), JVM application servers (`wildfly`, `jboss-eap`, `tomcat`,
 `jetty`, `payara`, `glassfish`, and presence-only `weblogic`/`websphere`),
-and web servers (`nginx`, `apache-httpd`, `iis`).
+web servers (`nginx`, `apache-httpd`, `iis`), and message brokers
+(`rabbitmq`, `kafka`, `activemq`, `activemq-artemis`).
 Other runtimes are reserved for future phases.
 
 ```json
@@ -211,6 +212,10 @@ Other runtimes are reserved for future phases.
 | nginx         | `1.24.0`        | `1.24`   | Major.minor, then major.¹ |
 | apache-httpd  | `2.4.58`        | `2.4`    | Major.minor, then major.¹ |
 | iis           | `10.0`          | `10.0`   | Major.minor, then major.¹ |
+| rabbitmq         | `3.12.0`  | `3.12` | Major.minor, then major.¹ |
+| kafka            | `3.7.0`   | `3.7`  | Major.minor, then major.¹ |
+| activemq         | `5.18.3`  | `5.18` | Major.minor, then major.¹ |
+| activemq-artemis | `2.33.0`  | `2.33` | Major.minor, then major.¹ |
 
 ¹ For application servers and web servers the agent-derived `cycle` is
 **advisory**.

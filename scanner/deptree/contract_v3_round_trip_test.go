@@ -23,6 +23,8 @@ import (
 //     the keys of the appServers map classify() (appserver.go) draws from.
 //   - web servers from runtimeversions.WebServerRuntimeNames() — the keys
 //     of the webServers map.
+//   - message brokers from runtimeversions.BrokerRuntimeNames() — the keys
+//     of the brokers map.
 //
 // Auto-derivation is deliberate: a new runtime name added to the producing
 // code automatically enters the schema cross-check below, so a future value
@@ -31,7 +33,8 @@ import (
 func agentEmittedRuntimeNames() []string {
 	names := append([]string{}, runtimeversions.LanguageRuntimeNames()...)
 	names = append(names, runtimeversions.AppServerRuntimeNames()...)
-	return append(names, runtimeversions.WebServerRuntimeNames()...)
+	names = append(names, runtimeversions.WebServerRuntimeNames()...)
+	return append(names, runtimeversions.BrokerRuntimeNames()...)
 }
 
 // TestContractV3_payloadValidatesAgainstSharedSchema is the contract
@@ -173,20 +176,24 @@ func realInstalledRuntimes() []runtimeversions.InstalledRuntime {
 		version string
 		distro  string
 	}{
-		"python":       {"3.11.5", ""},
-		"node":         {"20.11.1", ""},
-		"jdk":          {"17.0.5", "Temurin"},
-		"wildfly":      {"40.0.1.Final", "Red Hat"},
-		"jboss-eap":    {"8.0.0.GA", "Red Hat"},
-		"tomcat":       {"10.1.20", "Apache"},
-		"jetty":        {"12.0.5", "Eclipse"},
-		"payara":       {"6.2024.1", "Payara"},
-		"glassfish":    {"7.0.11", "Eclipse GlassFish"},
-		"weblogic":     {"14.1.1.0", "Oracle"},
-		"websphere":    {"unknown", "IBM"},
-		"nginx":        {"1.24.0", "nginx"},
-		"apache-httpd": {"2.4.58", "Apache"},
-		"iis":          {"10.0", "Microsoft"},
+		"python":           {"3.11.5", ""},
+		"node":             {"20.11.1", ""},
+		"jdk":              {"17.0.5", "Temurin"},
+		"wildfly":          {"40.0.1.Final", "Red Hat"},
+		"jboss-eap":        {"8.0.0.GA", "Red Hat"},
+		"tomcat":           {"10.1.20", "Apache"},
+		"jetty":            {"12.0.5", "Eclipse"},
+		"payara":           {"6.2024.1", "Payara"},
+		"glassfish":        {"7.0.11", "Eclipse GlassFish"},
+		"weblogic":         {"14.1.1.0", "Oracle"},
+		"websphere":        {"unknown", "IBM"},
+		"nginx":            {"1.24.0", "nginx"},
+		"apache-httpd":     {"2.4.58", "Apache"},
+		"iis":              {"10.0", "Microsoft"},
+		"rabbitmq":         {"3.12.0", "RabbitMQ"},
+		"kafka":            {"3.7.0", "Apache"},
+		"activemq":         {"5.18.3", "Apache ActiveMQ"},
+		"activemq-artemis": {"2.33.0", "Apache ActiveMQ Artemis"},
 	}
 	names := agentEmittedRuntimeNames()
 	out := make([]runtimeversions.InstalledRuntime, 0, len(names))
