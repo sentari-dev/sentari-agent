@@ -34,6 +34,41 @@ func TestDetectRabbitMQFromPkg(t *testing.T) {
 	}
 }
 
+// TestDetectRabbitMQFromPkg_NoDuplicatesAcrossSiblingDirs guards against the
+// mass-false-positive regression: pkgVersion("rabbitmq-server") is
+// independent of the directory being classified, so folding it into
+// classifyBroker's per-directory gate used to fire once per sibling
+// directory walked — dozens of bogus "rabbitmq" entries with garbage
+// install_paths whenever the OS package was installed. The fix moves the
+// package-only case to a single post-walk fallback in DetectAllBrokers.
+func TestDetectRabbitMQFromPkg_NoDuplicatesAcrossSiblingDirs(t *testing.T) {
+	parent := t.TempDir()
+	for _, sub := range []string{"ssl", "apt", "cron.d"} {
+		must(t, os.MkdirAll(filepath.Join(parent, sub), 0o755))
+	}
+	got := DetectAllBrokers(context.Background(), []string{parent},
+		func(n string) string {
+			if n == "rabbitmq-server" {
+				return "3.12.0"
+			}
+			return ""
+		})
+	count := 0
+	var version string
+	for _, r := range got {
+		if r.Name == "rabbitmq" {
+			count++
+			version = r.Version
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 rabbitmq entry, got %d: %+v", count, got)
+	}
+	if version != "3.12.0" {
+		t.Fatalf("expected version 3.12.0, got %q", version)
+	}
+}
+
 func TestDetectKafkaFromJar(t *testing.T) {
 	dir := t.TempDir()
 	inst := filepath.Join(dir, "kafka")

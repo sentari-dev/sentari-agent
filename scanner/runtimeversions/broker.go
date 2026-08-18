@@ -46,6 +46,27 @@ func DetectAllBrokers(ctx context.Context, parents []string, pkgVersion func(nam
 			}
 		}
 	}
+
+	// OS-package fallback: a deb/rpm rabbitmq-server install has no coherent
+	// per-directory layout the dir-marker checks above can match (the binary
+	// is the top-level /usr/sbin/rabbitmq-server symlink, not a nested
+	// <dir>/sbin/rabbitmq-server). Emit exactly one entry for the package,
+	// but only if a directory marker didn't already find one — avoids
+	// double-reporting when a tarball/versioned-dir install coexists with
+	// the OS package record.
+	if pkgVersion("rabbitmq-server") != "" {
+		already := false
+		for _, r := range out {
+			if r.Name == "rabbitmq" {
+				already = true
+				break
+			}
+		}
+		if !already {
+			out = append(out, mk("rabbitmq", pkgVersion("rabbitmq-server"), "RabbitMQ", "/usr/lib/rabbitmq"))
+		}
+	}
+
 	return out
 }
 
@@ -60,13 +81,17 @@ func classifyBroker(dir string, pkgVersion func(name string) string) (InstalledR
 		return mk("activemq", v, "Apache ActiveMQ", dir), true
 	}
 	if isFile(filepath.Join(dir, "bin", "kafka-server-start.sh")) ||
-		isFile(filepath.Join(dir, "bin", "kafka-server-start.bat")) {
+		isFile(filepath.Join(dir, "bin", "windows", "kafka-server-start.bat")) {
 		v := firstJarVersion(filepath.Join(dir, "libs"), _kafkaJarRE)
 		return mk("kafka", v, "Apache", dir), true
 	}
-	// RabbitMQ: OS package, sbin layout, or a versioned rabbitmq_server-<ver> dir.
+	// RabbitMQ: sbin layout (tarball install) or a versioned
+	// rabbitmq_server-<ver> dir. Deliberately NOT gated on pkgVersion here —
+	// pkgVersion("rabbitmq-server") is independent of dir, so folding it into
+	// this per-directory OR would fire for every directory walked once the OS
+	// package is installed. The OS-package case (no coherent per-dir install
+	// layout) is instead handled once in DetectAllBrokers below.
 	if isFile(filepath.Join(dir, "sbin", "rabbitmq-server")) ||
-		pkgVersion("rabbitmq-server") != "" ||
 		_rabbitDirRE.MatchString(filepath.Base(dir)) {
 		v := pkgVersion("rabbitmq-server")
 		if v == "" {
