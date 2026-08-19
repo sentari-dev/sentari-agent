@@ -320,7 +320,7 @@ exactly:
 - **`container_runtime`** — string, the container runtime that produced
   the image/container (`docker`, `containerd`, `podman`, …).
 
-### SBOM-completeness Phase 2 slice
+### per-artifact evidence slice
 
 Two optional fields on each `packages[]` record carry per-artifact evidence
 for two NTIA SBOM minimum elements (artifact hash + supplier). Both are open-
@@ -331,7 +331,7 @@ Pydantic `extra='ignore'`), so there is **no 422 hazard** on an older server.
   artifact **file**, emitted only when exactly one concrete file exists.
   **Omitted** for multi-file OS packages (`system_deb` / `system_rpm` — a
   file *set*, no single artifact; the server then omits the SBOM hash key
-  rather than fake one), for unhashable installs, and by pre-Phase-2 agents.
+  rather than fake one), for unhashable installs, and by agents that predate this field.
   Server behavior: the value is validated and case-normalized at persist time
   (valid 64-hex → stored lowercased; wrong length / non-hex / empty → stored
   NULL, and the scan is **never rejected** for a malformed value). Emitted in
