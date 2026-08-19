@@ -93,7 +93,8 @@
       "required": ["id", "version_id"],
       "properties": {
         "id": { "type": "string" },
-        "version_id": { "type": "string" }
+        "version_id": { "type": "string" },
+        "kernel": { "type": "string" }
       }
     },
     "ContainerTargetSummary": {
