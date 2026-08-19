@@ -25,6 +25,7 @@ import (
 	// registers with scanner's registry at binary startup.  See
 	// the matching comment in main.go (OSS build).
 	_ "github.com/sentari-dev/sentari-agent/scanner/aiagents"
+	_ "github.com/sentari-dev/sentari-agent/scanner/gobinaries"
 	_ "github.com/sentari-dev/sentari-agent/scanner/jvm"
 	_ "github.com/sentari-dev/sentari-agent/scanner/npm"
 	_ "github.com/sentari-dev/sentari-agent/scanner/nuget"

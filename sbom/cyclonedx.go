@@ -29,6 +29,7 @@ import (
 //	npm                                  → pkg:npm/
 //	jvm                                  → pkg:maven/   (group:artifact split)
 //	nuget                                → pkg:nuget/
+//	go_binary                            → pkg:golang/  (lowercased module path)
 //	system_deb                           → pkg:deb/
 //	system_rpm                           → pkg:rpm/
 //	everything else                      → "" (no purl)
@@ -68,6 +69,17 @@ func purlFor(pkg scanner.PackageRecord) string {
 		return fmt.Sprintf("pkg:maven/%s@%s", url.PathEscape(pkg.Name), ver)
 	case "nuget":
 		return fmt.Sprintf("pkg:nuget/%s@%s", url.PathEscape(pkg.Name), ver)
+	case "go_binary":
+		// purl-spec golang type: lowercase the whole module path (the
+		// namespace + name), keeping "/" as real path separators. Escape
+		// each segment individually so the slashes are not turned into
+		// "%2F" (the scoped-npm segment-wise precedent above), then append
+		// the escaped version.
+		segments := strings.Split(strings.ToLower(pkg.Name), "/")
+		for i, seg := range segments {
+			segments[i] = url.PathEscape(seg)
+		}
+		return fmt.Sprintf("pkg:golang/%s@%s", strings.Join(segments, "/"), ver)
 	case scanner.EnvSystemDeb:
 		return fmt.Sprintf("pkg:deb/%s@%s", url.PathEscape(pkg.Name), ver)
 	case scanner.EnvSystemRpm:

@@ -348,6 +348,33 @@ Pydantic `extra='ignore'`), so there is **no 422 hazard** on an older server.
   `supplier:"Organization: <value>"`. Self-declared and unauthenticated — not
   a provenance attestation.
 
+### Go binary module records
+
+Go compilers embed the complete module dependency graph inside every
+module-built executable. The agent reads this metadata directly from the
+binary file (it never executes a scanned binary) and emits one `packages[]`
+record per embedded module.
+
+- **`env_type: "go_binary"`** — the literal reported on each such record. One
+  record is emitted for the binary's **main module**, one for **each
+  dependency**, and one for the Go **standard library** (name `stdlib`, version
+  set to the embedded toolchain version, e.g. `go1.23.4`). Servers ingest
+  `go_binary` records under the `go` ecosystem.
+- **`install_path`** — the absolute path of the binary the module was read
+  from. The same module compiled into two binaries yields two records with
+  distinct `install_path` values, so an operator can tell which binary to
+  rebuild; fleet-level de-duplication is a server concern.
+- **Versions** are recorded verbatim: released dependencies as `vX.Y.Z`,
+  unreleased ones as Go pseudo-versions
+  (`v0.0.0-<timestamp>-<revision>`). A locally-built main module reports its
+  VCS revision when the build recorded one, otherwise the toolchain's `(devel)`
+  placeholder. **Replace directives** are resolved to the replacement — the
+  module actually compiled in — and only the replacement is emitted.
+- Open-object addition: like the other `packages[]` fields above, this is
+  **not** part of the v3 JSON schema and requires no schema change; a server
+  that predates the `go` ecosystem drops these records via Pydantic
+  `extra='ignore'` (no 422). **Absent on older agents** that lack the detector.
+
 ### Device-level base fields
 
 - **`tags`** — top-level array of operator-supplied host tags from
