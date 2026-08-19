@@ -104,8 +104,10 @@ func discoverDocker(root string) ([]ContainerTarget, []scanner.ScanError) {
 			}
 		}
 	}
-	// Collect image → layer-paths map so containers can reuse it.
-	imageLayers, repoTagsByID, imgErrs := buildDockerImageIndex(root, imageDir)
+	// Collect image → layer-paths map so containers can reuse it,
+	// plus the image → diff_ids digest chain (the image config's
+	// truth, independent of path resolution).
+	imageLayers, imageDiffIDs, repoTagsByID, imgErrs := buildDockerImageIndex(root, imageDir)
 	errs = append(errs, imgErrs...)
 
 	// Emit image-only targets for every image the engine has on
@@ -114,9 +116,10 @@ func discoverDocker(root string) ([]ContainerTarget, []scanner.ScanError) {
 	imageIDs := sortedKeys(imageLayers)
 	for _, imageID := range imageIDs {
 		targets = append(targets, ContainerTarget{
-			Runtime:   RuntimeDocker,
-			ImageID:   imageID,
-			ImageTags: repoTagsByID[imageID],
+			Runtime:      RuntimeDocker,
+			ImageID:      imageID,
+			ImageTags:    repoTagsByID[imageID],
+			LayerDigests: imageDiffIDs[imageID],
 			MergedRootFS: MergedTree{
 				Layers: imageLayers[imageID],
 			},
@@ -126,7 +129,7 @@ func discoverDocker(root string) ([]ContainerTarget, []scanner.ScanError) {
 	// Running containers: walk `containers/` and for each one
 	// that has the writable upper-dir metadata in layerdb/mounts,
 	// emit a second target with that dir appended.
-	cTargets, cErrs := discoverDockerContainers(root, imageLayers, repoTagsByID)
+	cTargets, cErrs := discoverDockerContainers(root, imageLayers, imageDiffIDs, repoTagsByID)
 	targets = append(targets, cTargets...)
 	errs = append(errs, cErrs...)
 
@@ -137,15 +140,22 @@ func discoverDocker(root string) ([]ContainerTarget, []scanner.ScanError) {
 // to produce:
 //
 //   - imageLayers[imageID] = []physical layer path, bottom-to-top
+//   - imageDiffIDs[imageID] = []string (rootfs.diff_ids, bottom-to-top)
 //   - repoTagsByID[imageID] = []string (tags pointing at this image)
+//
+// The diff_ids chain comes straight from the image config and is kept
+// verbatim (order preserved, never sorted): it is the image's
+// content-addressable truth, independent of whether every physical
+// layer path still resolves on disk.
 //
 // A malformed image config surfaces as a ScanError; the rest of the
 // index still populates so one corrupt image doesn't block every
 // other container from being scanned.
 func buildDockerImageIndex(root, imageDir string) (
-	map[string][]string, map[string][]string, []scanner.ScanError,
+	map[string][]string, map[string][]string, map[string][]string, []scanner.ScanError,
 ) {
 	imageLayers := map[string][]string{}
+	imageDiffIDs := map[string][]string{}
 	repoTagsByID := map[string][]string{}
 	var errs []scanner.ScanError
 
@@ -168,7 +178,7 @@ func buildDockerImageIndex(root, imageDir string) (
 	if err != nil {
 		// No content dir means no images on this host — not an
 		// error for us, just "nothing to scan."
-		return imageLayers, repoTagsByID, errs
+		return imageLayers, imageDiffIDs, repoTagsByID, errs
 	}
 	for _, e := range entries {
 		if e.IsDir() {
@@ -199,8 +209,16 @@ func buildDockerImageIndex(root, imageDir string) (
 			continue
 		}
 		imageLayers[imageID] = layers
+		// Keep the full diff_ids chain verbatim (order preserved).
+		// It is the image config's authoritative layer identity and
+		// is deliberately NOT filtered to the resolved-path list: a
+		// path that failed to resolve doesn't change what the image
+		// declares it is made of.
+		if len(cfg.RootFS.DiffIDs) > 0 {
+			imageDiffIDs[imageID] = append([]string(nil), cfg.RootFS.DiffIDs...)
+		}
 	}
-	return imageLayers, repoTagsByID, errs
+	return imageLayers, imageDiffIDs, repoTagsByID, errs
 }
 
 // resolveDockerLayerPaths turns the image config's bottom-to-top
@@ -271,7 +289,7 @@ func resolveDockerLayerPaths(root, imageDir string, diffIDs []string) ([]string,
 // skipped: their upper-dir is still on disk, but scanning it surfaces
 // state that's no longer actively used — tends to mislead operators
 // investigating active CVEs.
-func discoverDockerContainers(root string, imageLayers, repoTagsByID map[string][]string) (
+func discoverDockerContainers(root string, imageLayers, imageDiffIDs, repoTagsByID map[string][]string) (
 	[]ContainerTarget, []scanner.ScanError,
 ) {
 	containersDir := filepath.Join(root, "containers")
@@ -334,9 +352,13 @@ func discoverDockerContainers(root string, imageLayers, repoTagsByID map[string]
 		}
 		name := strings.TrimPrefix(cfg.Name, "/")
 		targets = append(targets, ContainerTarget{
-			Runtime:       RuntimeDocker,
-			ImageID:       cfg.Image,
-			ImageTags:     repoTagsByID[cfg.Image],
+			Runtime:   RuntimeDocker,
+			ImageID:   cfg.Image,
+			ImageTags: repoTagsByID[cfg.Image],
+			// A running container inherits its base image's diff_ids
+			// chain; the writable upper-dir appended to MergedRootFS
+			// has no content digest and contributes none.
+			LayerDigests:  imageDiffIDs[cfg.Image],
 			ContainerID:   cid,
 			ContainerName: name,
 			MergedRootFS:  MergedTree{Layers: layers},

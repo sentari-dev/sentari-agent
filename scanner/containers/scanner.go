@@ -47,6 +47,15 @@ type ContainerTarget struct {
 	// order, bottom-to-top.  For running containers: the same plus
 	// the container's upper-dir appended as the final layer.
 	MergedRootFS MergedTree
+	// LayerDigests is the image's content-addressable layer chain
+	// (`rootfs.diff_ids`), bottom-to-top, exactly as the engine's
+	// image store records it — order is semantic and never sorted.
+	// Empty when the engine store doesn't expose per-layer digests
+	// (e.g. containerd, or a podman chain with a missing digest).
+	// Running containers inherit their base image's chain: the
+	// writable upper-dir has no digest and contributes none, so this
+	// list can be one shorter than MergedRootFS.Layers.
+	LayerDigests []string
 }
 
 // Config controls container discovery.  Zero value means "use

@@ -17,6 +17,11 @@ type podmanFixtureImage struct {
 	Digest string   // "sha256:abc..." or "" (then fallbackID is used)
 	Names  []string // ["docker.io/library/python:3.12", ...]
 	Layers []string // layer IDs, bottom-to-top
+	// LayerDiffDigests is the per-layer diff-digest, parallel to
+	// Layers (bottom-to-top).  A nil slice means "no diff-digest on
+	// any layer" (legacy store); an entry left as "" marks a single
+	// digest-less layer, used to exercise the all-or-nothing rule.
+	LayerDiffDigests []string
 }
 
 type podmanFixtureContainer struct {
@@ -51,8 +56,12 @@ func buildPodmanFixture(t *testing.T, images []podmanFixtureImage, containers []
 		})
 		// Build the layer chain with parent pointers.
 		var parent string
-		for _, id := range img.Layers {
-			layerRecs = append(layerRecs, podmanLayerRecord{ID: id, Parent: parent})
+		for i, id := range img.Layers {
+			rec := podmanLayerRecord{ID: id, Parent: parent}
+			if i < len(img.LayerDiffDigests) {
+				rec.DiffDigest = img.LayerDiffDigests[i]
+			}
+			layerRecs = append(layerRecs, rec)
 			parent = id
 			// Plant the physical diff dir + a marker file.
 			diff := filepath.Join(root, "overlay", id, "diff")
@@ -200,6 +209,111 @@ func TestDiscoverPodman_ContainerAppendsLayer(t *testing.T) {
 	if len(ctrTarget.MergedRootFS.Layers) != 2 {
 		t.Errorf("expected 2 layers in ctr target; got %d: %v",
 			len(ctrTarget.MergedRootFS.Layers), ctrTarget.MergedRootFS.Layers)
+	}
+}
+
+// TestDiscoverPodman_ImageCarriesLayerDigests: an image whose layer
+// records all carry a diff-digest yields a bottom-to-top digest chain
+// on the image target (order preserved, never sorted).
+func TestDiscoverPodman_ImageCarriesLayerDigests(t *testing.T) {
+	img := podmanFixtureImage{
+		ID:     "digest-img",
+		Digest: "sha256:digestimg",
+		Names:  []string{"python:3.12"},
+		Layers: []string{"dl-base", "dl-top"},
+		LayerDiffDigests: []string{
+			"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		},
+	}
+	root := buildPodmanFixture(t, []podmanFixtureImage{img}, nil)
+
+	targets, errs := discoverPodman([]string{root})
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d: %+v", len(targets), targets)
+	}
+	got := targets[0].LayerDigests
+	if len(got) != len(img.LayerDiffDigests) {
+		t.Fatalf("LayerDigests len: got %d, want %d: %v", len(got), len(img.LayerDiffDigests), got)
+	}
+	for i := range img.LayerDiffDigests {
+		if got[i] != img.LayerDiffDigests[i] {
+			t.Errorf("LayerDigests[%d]: got %q, want %q (bottom-to-top order must be preserved)",
+				i, got[i], img.LayerDiffDigests[i])
+		}
+	}
+}
+
+// TestDiscoverPodman_AllOrNothingMissingDigest: if any layer in the
+// chain lacks a diff-digest, the whole LayerDigests list is empty —
+// a partial/misaligned chain is worse than none.
+func TestDiscoverPodman_AllOrNothingMissingDigest(t *testing.T) {
+	img := podmanFixtureImage{
+		ID:     "partial-img",
+		Digest: "sha256:partialimg",
+		Names:  []string{"python:3.12"},
+		Layers: []string{"pl-base", "pl-mid", "pl-top"},
+		LayerDiffDigests: []string{
+			"sha256:ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"", // digest-less middle layer → all-or-nothing kicks in
+			"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		},
+	}
+	root := buildPodmanFixture(t, []podmanFixtureImage{img}, nil)
+
+	targets, errs := discoverPodman([]string{root})
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d: %+v", len(targets), targets)
+	}
+	if len(targets[0].LayerDigests) != 0 {
+		t.Errorf("expected empty LayerDigests (all-or-nothing), got %v", targets[0].LayerDigests)
+	}
+}
+
+// TestDiscoverPodman_ContainerInheritsImageDigests: the container
+// target inherits the IMAGE's digest chain, not the container's own
+// writable layer (which has no diff-digest).
+func TestDiscoverPodman_ContainerInheritsImageDigests(t *testing.T) {
+	img := podmanFixtureImage{
+		ID:     "ci-img",
+		Digest: "sha256:ciimg",
+		Names:  []string{"python:3.12"},
+		Layers: []string{"ci-base"},
+		LayerDiffDigests: []string{
+			"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		},
+	}
+	ctr := podmanFixtureContainer{
+		ID:      "ci-ctr",
+		Name:    "happy_curie",
+		ImageID: "ci-img",
+		LayerID: "ci-ctr-layer", // RW layer, no diff-digest
+	}
+	root := buildPodmanFixture(t, []podmanFixtureImage{img}, []podmanFixtureContainer{ctr})
+
+	targets, errs := discoverPodman([]string{root})
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	var ctrTarget *ContainerTarget
+	for i := range targets {
+		if targets[i].ContainerID != "" {
+			ctrTarget = &targets[i]
+			break
+		}
+	}
+	if ctrTarget == nil {
+		t.Fatalf("no container target emitted: %+v", targets)
+	}
+	if len(ctrTarget.LayerDigests) != 1 || ctrTarget.LayerDigests[0] != img.LayerDiffDigests[0] {
+		t.Errorf("container LayerDigests: got %v, want %v (image chain, not RW layer)",
+			ctrTarget.LayerDigests, img.LayerDiffDigests)
 	}
 }
 

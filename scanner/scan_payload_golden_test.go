@@ -224,6 +224,10 @@ func fullyPopulatedScanResult(ts time.Time) ScanResult {
 				ContainerID:   "c0ffee",
 				ContainerName: "web",
 				LayerCount:    7,
+				LayerDigests: []string{
+					"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+					"sha256:2222222222222222222222222222222222222222222222222222222222222222",
+				},
 			},
 		},
 		Tags:    &[]string{"pilot", "brussels"},

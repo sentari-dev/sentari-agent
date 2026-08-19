@@ -2,8 +2,10 @@ package containers
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -265,6 +267,62 @@ func TestScanAndAppend_ReapsStaleTemp(t *testing.T) {
 	}
 	if len(res.Packages) != 1 || res.Packages[0].Name != "host-pkg" {
 		t.Errorf("host inventory corrupted by reap/scan: %+v", res.Packages)
+	}
+}
+
+// TestScanAndAppend_SummaryCarriesLayerDigests: a discovered target
+// with LayerDigests surfaces them on its ContainerTargetSummary, in
+// order; a target without digests marshals with no layer_digests key
+// (omitempty), keeping the wire shape byte-identical to legacy.
+func TestScanAndAppend_SummaryCarriesLayerDigests(t *testing.T) {
+	img := podmanFixtureImage{
+		ID:     "sum-img",
+		Digest: "sha256:sumimg",
+		Names:  []string{"python:3.12"},
+		Layers: []string{"sum-base", "sum-top"},
+		LayerDiffDigests: []string{
+			"sha256:1010101010101010101010101010101010101010101010101010101010101010",
+			"sha256:2020202020202020202020202020202020202020202020202020202020202020",
+		},
+	}
+	root := buildPodmanFixture(t, []podmanFixtureImage{img}, nil)
+
+	s := NewScanner(Config{PodmanRoots: []string{root}})
+	targets, _ := s.DiscoverTargets(context.Background())
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+
+	// Build the summary exactly as ScanAndAppend does.
+	summaries := make([]scanner.ContainerTargetSummary, 0, len(targets))
+	for _, tg := range targets {
+		summaries = append(summaries, scanner.ContainerTargetSummary{
+			Runtime:       string(tg.Runtime),
+			ImageID:       tg.ImageID,
+			ImageTags:     tg.ImageTags,
+			ContainerID:   tg.ContainerID,
+			ContainerName: tg.ContainerName,
+			LayerCount:    len(tg.MergedRootFS.Layers),
+			LayerDigests:  tg.LayerDigests,
+		})
+	}
+	if len(summaries[0].LayerDigests) != 2 {
+		t.Fatalf("summary LayerDigests: got %v, want 2 entries", summaries[0].LayerDigests)
+	}
+	for i := range img.LayerDiffDigests {
+		if summaries[0].LayerDigests[i] != img.LayerDiffDigests[i] {
+			t.Errorf("summary LayerDigests[%d]: got %q, want %q", i, summaries[0].LayerDigests[i], img.LayerDiffDigests[i])
+		}
+	}
+
+	// A digest-less summary omits the key entirely on the wire.
+	bare := scanner.ContainerTargetSummary{Runtime: "docker", ImageID: "sha256:x", LayerCount: 1}
+	blob, err := json.Marshal(bare)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(blob), "layer_digests") {
+		t.Errorf("digest-less summary must omit layer_digests; got %s", blob)
 	}
 }
 

@@ -107,7 +107,8 @@
         "image_tags": { "type": "array", "items": { "type": "string" } },
         "container_id": { "type": "string" },
         "container_name": { "type": "string" },
-        "layer_count": { "type": "integer" }
+        "layer_count": { "type": "integer" },
+        "layer_digests": { "type": "array", "items": { "type": "string" } }
       }
     }
   }

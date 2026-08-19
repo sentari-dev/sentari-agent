@@ -140,6 +140,19 @@ func TestContractV3_payloadValidatesAgainstSharedSchema(t *testing.T) {
 				"container_id":   "c0ffee",
 				"container_name": "myapp-web",
 				"layer_count":    12,
+				// layer_digests PRESENT: the Phase-7 optional field,
+				// bottom-to-top image diff_ids.
+				"layer_digests": []string{
+					"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+					"sha256:2222222222222222222222222222222222222222222222222222222222222222",
+				},
+			},
+			{
+				// layer_digests ABSENT: a legacy/non-docker summary
+				// must remain schema-valid (the field is optional).
+				"runtime":     "docker",
+				"image_id":    "sha256:def456",
+				"layer_count": 3,
 			},
 		},
 	}

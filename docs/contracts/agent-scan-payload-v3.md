@@ -366,7 +366,18 @@ Pydantic `extra='ignore'`), so there is **no 422 hazard** on an older server.
 - **`container_targets`** — top-level array summarising every
   container/image the agent's container discoverer enumerated this scan
   cycle (`{runtime, image_id, image_tags[], container_id, container_name,
-  layer_count}`). Informational — carried raw into `scan_results.raw_json`
-  for a future filter UI; not yet promoted to dedicated columns.
-  Populated only when `ScanContainers` is true or the discoverer is
-  explicitly invoked; otherwise nil/omitted.
+  layer_count, layer_digests[]}`). Promoted server-side into the
+  `device_containers` current-state table and emitted as a `container`
+  SBOM component (base-image digest + layer chain). Populated only when
+  `ScanContainers` is true or the discoverer is explicitly invoked;
+  otherwise nil/omitted.
+  - **`layer_digests`** — optional ordered array of the image's layer
+    `diff_ids`, **bottom-to-top** (the OCI image-config `rootfs.diff_ids`
+    order; semantic — never sorted). Each entry is a `sha256:<64-hex>`
+    string. Absent on pre-Phase-7 agents and on engines whose local store
+    does not expose digests (containerd; podman chains missing a
+    `diff-digest`). For a **running container** the list carries only the
+    base image's chain, so it may be **shorter than `layer_count`** (the
+    writable upper layer has no digest) — the two fields are deliberately
+    not tied together. The server sanitizes defensively (drops non-sha256
+    entries, caps the list) and never rejects a scan over this field.
