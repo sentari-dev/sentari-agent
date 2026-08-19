@@ -130,6 +130,7 @@ func TestContractV3_payloadValidatesAgainstSharedSchema(t *testing.T) {
 		"os_release": map[string]interface{}{
 			"id":         "debian",
 			"version_id": "12",
+			"kernel":     "6.1.0-18-amd64",
 		},
 		"container_targets": []map[string]interface{}{
 			{
@@ -154,6 +155,26 @@ func TestContractV3_payloadValidatesAgainstSharedSchema(t *testing.T) {
 	}
 	if err := schema.Validate(doc); err != nil {
 		t.Fatalf("payload failed schema validation: %v\npayload: %s", err, string(body))
+	}
+
+	// Old-agent shape: os_release without a kernel key must stay schema-valid
+	// (kernel is optional), proving back-compat for pre-kernel agents.
+	noKernel := map[string]interface{}{
+		"os_release": map[string]interface{}{
+			"id":         "debian",
+			"version_id": "12",
+		},
+	}
+	nkBody, err := json.Marshal(noKernel)
+	if err != nil {
+		t.Fatalf("marshal no-kernel: %v", err)
+	}
+	var nkDoc interface{}
+	if err := json.Unmarshal(nkBody, &nkDoc); err != nil {
+		t.Fatalf("unmarshal no-kernel for validation: %v", err)
+	}
+	if err := schema.Validate(nkDoc); err != nil {
+		t.Fatalf("kernel-less os_release failed schema validation: %v\npayload: %s", err, string(nkBody))
 	}
 }
 

@@ -76,6 +76,12 @@ const (
 type OsRelease struct {
 	ID        string `json:"id"`
 	VersionID string `json:"version_id"`
+	// Kernel is the running kernel release string (the uname -r equivalent)
+	// read from OS data sources without invoking any binary; ≤64 chars, empty
+	// when not detected. The server stores it per-device and represents it in
+	// generated SBOMs. omitempty keeps the wire shape byte-identical for agents
+	// that report no kernel.
+	Kernel string `json:"kernel,omitempty"`
 }
 
 // PackageRecord represents a single installed package discovered on the

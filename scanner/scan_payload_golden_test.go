@@ -161,6 +161,19 @@ func TestScanPayloadGolden_KeySets(t *testing.T) {
 	assertJSONString(t, "ScanError.error", se["error"], "unreadable")
 	assertJSONString(t, "ScanError.env_type", se["env_type"], "conda")
 	assertRFC3339(t, "ScanError.timestamp", se["timestamp"])
+
+	// Drill into os_release. The top-level key-set guard pins that os_release
+	// is present but never inspects its inner keys; this closes that gap by
+	// asserting the exact key set {id, version_id, kernel} and each value type,
+	// so a rename of any OsRelease json tag fails here.
+	var osr map[string]json.RawMessage
+	if err := json.Unmarshal(top["os_release"], &osr); err != nil {
+		t.Fatalf("unmarshal os_release: %v", err)
+	}
+	assertKeySet(t, "OsRelease", osr, []string{"id", "version_id", "kernel"})
+	assertJSONString(t, "OsRelease.id", osr["id"], "debian")
+	assertJSONString(t, "OsRelease.version_id", osr["version_id"], "12")
+	assertJSONString(t, "OsRelease.kernel", osr["kernel"], "6.1.0-18-amd64")
 }
 
 // fullyPopulatedScanResult returns a ScanResult in which every field of
@@ -202,7 +215,7 @@ func fullyPopulatedScanResult(ts time.Time) ScanResult {
 		Errors: []ScanError{
 			{Path: "/broken/env", EnvType: EnvConda, Error: "unreadable", Timestamp: ts},
 		},
-		OsRelease: &OsRelease{ID: "debian", VersionID: "12"},
+		OsRelease: &OsRelease{ID: "debian", VersionID: "12", Kernel: "6.1.0-18-amd64"},
 		ContainerTargets: []ContainerTargetSummary{
 			{
 				Runtime:       "docker",
