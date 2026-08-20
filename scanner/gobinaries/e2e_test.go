@@ -17,7 +17,9 @@ import (
 func TestFullScanPicksUpGoBinaries(t *testing.T) {
 	src := hostFixtureBinary(t)
 	binDir := t.TempDir()
-	copyFixtureInto(t, src, filepath.Join(binDir, "fixturebin"))
+	// Name the fixture via exeName so discovery's walk accepts it under the
+	// Windows .exe gate; on Unix the name is unchanged.
+	copyFixtureInto(t, src, filepath.Join(binDir, exeName("fixturebin")))
 
 	// Point discovery at the fixture bin dir and isolate env-derived roots so
 	// the run is deterministic.

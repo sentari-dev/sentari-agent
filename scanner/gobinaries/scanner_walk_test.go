@@ -37,9 +37,11 @@ func distinctInstallPaths(recs []scanner.PackageRecord) map[string]struct{} {
 func TestScan_FindsBinariesInFixtureTree(t *testing.T) {
 	src := hostFixtureBinary(t)
 	root := t.TempDir()
-	tool1 := filepath.Join(root, "tool1")
-	tool2 := filepath.Join(root, "goos_arch", "tool2")
-	tool3 := filepath.Join(root, "deep", "a", "b", "tool3")
+	// Fixtures are named via exeName so the Windows .exe walk gate accepts
+	// them; on Unix the names are unchanged.
+	tool1 := filepath.Join(root, exeName("tool1"))
+	tool2 := filepath.Join(root, "goos_arch", exeName("tool2"))
+	tool3 := filepath.Join(root, "deep", "a", "b", exeName("tool3"))
 	copyFixtureInto(t, src, tool1)
 	copyFixtureInto(t, src, tool2)
 	copyFixtureInto(t, src, tool3)
@@ -79,8 +81,8 @@ func TestScan_RespectsBinaryCountCap(t *testing.T) {
 
 	src := hostFixtureBinary(t)
 	root := t.TempDir()
-	copyFixtureInto(t, src, filepath.Join(root, "a_tool1"))
-	copyFixtureInto(t, src, filepath.Join(root, "b_tool2"))
+	copyFixtureInto(t, src, filepath.Join(root, exeName("a_tool1")))
+	copyFixtureInto(t, src, filepath.Join(root, exeName("b_tool2")))
 
 	recs, errs := scanBinDir(context.Background(), root)
 	if got := len(distinctInstallPaths(recs)); got != 1 {
@@ -110,9 +112,9 @@ func TestScan_CancelledContextStopsWalk(t *testing.T) {
 func TestScan_SkipDirHookHonoured(t *testing.T) {
 	src := hostFixtureBinary(t)
 	root := t.TempDir()
-	copyFixtureInto(t, src, filepath.Join(root, "keep", "tool1"))
+	copyFixtureInto(t, src, filepath.Join(root, "keep", exeName("tool1")))
 	skipped := filepath.Join(root, "skipme")
-	copyFixtureInto(t, src, filepath.Join(skipped, "tool2"))
+	copyFixtureInto(t, src, filepath.Join(skipped, exeName("tool2")))
 
 	restore := pathfilter.SetSkipDirHookForTest(func(p string) bool {
 		return filepath.Base(p) == "skipme"

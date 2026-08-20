@@ -93,3 +93,15 @@ func hostFixtureBinary(t *testing.T) string {
 	t.Helper()
 	return buildFixtureBinary(t, runtime.GOOS)
 }
+
+// exeName appends the Windows executable suffix when the host is Windows so
+// that walk-based fixtures satisfy scanBinDir's .exe name gate; on Unix it
+// returns name unchanged (Go binaries are extensionless there). Walk/e2e tests
+// name their on-disk fixtures through this helper; the direct-probe tests do
+// not, since probeBinary carries no name gate.
+func exeName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}

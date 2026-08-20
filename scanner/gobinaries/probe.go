@@ -5,9 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
-	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
@@ -54,10 +51,15 @@ func looksLikeObjectFile(head []byte) bool {
 
 // probeBinary inspects one filesystem path and returns the module records it
 // carries, if any. It never executes the file: candidates are Lstat-gated
-// (symlinks and irregular files refused), size-capped, name-gated on Windows,
-// magic-sniffed, and only then read with debug/buildinfo through the
-// symlink-refusing safeio.Open. Non-Go files fail the parse and are skipped
-// silently; only I/O and cap conditions produce a ScanError.
+// (symlinks and irregular files refused), size-capped, magic-sniffed, and only
+// then read with debug/buildinfo through the symlink-refusing safeio.Open.
+// Non-Go files fail the parse and are skipped silently; only I/O and cap
+// conditions produce a ScanError.
+//
+// probeBinary is a pure, platform-independent probe over any candidate path:
+// the Windows ".exe" name gate lives at the walk (scanBinDir), not here, so the
+// probe/format logic can be exercised cross-platform against ELF/PE/Mach-O
+// fixtures on any host.
 func probeBinary(path string) ([]scanner.PackageRecord, []scanner.ScanError) {
 	// Lstat gate: skip symlinks (size-cap-bypass vector) and non-regular
 	// files (FIFO/device — hang/unbounded-read vectors) before opening.
@@ -71,12 +73,6 @@ func probeBinary(path string) ([]scanner.PackageRecord, []scanner.ScanError) {
 	if li.Size() > maxGoBinaryBytes {
 		return nil, []scanner.ScanError{stampless(path,
 			fmt.Sprintf("binary exceeds size cap: %d > %d bytes; skipped", li.Size(), maxGoBinaryBytes))}
-	}
-	// Windows Go binaries always carry the .exe extension; the cheap name
-	// gate skips the thousands of non-binary files in a Program Files tree.
-	// Unix Go binaries are extensionless, so no name gate applies there.
-	if runtime.GOOS == "windows" && !strings.EqualFold(filepath.Ext(path), ".exe") {
-		return nil, nil
 	}
 
 	// safeio.Open refuses a symlink at the leaf and re-verifies regular-file

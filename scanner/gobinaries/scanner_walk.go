@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -78,6 +79,15 @@ func scanBinDir(ctx context.Context, root string) ([]scanner.PackageRecord, []sc
 
 		// Regular files only, within the depth cap.
 		if componentDepth(root, path) > maxWalkDepth {
+			return nil
+		}
+		// Windows Go binaries always carry the .exe extension; this cheap name
+		// gate skips the thousands of non-binary files in a Program Files tree
+		// before the more expensive open + magic-sniff in probeBinary. Unix Go
+		// binaries are extensionless, so no name gate applies there. The gate
+		// lives here at the walk (not in probeBinary) so probeBinary stays a
+		// pure, cross-platform-testable probe over any candidate path.
+		if runtime.GOOS == "windows" && !strings.EqualFold(filepath.Ext(path), ".exe") {
 			return nil
 		}
 		if cappedAt {
