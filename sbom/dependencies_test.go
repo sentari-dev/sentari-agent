@@ -2,6 +2,7 @@ package sbom
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -247,7 +248,7 @@ func TestSPDXPackagesSortedAndIdsSequential(t *testing.T) {
 		if m["name"] != wantName {
 			t.Errorf("packages[%d].name = %v, want %v", i, m["name"], wantName)
 		}
-		wantID := "SPDXRef-Package-" + string(rune('0'+i))
+		wantID := fmt.Sprintf("SPDXRef-Package-%d", i)
 		if m["SPDXID"] != wantID {
 			t.Errorf("packages[%d].SPDXID = %v, want %v", i, m["SPDXID"], wantID)
 		}
