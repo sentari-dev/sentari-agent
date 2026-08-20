@@ -35,7 +35,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["SPDXID", "name", "downloadLocation"],
+        "required": ["SPDXID", "name", "downloadLocation", "copyrightText"],
         "properties": {
           "SPDXID": { "type": "string", "pattern": "^SPDXRef-" },
           "name": { "type": "string", "minLength": 1 },
@@ -44,6 +44,7 @@
           "filesAnalyzed": { "type": "boolean" },
           "licenseConcluded": { "type": "string" },
           "licenseDeclared": { "type": "string" },
+          "copyrightText": { "type": "string", "minLength": 1 },
           "externalRefs": {
             "type": "array",
             "items": {
@@ -66,7 +67,7 @@
         "required": ["spdxElementId", "relationshipType", "relatedSpdxElement"],
         "properties": {
           "spdxElementId": { "type": "string", "minLength": 1 },
-          "relationshipType": { "type": "string", "minLength": 1 },
+          "relationshipType": { "enum": ["DESCRIBES", "DEPENDS_ON"] },
           "relatedSpdxElement": { "type": "string", "minLength": 1 }
         }
       }

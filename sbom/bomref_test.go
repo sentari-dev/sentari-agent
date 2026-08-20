@@ -63,8 +63,8 @@ func TestCycloneDXBomRefUniqueAcrossEnvironments(t *testing.T) {
 
 // TestCycloneDXBomRefUniqueManyDuplicates exercises the general uniqueness
 // invariant across a larger set with several collisions, including
-// components that have no purl (comp-* fallback) which must also stay
-// unique.
+// components that have no purl (coordinate-form fallback ref) which must also
+// stay unique.
 func TestCycloneDXBomRefUniqueManyDuplicates(t *testing.T) {
 	res := &scanner.ScanResult{
 		Hostname:     "host-1",
@@ -74,7 +74,7 @@ func TestCycloneDXBomRefUniqueManyDuplicates(t *testing.T) {
 			{Name: "requests", Version: "2.31.0", EnvType: scanner.EnvPip, InstallPath: "/a"},
 			{Name: "requests", Version: "2.31.0", EnvType: scanner.EnvPip, InstallPath: "/b"},
 			{Name: "requests", Version: "2.31.0", EnvType: scanner.EnvPip, InstallPath: "/c"},
-			// No purl (ai_agent) — comp-* fallback path.
+			// No purl (ai_agent) — coordinate-form fallback ref path.
 			{Name: "weird", Version: "1.0", EnvType: "ai_agent"},
 			{Name: "weird2", Version: "1.0", EnvType: "ai_agent"},
 		},

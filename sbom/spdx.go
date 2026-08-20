@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
+	"github.com/sentari-dev/sentari-agent/scanner/deptree"
 )
 
 // SPDXDocument is a minimal SPDX 2.3 document in JSON format.
@@ -53,6 +55,7 @@ type SPDXPackage struct {
 	FilesAnalyzed    bool              `json:"filesAnalyzed"`
 	LicenseConcluded string            `json:"licenseConcluded"`
 	LicenseDeclared  string            `json:"licenseDeclared"`
+	CopyrightText    string            `json:"copyrightText"`
 	ExternalRefs     []SPDXExternalRef `json:"externalRefs,omitempty"`
 }
 
@@ -64,28 +67,39 @@ func GenerateSPDX(result *scanner.ScanResult) ([]byte, error) {
 	}
 	namespace := fmt.Sprintf("https://sentari.io/sbom/%s", serialID)
 
-	packages := make([]SPDXPackage, 0, len(result.Packages))
-	relationships := make([]SPDXRelationship, 0, len(result.Packages))
-	for i, pkg := range result.Packages {
+	// The same shared plan the CycloneDX generator uses, so SPDX package ids
+	// and CycloneDX bom-refs are assigned in one identical order.
+	plans, _ := planComponents(result)
+	licenses := newLicenseIndex(result.LicenseEvidence)
+
+	packages := make([]SPDXPackage, 0, len(plans))
+	relationships := make([]SPDXRelationship, 0, len(plans))
+	// idByKey maps a package coordinate to the SPDX id of its first (sorted
+	// lowest) instance — the canonical graph node dependency edges attach to.
+	idByKey := make(map[string]string, len(plans))
+	for i, plan := range plans {
+		pkg := plan.pkg
 		spdxID := fmt.Sprintf("SPDXRef-Package-%d", i)
+		lic := resolveComponentLicenses(pkg, licenses)
 		p := SPDXPackage{
 			SPDXID:           spdxID,
 			Name:             pkg.Name,
 			VersionInfo:      pkg.Version,
 			DownloadLocation: "NOASSERTION",
 			FilesAnalyzed:    false,
-			LicenseConcluded: "NOASSERTION",
-			LicenseDeclared:  "NOASSERTION",
+			LicenseConcluded: lic.concluded,
+			LicenseDeclared:  lic.declared,
+			CopyrightText:    lic.copyright,
 		}
 		// Attach a purl external ref only when the ecosystem yields a
 		// correct, standard purl (see sbom.purlFor). Omitting it is
 		// preferable to emitting a wrong pkg:pypi/ locator.
-		if purl := purlFor(pkg); purl != "" {
+		if plan.purl != "" {
 			p.ExternalRefs = []SPDXExternalRef{
 				{
 					ReferenceCategory: "PACKAGE-MANAGER",
 					ReferenceType:     "purl",
-					ReferenceLocator:  purl,
+					ReferenceLocator:  plan.purl,
 				},
 			}
 		}
@@ -95,7 +109,14 @@ func GenerateSPDX(result *scanner.ScanResult) ([]byte, error) {
 			RelationshipType:   "DESCRIBES",
 			RelatedSPDXElement: spdxID,
 		})
+		if key := coordKey(envTypeEcosystem(pkg.EnvType), pkg.Name, pkg.Version); key != "" {
+			if _, ok := idByKey[key]; !ok {
+				idByKey[key] = spdxID
+			}
+		}
 	}
+	// DEPENDS_ON relationships follow the full DESCRIBES block (SPDX 2.3).
+	relationships = append(relationships, buildSPDXDependsOn(result.DepEdges, idByKey)...)
 
 	doc := SPDXDocument{
 		SPDXID:      "SPDXRef-DOCUMENT",
@@ -115,6 +136,51 @@ func GenerateSPDX(result *scanner.ScanResult) ([]byte, error) {
 	}
 
 	return json.MarshalIndent(doc, "", "  ")
+}
+
+// buildSPDXDependsOn builds the DEPENDS_ON relationships from the scan's
+// dependency edges. Each endpoint resolves to a package SPDX id via its
+// coordinate key (idByKey); an edge with an unresolved endpoint (uninstalled,
+// version-mismatched, or from an ecosystem without a coordinate key) is dropped
+// so no relationship references a package absent from the document. Pairs are
+// deduped and sorted by (parent id, child id). Returns nil when nothing
+// resolves.
+func buildSPDXDependsOn(edges []deptree.DepEdge, idByKey map[string]string) []SPDXRelationship {
+	type pair struct{ parent, child string }
+	seen := make(map[pair]struct{})
+	for _, e := range edges {
+		parentID, ok := idByKey[coordKey(e.Ecosystem, e.ParentName, e.ParentVersion)]
+		if !ok {
+			continue
+		}
+		childID, ok := idByKey[coordKey(e.Ecosystem, e.ChildName, e.ChildVersion)]
+		if !ok {
+			continue
+		}
+		seen[pair{parent: parentID, child: childID}] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	pairs := make([]pair, 0, len(seen))
+	for p := range seen {
+		pairs = append(pairs, p)
+	}
+	sort.Slice(pairs, func(a, b int) bool {
+		if pairs[a].parent != pairs[b].parent {
+			return pairs[a].parent < pairs[b].parent
+		}
+		return pairs[a].child < pairs[b].child
+	})
+	out := make([]SPDXRelationship, 0, len(pairs))
+	for _, p := range pairs {
+		out = append(out, SPDXRelationship{
+			SPDXElementID:      p.parent,
+			RelationshipType:   "DEPENDS_ON",
+			RelatedSPDXElement: p.child,
+		})
+	}
+	return out
 }
 
 // WriteSPDXToFile generates and writes the SPDX SBOM to disk.

@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner"
+	"github.com/sentari-dev/sentari-agent/scanner/deptree"
 )
 
 // purlFor returns the Package-URL (purl) for a scanned package record,
@@ -93,12 +95,20 @@ func purlFor(pkg scanner.PackageRecord) string {
 
 // CycloneDXBOM represents a minimal CycloneDX 1.6 BOM in JSON format.
 type CycloneDXBOM struct {
-	BOMFormat    string               `json:"bomFormat"`
-	SpecVersion  string               `json:"specVersion"`
-	SerialNumber string               `json:"serialNumber"`
-	Version      int                  `json:"version"`
-	Metadata     CycloneDXMetadata    `json:"metadata"`
-	Components   []CycloneDXComponent `json:"components"`
+	BOMFormat    string                `json:"bomFormat"`
+	SpecVersion  string                `json:"specVersion"`
+	SerialNumber string                `json:"serialNumber"`
+	Version      int                   `json:"version"`
+	Metadata     CycloneDXMetadata     `json:"metadata"`
+	Components   []CycloneDXComponent  `json:"components"`
+	Dependencies []CycloneDXDependency `json:"dependencies,omitempty"`
+}
+
+// CycloneDXDependency is one node of the top-level dependency graph: a
+// component ref and the sorted refs of the components it directly depends on.
+type CycloneDXDependency struct {
+	Ref       string   `json:"ref"`
+	DependsOn []string `json:"dependsOn"`
 }
 
 // CycloneDXMetadata holds BOM metadata.
@@ -123,12 +133,13 @@ type CycloneDXProperty struct {
 
 // CycloneDXComponent represents a single component in the BOM.
 type CycloneDXComponent struct {
-	Type       string              `json:"type"`
-	BOMRef     string              `json:"bom-ref,omitempty"`
-	Name       string              `json:"name"`
-	Version    string              `json:"version,omitempty"`
-	Purl       string              `json:"purl,omitempty"`
-	Properties []CycloneDXProperty `json:"properties,omitempty"`
+	Type       string                   `json:"type"`
+	BOMRef     string                   `json:"bom-ref,omitempty"`
+	Name       string                   `json:"name"`
+	Version    string                   `json:"version,omitempty"`
+	Purl       string                   `json:"purl,omitempty"`
+	Licenses   []CycloneDXLicenseChoice `json:"licenses,omitempty"`
+	Properties []CycloneDXProperty      `json:"properties,omitempty"`
 }
 
 // generateUUIDv4 returns a random RFC 4122 version-4 UUID string using
@@ -151,50 +162,22 @@ func GenerateCycloneDX(result *scanner.ScanResult) ([]byte, error) {
 		return nil, fmt.Errorf("generate SBOM serial number: %w", err)
 	}
 
-	components := make([]CycloneDXComponent, 0, len(result.Packages))
+	// One shared, deterministic component plan feeds both SBOM formats so
+	// CycloneDX and SPDX can never disagree on ordering or bom-refs.
+	plans, refByKey := planComponents(result)
+	licenses := newLicenseIndex(result.LicenseEvidence)
 
-	// CycloneDX requires every bom-ref to be unique within the BOM. The
-	// same package (identical purl) can legitimately appear in multiple
-	// environments on one device, which would otherwise collide. Track
-	// the base bom-refs we've emitted and disambiguate collisions with a
-	// "#<n>" suffix. The purl field itself is left untouched so the
-	// component's package identity (and the scoped-npm purl encoding)
-	// stays correct.
-	usedRefs := make(map[string]int, len(result.Packages))
-
-	for i, pkg := range result.Packages {
-		purl := purlFor(pkg)
-		// Stable bom-ref: prefer the purl (globally unique), else a
-		// deterministic comp-<i> id so dependency/vuln graphs can still
-		// reference components lacking a standard purl.
-		bomRef := purl
-		if bomRef == "" {
-			bomRef = fmt.Sprintf("comp-%d", i)
-		}
-		// Ensure uniqueness: on the first sighting keep the base ref; on
-		// each subsequent collision append "#1", "#2", ... The comp-<i>
-		// fallback is already index-unique, but a purl can repeat.
-		if n := usedRefs[bomRef]; n > 0 {
-			unique := fmt.Sprintf("%s#%d", bomRef, n)
-			// Guard against an (improbable) crafted collision between a
-			// suffixed ref and an existing base ref.
-			for usedRefs[unique] > 0 {
-				n++
-				unique = fmt.Sprintf("%s#%d", bomRef, n)
-			}
-			usedRefs[bomRef] = n + 1
-			usedRefs[unique] = 1
-			bomRef = unique
-		} else {
-			usedRefs[bomRef] = 1
-		}
+	components := make([]CycloneDXComponent, 0, len(plans))
+	for _, plan := range plans {
+		pkg := plan.pkg
 		comp := CycloneDXComponent{
 			Type:    "library",
-			BOMRef:  bomRef,
+			BOMRef:  plan.ref,
 			Name:    pkg.Name,
 			Version: pkg.Version,
-			Purl:    purl,
+			Purl:    plan.purl,
 		}
+		comp.Licenses = resolveComponentLicenses(pkg, licenses).cyclonedx
 		if pkg.InstallPath != "" {
 			comp.Properties = []CycloneDXProperty{
 				{Name: "sentari:install_path", Value: pkg.InstallPath},
@@ -223,10 +206,56 @@ func GenerateCycloneDX(result *scanner.ScanResult) ([]byte, error) {
 				Name:   result.Hostname,
 			},
 		},
-		Components: components,
+		Components:   components,
+		Dependencies: buildCycloneDXDependencies(result.DepEdges, refByKey),
 	}
 
 	return json.MarshalIndent(bom, "", "  ")
+}
+
+// buildCycloneDXDependencies builds the top-level dependency graph from the
+// scan's dependency edges. Each edge endpoint is resolved to a component
+// bom-ref via its coordinate key (refByKey); an edge whose parent or child is
+// not an installed component (uninstalled, version-mismatched, or from an
+// ecosystem without a coordinate key) is silently dropped — an SBOM must never
+// reference a node it does not contain. The result has one entry per parent
+// with at least one surviving edge, entries sorted by ref, and each dependsOn
+// list sorted and deduped. Returns nil when no edge resolves, so the caller's
+// omitempty keeps edge-less documents free of an empty array.
+func buildCycloneDXDependencies(edges []deptree.DepEdge, refByKey map[string]string) []CycloneDXDependency {
+	depends := make(map[string]map[string]struct{})
+	for _, e := range edges {
+		parentRef, ok := refByKey[coordKey(e.Ecosystem, e.ParentName, e.ParentVersion)]
+		if !ok {
+			continue
+		}
+		childRef, ok := refByKey[coordKey(e.Ecosystem, e.ChildName, e.ChildVersion)]
+		if !ok {
+			continue
+		}
+		if depends[parentRef] == nil {
+			depends[parentRef] = make(map[string]struct{})
+		}
+		depends[parentRef][childRef] = struct{}{}
+	}
+	if len(depends) == 0 {
+		return nil
+	}
+	refs := make([]string, 0, len(depends))
+	for ref := range depends {
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+	out := make([]CycloneDXDependency, 0, len(refs))
+	for _, ref := range refs {
+		children := make([]string, 0, len(depends[ref]))
+		for child := range depends[ref] {
+			children = append(children, child)
+		}
+		sort.Strings(children)
+		out = append(out, CycloneDXDependency{Ref: ref, DependsOn: children})
+	}
+	return out
 }
 
 // WriteCycloneDXToFile generates and writes the CycloneDX SBOM to disk.

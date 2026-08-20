@@ -50,6 +50,28 @@
           "name": { "type": "string", "minLength": 1 },
           "version": { "type": "string" },
           "purl": { "type": "string", "pattern": "^pkg:" },
+          "licenses": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "oneOf": [
+                {
+                  "required": ["expression"],
+                  "properties": { "expression": { "type": "string", "minLength": 1 } }
+                },
+                {
+                  "required": ["license"],
+                  "properties": {
+                    "license": {
+                      "type": "object",
+                      "required": ["name"],
+                      "properties": { "name": { "type": "string", "minLength": 1 } }
+                    }
+                  }
+                }
+              ]
+            }
+          },
           "properties": {
             "type": "array",
             "items": {
@@ -60,6 +82,20 @@
                 "value": { "type": "string" }
               }
             }
+          }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["ref", "dependsOn"],
+        "properties": {
+          "ref": { "type": "string", "minLength": 1 },
+          "dependsOn": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
           }
         }
       }
