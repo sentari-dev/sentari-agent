@@ -132,8 +132,15 @@ func scanBinDir(ctx context.Context, root string) ([]scanner.PackageRecord, []sc
 // is not under root, so a mis-rooted path is treated as too deep and skipped.
 func componentDepth(root, child string) int {
 	rel, err := filepath.Rel(root, child)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == "." {
 		return 1 << 30
 	}
-	return len(strings.Split(rel, string(filepath.Separator)))
+	segs := strings.Split(rel, string(filepath.Separator))
+	// Only a genuine parent-traversal `..` PATH SEGMENT means child is outside
+	// root. A name that merely starts with dots (e.g. "..foo") is a valid child
+	// and must be counted as an in-tree component, not flagged as out-of-tree.
+	if segs[0] == ".." {
+		return 1 << 30
+	}
+	return len(segs)
 }

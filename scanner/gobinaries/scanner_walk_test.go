@@ -74,6 +74,24 @@ func TestScan_FindsBinariesInFixtureTree(t *testing.T) {
 	}
 }
 
+func TestScan_DotDotPrefixedNameProbed(t *testing.T) {
+	// Regression: componentDepth must treat a child whose name merely STARTS
+	// with dots ("..foo") as an in-tree entry at depth 1, not as a parent
+	// traversal `..` segment. Such a binary must be probed, not skipped.
+	src := hostFixtureBinary(t)
+	root := t.TempDir()
+	bin := filepath.Join(root, exeName("..foo"))
+	copyFixtureInto(t, src, bin)
+
+	recs, errs := scanBinDir(context.Background(), root)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	if _, ok := distinctInstallPaths(recs)[bin]; !ok {
+		t.Errorf("`..foo`-named binary must be probed, not skipped; paths=%v", distinctInstallPaths(recs))
+	}
+}
+
 func TestScan_RespectsBinaryCountCap(t *testing.T) {
 	orig := maxBinariesPerEnv
 	maxBinariesPerEnv = 1
