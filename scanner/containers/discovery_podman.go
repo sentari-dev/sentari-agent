@@ -37,6 +37,11 @@ type podmanImageRecord struct {
 type podmanLayerRecord struct {
 	ID     string `json:"id"`
 	Parent string `json:"parent"` // empty for the base layer
+	// DiffDigest is the layer's uncompressed content digest
+	// (`sha256:...`), the podman/containers-storage equivalent of a
+	// Docker rootfs.diff_id.  Absent on older stores or on the
+	// writable container layer.
+	DiffDigest string `json:"diff-digest"`
 }
 
 // podmanContainerRecord — subset of overlay-containers/containers.json.
@@ -116,6 +121,7 @@ func discoverPodmanRoot(root string) ([]ContainerTarget, []scanner.ScanError) {
 			Runtime:      RuntimePodman,
 			ImageID:      ensureSHA256Prefix(img.Digest, img.ID),
 			ImageTags:    img.Names,
+			LayerDigests: resolvePodmanDigestChain(img.Layer, layers),
 			MergedRootFS: MergedTree{Layers: layerChain},
 		})
 	}
@@ -169,9 +175,12 @@ func discoverPodmanRoot(root string) ([]ContainerTarget, []scanner.ScanError) {
 			name = c.Names[0]
 		}
 		targets = append(targets, ContainerTarget{
-			Runtime:       RuntimePodman,
-			ImageID:       ensureSHA256Prefix(img.Digest, img.ID),
-			ImageTags:     img.Names,
+			Runtime:   RuntimePodman,
+			ImageID:   ensureSHA256Prefix(img.Digest, img.ID),
+			ImageTags: img.Names,
+			// Inherit the image's digest chain — the container's own
+			// writable layer carries no diff-digest.
+			LayerDigests:  resolvePodmanDigestChain(img.Layer, layers),
 			ContainerID:   c.ID,
 			ContainerName: name,
 			MergedRootFS:  MergedTree{Layers: layerChain},
@@ -215,6 +224,47 @@ func resolvePodmanLayerChain(root, topID string, layers map[string]podmanLayerRe
 		return nil
 	}
 	// Reverse to bottom-to-top for MergedTree.
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+	return chain
+}
+
+// resolvePodmanDigestChain walks the parent-pointer chain from a top
+// layer ID down to the base, collecting each layer's diff-digest, and
+// returns the chain bottom-to-top (matching the diff_ids convention).
+//
+// All-or-nothing: if ANY layer in the chain is missing from the index
+// or lacks a diff-digest, it returns nil rather than a partial chain.
+// A digest list is a verification claim; a hole would silently shift
+// every subsequent position, so an incomplete chain is emitted as no
+// chain at all.
+func resolvePodmanDigestChain(topID string, layers map[string]podmanLayerRecord) []string {
+	if topID == "" {
+		return nil
+	}
+	var chain []string // top-to-bottom during the walk
+	current := topID
+	// Same depth cap as resolvePodmanLayerChain — guards a malformed
+	// index with a parent cycle.
+	for i := 0; i < 200 && current != ""; i++ {
+		layer, ok := layers[current]
+		if !ok {
+			// A referenced layer isn't in the index — the chain is
+			// incomplete, so emit no digests.
+			return nil
+		}
+		if layer.DiffDigest == "" {
+			// Digest-less layer anywhere in the chain → all-or-nothing.
+			return nil
+		}
+		chain = append(chain, layer.DiffDigest)
+		current = layer.Parent
+	}
+	if len(chain) == 0 {
+		return nil
+	}
+	// Reverse to bottom-to-top.
 	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
 		chain[i], chain[j] = chain[j], chain[i]
 	}

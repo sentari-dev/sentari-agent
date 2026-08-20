@@ -93,6 +93,7 @@ func ScanAndAppend(ctx context.Context, baseCfg scanner.Config, result *scanner.
 			ContainerID:   t.ContainerID,
 			ContainerName: t.ContainerName,
 			LayerCount:    len(t.MergedRootFS.Layers),
+			LayerDigests:  t.LayerDigests,
 		})
 	}
 

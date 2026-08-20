@@ -271,14 +271,25 @@ server has it dropped by Pydantic `extra='ignore'`.
 
 ### apt/yum CVE-correctness slice
 
-- **`os_release`** — top-level object `{"id": string, "version_id": string}`,
-  from the host's `/etc/os-release`. The server derives a release-keyed
-  distro CVE partition (`debian:12`, `rocky:9`) for `system_deb` /
-  `system_rpm` packages from it. **Omitted** on non-Linux hosts or when
-  `/etc/os-release` is unreadable; a missing key, `null`, or empty
-  `version_id` are all treated identically as "release unknown", and the
+- **`os_release`** — top-level object `{"id": string, "version_id": string,
+  "kernel"?: string}`, from the host's `/etc/os-release` plus the kernel
+  release. The server derives a release-keyed distro CVE partition
+  (`debian:12`, `rocky:9`) for `system_deb` / `system_rpm` packages from
+  `id`/`version_id`. `id`/`version_id` are **always present; empty string when
+  the distro is not reported** (e.g. non-Linux hosts or when `/etc/os-release`
+  is unreadable) — never omitted, and never `null` (both are required by the
+  JSON Schema). An empty `version_id` is treated as "release unknown", and the
   server falls back to a release-less sentinel partition (no false PyPI
-  correlation). Scan-only — NOT part of the registration contract.
+  correlation). `kernel` is an optional kernel release string (`uname -r`
+  equivalent: `/proc/sys/kernel/osrelease` on Linux, `kern.osrelease` on
+  macOS, `major.minor.build` on Windows), max 64 chars, **absent on older
+  agents**; the server stores it per-device and represents it as a
+  `linux_kernel` component in generated SBOMs (Linux only). Because `kernel`
+  can be carried on its own, `os_release` may now be present on non-Linux (or
+  degraded-Linux) hosts with **empty** `id`/`version_id` purely to convey
+  `kernel`; an empty `id` means "distro not reported" and never clears the
+  server's stored distro identity. Scan-only — NOT part of the registration
+  contract.
 - **`source_package`** — optional string on each `packages[]` record
   (`system_deb` / `system_rpm` only). dpkg `Source:` / rpm `SOURCERPM`
   source name, so the server can match a binary like `libssl3` against a
@@ -310,6 +321,61 @@ exactly:
 - **`container_runtime`** — string, the container runtime that produced
   the image/container (`docker`, `containerd`, `podman`, …).
 
+### per-artifact evidence slice
+
+Two optional fields on each `packages[]` record carry per-artifact evidence
+for two NTIA SBOM minimum elements (artifact hash + supplier). Both are open-
+object package additions (no v3-schema change; old servers drop them via
+Pydantic `extra='ignore'`), so there is **no 422 hazard** on an older server.
+
+- **`sha256`** — optional string, lowercase 64-hex SHA-256 of the installed
+  artifact **file**, emitted only when exactly one concrete file exists.
+  **Omitted** for multi-file OS packages (`system_deb` / `system_rpm` — a
+  file *set*, no single artifact; the server then omits the SBOM hash key
+  rather than fake one), for unhashable installs, and by agents that predate this field.
+  Server behavior: the value is validated and case-normalized at persist time
+  (valid 64-hex → stored lowercased; wrong length / non-hex / empty → stored
+  NULL, and the scan is **never rejected** for a malformed value). Emitted in
+  the SBOM as CycloneDX `hashes:[{"alg":"SHA-256",...}]` / SPDX
+  `checksums:[{"algorithm":"SHA256",...}]`; on a fleet SBOM a coordinate's
+  hash is emitted only when every device that reported one agrees (consensus).
+- **`supplier`** — optional string, supplier from **locally readable**
+  metadata only (deb `Maintainer:`, the installed `package.json` `author`,
+  the IDE extension `Publisher`) — never a registry lookup (air-gap,
+  constraint #2). Absent, `null`, or `""` all mean "not derivable" (common for
+  language ecosystems); the server stores NULL and the SBOM omits the field.
+  Server behavior: stripped and truncated to 255 characters at persist time.
+  Emitted as CycloneDX `supplier:{"name":...}` / SPDX
+  `supplier:"Organization: <value>"`. Self-declared and unauthenticated — not
+  a provenance attestation.
+
+### Go binary module records
+
+Go compilers embed the complete module dependency graph inside every
+module-built executable. The agent reads this metadata directly from the
+binary file (it never executes a scanned binary) and emits one `packages[]`
+record per embedded module.
+
+- **`env_type: "go_binary"`** — the literal reported on each such record. One
+  record is emitted for the binary's **main module**, one for **each
+  dependency**, and one for the Go **standard library** (name `stdlib`, version
+  set to the embedded toolchain version, e.g. `go1.23.4`). Servers ingest
+  `go_binary` records under the `go` ecosystem.
+- **`install_path`** — the absolute path of the binary the module was read
+  from. The same module compiled into two binaries yields two records with
+  distinct `install_path` values, so an operator can tell which binary to
+  rebuild; fleet-level de-duplication is a server concern.
+- **Versions** are recorded verbatim: released dependencies as `vX.Y.Z`,
+  unreleased ones as Go pseudo-versions
+  (`v0.0.0-<timestamp>-<revision>`). A locally-built main module reports its
+  VCS revision when the build recorded one, otherwise the toolchain's `(devel)`
+  placeholder. **Replace directives** are resolved to the replacement — the
+  module actually compiled in — and only the replacement is emitted.
+- Open-object addition: like the other `packages[]` fields above, this is
+  **not** part of the v3 JSON schema and requires no schema change; a server
+  that predates the `go` ecosystem drops these records via Pydantic
+  `extra='ignore'` (no 422). **Absent on older agents** that lack the detector.
+
 ### Device-level base fields
 
 - **`tags`** — top-level array of operator-supplied host tags from
@@ -328,7 +394,18 @@ exactly:
 - **`container_targets`** — top-level array summarising every
   container/image the agent's container discoverer enumerated this scan
   cycle (`{runtime, image_id, image_tags[], container_id, container_name,
-  layer_count}`). Informational — carried raw into `scan_results.raw_json`
-  for a future filter UI; not yet promoted to dedicated columns.
-  Populated only when `ScanContainers` is true or the discoverer is
-  explicitly invoked; otherwise nil/omitted.
+  layer_count, layer_digests[]}`). Promoted server-side into the
+  `device_containers` current-state table and emitted as a `container`
+  SBOM component (base-image digest + layer chain). Populated only when
+  `ScanContainers` is true or the discoverer is explicitly invoked;
+  otherwise nil/omitted.
+  - **`layer_digests`** — optional ordered array of the image's layer
+    `diff_ids`, **bottom-to-top** (the OCI image-config `rootfs.diff_ids`
+    order; semantic — never sorted). Each entry is a `sha256:<64-hex>`
+    string. Absent on pre-Phase-7 agents and on engines whose local store
+    does not expose digests (containerd; podman chains missing a
+    `diff-digest`). For a **running container** the list carries only the
+    base image's chain, so it may be **shorter than `layer_count`** (the
+    writable upper layer has no digest) — the two fields are deliberately
+    not tied together. The server sanitizes defensively (drops non-sha256
+    entries, caps the list) and never rejects a scan over this field.

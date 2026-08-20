@@ -176,4 +176,50 @@ func TestSubsetSchemaRejectsSpecShapeRegressions(t *testing.T) {
 		first, _ := pkgs[0].(map[string]any)
 		delete(first, "downloadLocation")
 	}), "spdx package missing downloadLocation")
+
+	// The following prove the tightened license/dependency/copyright/enum
+	// constraints actually bite — the subset schemas are permissive by design
+	// (additionalProperties true), so without these a malformed new shape could
+	// slip through unnoticed.
+
+	// CycloneDX: a license entry that is neither the expression nor the named
+	// form (both branches of the oneOf fail).
+	expectInvalid(t, cdxSchema, mutate(t, cdx, func(m map[string]any) {
+		comps, _ := m["components"].([]any)
+		for _, c := range comps {
+			cm, _ := c.(map[string]any)
+			if _, ok := cm["licenses"]; ok {
+				cm["licenses"] = []any{map[string]any{"unknown": "shape"}}
+				return
+			}
+		}
+		t.Fatal("golden has no component with licenses to mutate")
+	}), "cyclonedx malformed license choice")
+
+	// CycloneDX: a dependency entry missing its required "dependsOn".
+	expectInvalid(t, cdxSchema, mutate(t, cdx, func(m map[string]any) {
+		deps, ok := m["dependencies"].([]any)
+		if !ok || len(deps) == 0 {
+			t.Fatal("golden has no dependencies to mutate")
+		}
+		first, _ := deps[0].(map[string]any)
+		delete(first, "dependsOn")
+	}), "cyclonedx dependency missing dependsOn")
+
+	// SPDX: a package missing its now-required "copyrightText".
+	expectInvalid(t, spdxSchema, mutate(t, spdx, func(m map[string]any) {
+		pkgs, _ := m["packages"].([]any)
+		first, _ := pkgs[0].(map[string]any)
+		delete(first, "copyrightText")
+	}), "spdx package missing copyrightText")
+
+	// SPDX: a relationship with a type outside the allowed enum.
+	expectInvalid(t, spdxSchema, mutate(t, spdx, func(m map[string]any) {
+		rels, ok := m["relationships"].([]any)
+		if !ok || len(rels) == 0 {
+			t.Fatal("golden has no relationships to mutate")
+		}
+		first, _ := rels[0].(map[string]any)
+		first["relationshipType"] = "CONTAINS"
+	}), "spdx relationship type outside enum")
 }

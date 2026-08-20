@@ -246,6 +246,86 @@ func TestDiscoverDocker_RunningContainerAppendsUpperDir(t *testing.T) {
 	}
 }
 
+// TestDiscoverDocker_ImageCarriesLayerDigests: an image-only target
+// carries LayerDigests equal to the image config's rootfs.diff_ids,
+// bottom-to-top, order preserved (never sorted).
+func TestDiscoverDocker_ImageCarriesLayerDigests(t *testing.T) {
+	img := dockerFixtureImage{
+		ID:   "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		Tags: []string{"python:3.12"},
+		DiffIDs: []string{
+			"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+			"sha256:2222222222222222222222222222222222222222222222222222222222222222",
+		},
+	}
+	root := buildDockerFixture(t, []dockerFixtureImage{img}, nil)
+
+	targets, errs := discoverDocker(root)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected ScanErrors: %+v", errs)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d: %+v", len(targets), targets)
+	}
+	got := targets[0].LayerDigests
+	if len(got) != len(img.DiffIDs) {
+		t.Fatalf("LayerDigests len: got %d, want %d: %v", len(got), len(img.DiffIDs), got)
+	}
+	// Order-preserving equality — bottom-to-top, exactly as diff_ids.
+	for i := range img.DiffIDs {
+		if got[i] != img.DiffIDs[i] {
+			t.Errorf("LayerDigests[%d]: got %q, want %q (order must be preserved)", i, got[i], img.DiffIDs[i])
+		}
+	}
+}
+
+// TestDiscoverDocker_RunningContainerInheritsImageDigests: a running
+// container inherits the base image's diff_ids chain (the writable
+// upper-dir has no digest), so LayerDigests matches the image while
+// MergedRootFS.Layers carries one extra path (the upper-dir).
+func TestDiscoverDocker_RunningContainerInheritsImageDigests(t *testing.T) {
+	img := dockerFixtureImage{
+		ID: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		DiffIDs: []string{
+			"sha256:3333333333333333333333333333333333333333333333333333333333333333",
+		},
+	}
+	containers := []dockerFixtureContainer{{
+		ID:      "container-abcdefabcdef",
+		Name:    "happy_curie",
+		ImageID: img.ID,
+		Running: true,
+	}}
+	root := buildDockerFixture(t, []dockerFixtureImage{img}, containers)
+
+	targets, errs := discoverDocker(root)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected ScanErrors: %+v", errs)
+	}
+	var running *ContainerTarget
+	for i := range targets {
+		if targets[i].ContainerID != "" {
+			running = &targets[i]
+			break
+		}
+	}
+	if running == nil {
+		t.Fatalf("no running-container target in output: %+v", targets)
+	}
+	// Container inherits the image's single diff_id, NOT a digest for
+	// the writable upper-dir.
+	if len(running.LayerDigests) != 1 || running.LayerDigests[0] != img.DiffIDs[0] {
+		t.Errorf("running container LayerDigests: got %v, want %v", running.LayerDigests, img.DiffIDs)
+	}
+	// The merged path list has one extra layer (upper-dir) beyond the
+	// digest chain — proving digests are the image's truth, not the
+	// path count.
+	if len(running.MergedRootFS.Layers) != len(running.LayerDigests)+1 {
+		t.Errorf("expected MergedRootFS.Layers to be one longer than LayerDigests; layers=%d digests=%d",
+			len(running.MergedRootFS.Layers), len(running.LayerDigests))
+	}
+}
+
 // TestDiscoverDocker_StoppedContainerSkipped: a container with
 // State.Running=false does NOT produce a running-container target.
 // Stopped-container inventory is noise — the image target already

@@ -76,6 +76,12 @@ const (
 type OsRelease struct {
 	ID        string `json:"id"`
 	VersionID string `json:"version_id"`
+	// Kernel is the running kernel release string (the uname -r equivalent)
+	// read from OS data sources without invoking any binary; ≤64 chars, empty
+	// when not detected. The server stores it per-device and represents it in
+	// generated SBOMs. omitempty keeps the wire shape byte-identical for agents
+	// that report no kernel.
+	Kernel string `json:"kernel,omitempty"`
 }
 
 // PackageRecord represents a single installed package discovered on the
@@ -211,6 +217,14 @@ type ContainerTargetSummary struct {
 	// bloated uber-image and drives the "slow scan" explanation in
 	// support tickets.
 	LayerCount int `json:"layer_count"`
+	// LayerDigests is the image's content-addressable layer chain
+	// (`diff_ids`), bottom-to-top — order is semantic and never
+	// sorted.  Omitted on the wire when empty: engines that don't
+	// expose per-layer digests (e.g. containerd) and pre-existing
+	// agents send no digests, keeping their payload byte-identical.
+	// May be SHORTER than LayerCount for a running container, whose
+	// writable upper-dir counts as a layer but has no digest.
+	LayerDigests []string `json:"layer_digests,omitempty"`
 }
 
 // Config holds scanner configuration.

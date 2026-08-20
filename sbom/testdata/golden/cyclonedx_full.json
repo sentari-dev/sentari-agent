@@ -21,29 +21,23 @@
   "components": [
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/requests@2.31.0",
-      "name": "requests",
-      "version": "2.31.0",
-      "purl": "pkg:pypi/requests@2.31.0",
-      "properties": [
-        {
-          "name": "sentari:install_path",
-          "value": "/opt/venv-a"
-        }
-      ]
+      "bom-ref": "ai_agent:acme-copilot@0.9.0",
+      "name": "acme-copilot",
+      "version": "0.9.0"
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/requests@2.31.0#1",
-      "name": "requests",
-      "version": "2.31.0",
-      "purl": "pkg:pypi/requests@2.31.0",
-      "properties": [
-        {
-          "name": "sentari:install_path",
-          "value": "/opt/venv-b"
-        }
-      ]
+      "bom-ref": "pkg:deb/libssl3@3.0.11-1",
+      "name": "libssl3",
+      "version": "3.0.11-1",
+      "purl": "pkg:deb/libssl3@3.0.11-1"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:maven/org.apache.commons/commons-lang3@3.14.0",
+      "name": "org.apache.commons:commons-lang3",
+      "version": "3.14.0",
+      "purl": "pkg:maven/org.apache.commons/commons-lang3@3.14.0"
     },
     {
       "type": "library",
@@ -60,10 +54,17 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:maven/org.apache.commons/commons-lang3@3.14.0",
-      "name": "org.apache.commons:commons-lang3",
-      "version": "3.14.0",
-      "purl": "pkg:maven/org.apache.commons/commons-lang3@3.14.0"
+      "bom-ref": "pkg:npm/legacycorp-sdk@4.2.0",
+      "name": "legacycorp-sdk",
+      "version": "4.2.0",
+      "purl": "pkg:npm/legacycorp-sdk@4.2.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "LegacyCorp Proprietary"
+          }
+        }
+      ]
     },
     {
       "type": "library",
@@ -74,10 +75,75 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:deb/libssl3@3.0.11-1",
-      "name": "libssl3",
-      "version": "3.0.11-1",
-      "purl": "pkg:deb/libssl3@3.0.11-1"
+      "bom-ref": "pkg:pypi/certifi@2024.2.2",
+      "name": "certifi",
+      "version": "2024.2.2",
+      "purl": "pkg:pypi/certifi@2024.2.2",
+      "licenses": [
+        {
+          "expression": "MPL-2.0"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/evidence-pkg@1.0.0",
+      "name": "evidence-pkg",
+      "version": "1.0.0",
+      "purl": "pkg:pypi/evidence-pkg@1.0.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/requests@2.31.0",
+      "name": "requests",
+      "version": "2.31.0",
+      "purl": "pkg:pypi/requests@2.31.0",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "sentari:install_path",
+          "value": "/opt/venv-a"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/requests@2.31.0#1",
+      "name": "requests",
+      "version": "2.31.0",
+      "purl": "pkg:pypi/requests@2.31.0",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "sentari:install_path",
+          "value": "/opt/venv-b"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/urllib3@2.2.1",
+      "name": "urllib3",
+      "version": "2.2.1",
+      "purl": "pkg:pypi/urllib3@2.2.1",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ]
     },
     {
       "type": "library",
@@ -85,12 +151,15 @@
       "name": "openssl-libs",
       "version": "3.0.7-24",
       "purl": "pkg:rpm/openssl-libs@3.0.7-24"
-    },
+    }
+  ],
+  "dependencies": [
     {
-      "type": "library",
-      "bom-ref": "comp-7",
-      "name": "acme-copilot",
-      "version": "0.9.0"
+      "ref": "pkg:pypi/requests@2.31.0",
+      "dependsOn": [
+        "pkg:pypi/certifi@2024.2.2",
+        "pkg:pypi/urllib3@2.2.1"
+      ]
     }
   ]
 }

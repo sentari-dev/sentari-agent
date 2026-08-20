@@ -54,13 +54,18 @@ func normalizeSBOM(data []byte) []byte {
 // real content paths of both SBOM generators:
 //   - multiple ecosystems (pypi, scoped npm, maven group:artifact, nuget,
 //     deb + rpm with source packages) so every purlFor branch is covered;
-//   - an ai_agent record with no standard purl (purl omitted, comp-<i> ref);
+//   - an ai_agent record with no standard purl (purl omitted, coordinate-form
+//     fallback ref);
 //   - a duplicate purl (requests twice, different InstallPath) to exercise the
 //     CycloneDX bom-ref "#n" de-duplication;
 //   - InstallPath on several records (CycloneDX sentari:install_path property);
-//   - populated DepEdges + LicenseEvidence so the golden freezes the current
-//     "input carried, not yet rendered" behavior — if a generator later starts
-//     consuming those, the golden diff flags it for review.
+//   - every license state: SPDX-expression form (requests), raw-only name form
+//     (legacycorp-sdk), evidence-only SPDX id (evidence-pkg), and unknown
+//     (openssl-libs etc. → licenses omitted);
+//   - DepEdges that resolve to installed components (requests → urllib3,
+//     certifi → rendered as a dependency graph) plus one unresolved edge
+//     (requests → chardet, not installed → dropped), so the golden freezes both
+//     the rendered-graph and the silent-drop behavior.
 func goldenScanResult() *scanner.ScanResult {
 	return &scanner.ScanResult{
 		DeviceID:     "dev-golden-1",
@@ -71,11 +76,15 @@ func goldenScanResult() *scanner.ScanResult {
 		AgentVersion: "1.2.3-test",
 		Runtime:      "bare_metal",
 		Packages: []scanner.PackageRecord{
-			{Name: "requests", Version: "2.31.0", EnvType: scanner.EnvPip, InstallPath: "/opt/venv-a", Environment: "venv-a", LicenseSPDX: "Apache-2.0"},
-			{Name: "requests", Version: "2.31.0", EnvType: scanner.EnvPip, InstallPath: "/opt/venv-b", Environment: "venv-b", LicenseSPDX: "Apache-2.0"},
+			{Name: "requests", Version: "2.31.0", EnvType: scanner.EnvPip, InstallPath: "/opt/venv-a", Environment: "venv-a", LicenseSPDX: "Apache-2.0", LicenseRaw: "Apache License 2.0"},
+			{Name: "requests", Version: "2.31.0", EnvType: scanner.EnvPip, InstallPath: "/opt/venv-b", Environment: "venv-b", LicenseSPDX: "Apache-2.0", LicenseRaw: "Apache License 2.0"},
+			{Name: "urllib3", Version: "2.2.1", EnvType: scanner.EnvPip, Environment: "venv-a", LicenseSPDX: "MIT", LicenseRaw: "MIT License"},
+			{Name: "certifi", Version: "2024.2.2", EnvType: scanner.EnvPip, Environment: "venv-a", LicenseSPDX: "MPL-2.0"},
 			{Name: "@scope/pkg", Version: "1.0.0", EnvType: "npm", InstallPath: "/srv/app/node_modules", Environment: "node"},
+			{Name: "legacycorp-sdk", Version: "4.2.0", EnvType: "npm", Environment: "node", LicenseRaw: "LegacyCorp Proprietary"},
 			{Name: "org.apache.commons:commons-lang3", Version: "3.14.0", EnvType: "jvm", Environment: "maven"},
 			{Name: "Newtonsoft.Json", Version: "13.0.3", EnvType: "nuget", Environment: "dotnet"},
+			{Name: "evidence-pkg", Version: "1.0.0", EnvType: scanner.EnvPip, Environment: "venv-a"},
 			{Name: "libssl3", Version: "3.0.11-1", EnvType: scanner.EnvSystemDeb, SourcePackage: "openssl", Environment: "system"},
 			{Name: "openssl-libs", Version: "3.0.7-24", EnvType: scanner.EnvSystemRpm, SourcePackage: "openssl", Environment: "system"},
 			{Name: "acme-copilot", Version: "0.9.0", EnvType: "ai_agent", Environment: "ai"},
@@ -94,12 +103,29 @@ func goldenScanResult() *scanner.ScanResult {
 				Ecosystem: "pypi", Type: "runtime", Scope: "prod", Depth: 1,
 				IntroducedByPath: []string{"requests", "certifi"}, Resolved: true,
 			},
+			{
+				// Unresolved: chardet is not among the installed packages, so
+				// this edge is silently dropped from both formats.
+				ParentName: "requests", ParentVersion: "2.31.0",
+				ChildName: "chardet", ChildVersion: "5.2.0",
+				Ecosystem: "pypi", Type: "runtime", Scope: "prod", Depth: 1,
+				IntroducedByPath: []string{"requests", "chardet"}, Resolved: false,
+			},
 		},
 		LicenseEvidence: []deptree.LicenseEvidence{
 			{
 				PackageName: "requests", PackageVersion: "2.31.0",
 				Ecosystem: "pypi", SpdxID: "Apache-2.0",
 				Source: "metadata", Confidence: 0.95,
+				RawText: "Copyright 2013 Kenneth Reitz",
+			},
+			{
+				// Evidence-only license: the record carries no license fields,
+				// so this row drives the concluded id and copyrightText.
+				PackageName: "evidence-pkg", PackageVersion: "1.0.0",
+				Ecosystem: "pypi", SpdxID: "MIT",
+				Source: "metadata", Confidence: 0.9,
+				RawText: "Copyright 2024 Evidence Authors",
 			},
 		},
 	}
@@ -152,6 +178,59 @@ func TestGoldenDeterministic(t *testing.T) {
 				t.Fatalf("normalized output not deterministic across runs")
 			}
 		})
+	}
+}
+
+// reverseScanResult reverses the three input slices whose order must not affect
+// the SBOM output: Packages, DepEdges, and LicenseEvidence. Used to prove
+// input-reorder invariance.
+func reverseScanResult(r *scanner.ScanResult) {
+	for i, j := 0, len(r.Packages)-1; i < j; i, j = i+1, j-1 {
+		r.Packages[i], r.Packages[j] = r.Packages[j], r.Packages[i]
+	}
+	for i, j := 0, len(r.DepEdges)-1; i < j; i, j = i+1, j-1 {
+		r.DepEdges[i], r.DepEdges[j] = r.DepEdges[j], r.DepEdges[i]
+	}
+	for i, j := 0, len(r.LicenseEvidence)-1; i < j; i, j = i+1, j-1 {
+		r.LicenseEvidence[i], r.LicenseEvidence[j] = r.LicenseEvidence[j], r.LicenseEvidence[i]
+	}
+}
+
+// TestCycloneDXStableUnderInputReorder proves the CycloneDX output is invariant
+// under reordering of Packages, DepEdges, and LicenseEvidence: every emission
+// path sorts, so the normalized bytes must be byte-identical.
+func TestCycloneDXStableUnderInputReorder(t *testing.T) {
+	forward, err := GenerateCycloneDX(goldenScanResult())
+	if err != nil {
+		t.Fatalf("GenerateCycloneDX forward: %v", err)
+	}
+	reordered := goldenScanResult()
+	reverseScanResult(reordered)
+	reverse, err := GenerateCycloneDX(reordered)
+	if err != nil {
+		t.Fatalf("GenerateCycloneDX reversed: %v", err)
+	}
+	if string(normalizeSBOM(forward)) != string(normalizeSBOM(reverse)) {
+		t.Fatalf("CycloneDX output changed under input reorder:\n--- forward ---\n%s\n--- reversed ---\n%s",
+			normalizeSBOM(forward), normalizeSBOM(reverse))
+	}
+}
+
+// TestSPDXStableUnderInputReorder is the SPDX counterpart of the above.
+func TestSPDXStableUnderInputReorder(t *testing.T) {
+	forward, err := GenerateSPDX(goldenScanResult())
+	if err != nil {
+		t.Fatalf("GenerateSPDX forward: %v", err)
+	}
+	reordered := goldenScanResult()
+	reverseScanResult(reordered)
+	reverse, err := GenerateSPDX(reordered)
+	if err != nil {
+		t.Fatalf("GenerateSPDX reversed: %v", err)
+	}
+	if string(normalizeSBOM(forward)) != string(normalizeSBOM(reverse)) {
+		t.Fatalf("SPDX output changed under input reorder:\n--- forward ---\n%s\n--- reversed ---\n%s",
+			normalizeSBOM(forward), normalizeSBOM(reverse))
 	}
 }
 

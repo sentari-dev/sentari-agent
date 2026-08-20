@@ -134,6 +134,55 @@ func TestPurlForNpm(t *testing.T) {
 	}
 }
 
+// TestPurlForGolang checks pkg:golang construction: the module path is
+// lowercased with its slashes kept as real path separators (each segment
+// escaped individually), and the version is percent-escaped. Matches the
+// package-url golang type.
+func TestPurlForGolang(t *testing.T) {
+	cases := []struct {
+		name string
+		mod  string
+		ver  string
+		want string
+	}{
+		{
+			"mixed-case path",
+			"github.com/Azure/Thing",
+			"v1.2.3",
+			"pkg:golang/github.com/azure/thing@v1.2.3",
+		},
+		{
+			"pseudo-version verbatim",
+			"golang.org/x/sys",
+			"v0.0.0-20240101120000-abcdef123456",
+			"pkg:golang/golang.org/x/sys@v0.0.0-20240101120000-abcdef123456",
+		},
+		{
+			"devel version escaped",
+			"github.com/x/y",
+			"(devel)",
+			"pkg:golang/github.com/x/y@%28devel%29",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := purlFor(scanner.PackageRecord{Name: tc.mod, Version: tc.ver, EnvType: "go_binary"})
+			if got != tc.want {
+				t.Errorf("purlFor golang %q@%q = %q, want %q", tc.mod, tc.ver, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPurlForGolangEmptyVersion checks a versionless go_binary record yields
+// no purl (the shared version guard).
+func TestPurlForGolangEmptyVersion(t *testing.T) {
+	got := purlFor(scanner.PackageRecord{Name: "github.com/x/y", Version: "", EnvType: "go_binary"})
+	if got != "" {
+		t.Errorf("purlFor golang empty version = %q, want empty", got)
+	}
+}
+
 // TestPurlForNoEcosystem checks that ecosystems with no meaningful purl
 // (ai_agent, runtime/unknown) get an empty purl rather than a wrong one.
 func TestPurlForNoEcosystem(t *testing.T) {

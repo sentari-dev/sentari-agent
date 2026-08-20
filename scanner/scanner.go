@@ -52,6 +52,29 @@ type scanJobResult struct {
 	errors   []ScanError
 }
 
+// osReleaseDetect and kernelDetect are function-var seams over the osrelease
+// detectors so the os_release assembly can be unit-tested without touching the
+// host's real /etc/os-release or kernel.
+var (
+	osReleaseDetect = osrelease.Detect
+	kernelDetect    = osrelease.DetectKernel
+)
+
+// detectOsReleasePayload assembles the os_release payload from the distro and
+// kernel detectors. It returns nil when neither is found, so hosts that report
+// neither keep the pre-existing wire shape (os_release omitted). When only the
+// kernel is found the distro fields stay empty; when only the distro is found
+// Kernel is empty and its omitempty tag drops the key, keeping the distro-only
+// wire object byte-identical to pre-kernel agents.
+func detectOsReleasePayload() *OsRelease {
+	osr, osOK := osReleaseDetect()
+	kernel, kOK := kernelDetect()
+	if !osOK && !kOK {
+		return nil
+	}
+	return &OsRelease{ID: osr.ID, VersionID: osr.VersionID, Kernel: kernel}
+}
+
 // Run performs a full scan of the device. It walks the filesystem from
 // ScanRoot up to MaxDepth, discovers Python environments, and dispatches
 // environment-specific parsers via a bounded worker pool.
@@ -72,12 +95,11 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 		AgentVersion: Version,
 	}
 
-	// Distro identity for release-keyed CVE correlation of OS packages
-	// (apt/yum slice). Best-effort: absent on non-Linux / unreadable file,
-	// in which case the server falls back to a release-less sentinel.
-	if osr, ok := osrelease.Detect(); ok {
-		result.OsRelease = &OsRelease{ID: osr.ID, VersionID: osr.VersionID}
-	}
+	// Host OS identity: distro (for release-keyed CVE correlation of OS
+	// packages) plus the kernel release (for the SBOM kernel component).
+	// Best-effort: nil when neither is detected, preserving the wire shape for
+	// hosts that report neither.
+	result.OsRelease = detectOsReleasePayload()
 
 	// Phase 1: discover all Python environments on the filesystem.
 	envs, discoveryErrors := r.discoverEnvironments(ctx)

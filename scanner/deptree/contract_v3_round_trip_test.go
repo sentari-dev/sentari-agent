@@ -130,6 +130,7 @@ func TestContractV3_payloadValidatesAgainstSharedSchema(t *testing.T) {
 		"os_release": map[string]interface{}{
 			"id":         "debian",
 			"version_id": "12",
+			"kernel":     "6.1.0-18-amd64",
 		},
 		"container_targets": []map[string]interface{}{
 			{
@@ -139,6 +140,19 @@ func TestContractV3_payloadValidatesAgainstSharedSchema(t *testing.T) {
 				"container_id":   "c0ffee",
 				"container_name": "myapp-web",
 				"layer_count":    12,
+				// layer_digests PRESENT: the Phase-7 optional field,
+				// bottom-to-top image diff_ids.
+				"layer_digests": []string{
+					"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+					"sha256:2222222222222222222222222222222222222222222222222222222222222222",
+				},
+			},
+			{
+				// layer_digests ABSENT: a legacy/non-docker summary
+				// must remain schema-valid (the field is optional).
+				"runtime":     "docker",
+				"image_id":    "sha256:def456",
+				"layer_count": 3,
 			},
 		},
 	}
@@ -154,6 +168,26 @@ func TestContractV3_payloadValidatesAgainstSharedSchema(t *testing.T) {
 	}
 	if err := schema.Validate(doc); err != nil {
 		t.Fatalf("payload failed schema validation: %v\npayload: %s", err, string(body))
+	}
+
+	// Old-agent shape: os_release without a kernel key must stay schema-valid
+	// (kernel is optional), proving back-compat for pre-kernel agents.
+	noKernel := map[string]interface{}{
+		"os_release": map[string]interface{}{
+			"id":         "debian",
+			"version_id": "12",
+		},
+	}
+	nkBody, err := json.Marshal(noKernel)
+	if err != nil {
+		t.Fatalf("marshal no-kernel: %v", err)
+	}
+	var nkDoc interface{}
+	if err := json.Unmarshal(nkBody, &nkDoc); err != nil {
+		t.Fatalf("unmarshal no-kernel for validation: %v", err)
+	}
+	if err := schema.Validate(nkDoc); err != nil {
+		t.Fatalf("kernel-less os_release failed schema validation: %v\npayload: %s", err, string(nkBody))
 	}
 }
 

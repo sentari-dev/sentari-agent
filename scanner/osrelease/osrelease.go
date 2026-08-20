@@ -1,7 +1,9 @@
-// Package osrelease parses /etc/os-release to identify the host's Linux
-// distribution and release. The server uses this to derive a release-keyed
-// CVE partition (e.g. debian:12) for OS packages (apt/yum CVE-correctness
-// slice). Pure-Go, size-capped, no binary invocation.
+// Package osrelease reports host OS identity: the Linux distribution and
+// release (from /etc/os-release) and the running kernel release (from /proc on
+// Linux, the kern.osrelease sysctl on macOS, and RtlGetNtVersionNumbers on
+// Windows). The server derives a release-keyed CVE partition (e.g. debian:12)
+// for OS packages from the distro identity, and represents the kernel in
+// generated SBOMs. Pure-Go, size-capped, no binary invocation.
 package osrelease
 
 import (
