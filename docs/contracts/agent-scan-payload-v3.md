@@ -275,11 +275,12 @@ server has it dropped by Pydantic `extra='ignore'`.
   "kernel"?: string}`, from the host's `/etc/os-release` plus the kernel
   release. The server derives a release-keyed distro CVE partition
   (`debian:12`, `rocky:9`) for `system_deb` / `system_rpm` packages from
-  `id`/`version_id`. `id`/`version_id` are always present (both are required
-  string fields) but are **empty strings** on non-Linux hosts or when
-  `/etc/os-release` is unreadable; an empty `id` or empty `version_id` is
-  treated as "release unknown", and the server falls back to a release-less
-  sentinel partition (no false PyPI correlation). `kernel` is an optional kernel release string (`uname -r`
+  `id`/`version_id`. `id`/`version_id` are **always present; empty string when
+  the distro is not reported** (e.g. non-Linux hosts or when `/etc/os-release`
+  is unreadable) — never omitted, and never `null` (both are required by the
+  JSON Schema). An empty `version_id` is treated as "release unknown", and the
+  server falls back to a release-less sentinel partition (no false PyPI
+  correlation). `kernel` is an optional kernel release string (`uname -r`
   equivalent: `/proc/sys/kernel/osrelease` on Linux, `kern.osrelease` on
   macOS, `major.minor.build` on Windows), max 64 chars, **absent on older
   agents**; the server stores it per-device and represents it as a
