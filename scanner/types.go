@@ -123,6 +123,17 @@ type PackageRecord struct {
 	// The server maps it to the NTIA "supplier" SBOM element (CycloneDX
 	// supplier.name / SPDX "Organization: <value>").
 	Supplier string `json:"supplier,omitempty"`
+	// Sha256 is the lowercase-hex SHA-256 of the installed ARTIFACT FILE,
+	// emitted ONLY where exactly one concrete file maps to this coordinate (a
+	// plain library JAR, a .nupkg, a single-file Go binary's main module).
+	// Omitted for multi-file installs (deb/rpm/pip trees — a file set, no single
+	// artifact) and unhashable installs. The server validates and lowercases it
+	// at persist time (bad value → NULL, scan never rejected) and emits it as
+	// CycloneDX hashes[SHA-256] / SPDX checksums[SHA256]; on a fleet SBOM a
+	// coordinate's hash is emitted only when every device that reported one
+	// agrees (consensus). Computed via scanner.HashArtifact (SBOM-completeness
+	// v2 §4.5).
+	Sha256 string `json:"sha256,omitempty"`
 	// Container-origin fields — populated only when the scan was
 	// performed inside a container's merged rootfs (Sprint-17
 	// container-image scanner, opt-in via Config.ScanContainers).

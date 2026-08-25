@@ -19,6 +19,11 @@ import (
 // hostile or corrupt file OOM us.
 const maxNuspecBytes = 512 * 1024
 
+// maxNupkgHashBytes bounds the .nupkg SHA-256 stream (SBOM-completeness v2
+// §4.5). Real packages are well under this; the cap only stops a hostile or
+// corrupt archive from pinning CPU — an over-cap file is simply left unhashed.
+const maxNupkgHashBytes = 512 * 1024 * 1024
+
 // maxNuGetConfigBytes / maxPackagesConfigBytes cap the two XML config
 // reads.  Both are tiny in practice (a few KiB); the generous caps
 // bound a hostile or corrupt file without letting it OOM us.
@@ -176,9 +181,15 @@ func parsePackageVersionDir(envRoot, idDirName, pkgDir string) (*scanner.Package
 	if m.Metadata.ID == "" || m.Metadata.Version == "" {
 		return nil, nil //nolint:nilnil
 	}
+	// The retained package archive is one file for this one coordinate, so its
+	// SHA-256 is a valid artifact hash (SBOM-completeness v2 §4.5). NuGet names
+	// it "<lower-id>.<version>.nupkg" beside the nuspec; HashArtifact returns ""
+	// when it is absent (a restore-only cache without the archive).
+	nupkgPath := filepath.Join(pkgDir, idDirName+"."+filepath.Base(pkgDir)+".nupkg")
 	return &scanner.PackageRecord{
 		Name:        m.Metadata.ID,
 		Version:     m.Metadata.Version,
+		Sha256:      scanner.HashArtifact(nupkgPath, maxNupkgHashBytes),
 		InstallPath: pkgDir,
 		EnvType:     EnvNuGet,
 		Environment: envRoot,
