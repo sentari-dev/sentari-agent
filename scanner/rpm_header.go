@@ -10,7 +10,9 @@ const (
 	rpmTagVersion   = 1001
 	rpmTagRelease   = 1002
 	rpmTagEpoch     = 1003
+	rpmTagVendor    = 1011 // supplier (organization that built the package)
 	rpmTagLicense   = 1014
+	rpmTagPackager  = 1015 // supplier fallback (person/team that packaged it)
 	rpmTagSourceRPM = 1044
 	rpmTypeInt32    = 4 // RPM_INT32_TYPE
 	rpmTypeString   = 6 // RPM_STRING_TYPE
@@ -23,7 +25,7 @@ const (
 // parseRPMHeaderVersion parses a raw RPM header blob and returns
 // "version-release" (e.g. "3.12.0-1"). Returns "" if parsing fails.
 func parseRPMHeaderVersion(blob []byte) string {
-	version, _, _ := parseRPMHeader(blob)
+	version, _, _, _ := parseRPMHeader(blob)
 	return version
 }
 
@@ -65,10 +67,13 @@ func sourceNameFromSourceRPM(srpm string) string {
 //	[8:]   nindex × 16-byte index entries (tag, type, offset, count)
 //	       followed by the data store
 //
-// Returns empty strings if parsing fails or the tags are absent.
-func parseRPMHeader(blob []byte) (string, string, string) {
+// Returns (version, license, source, supplier); any element is "" when its
+// tag is absent or parsing fails. Supplier prefers VENDOR (the building
+// organization) and falls back to PACKAGER — both are raw here; the caller
+// runs NormalizeSupplier before emission.
+func parseRPMHeader(blob []byte) (string, string, string, string) {
 	if len(blob) < rpmBlobHeaderSize {
-		return "", "", ""
+		return "", "", "", ""
 	}
 
 	nindex := int(binary.BigEndian.Uint32(blob[0:4]))
@@ -78,17 +83,17 @@ func parseRPMHeader(blob []byte) (string, string, string) {
 	// tags.  Cap at 10 000 to prevent integer overflow on 32-bit platforms
 	// (nindex * rpmEntrySize could wrap) and billion-iteration loops on 64-bit.
 	if nindex <= 0 || nindex > 10000 {
-		return "", "", ""
+		return "", "", "", ""
 	}
 
 	indexEnd := rpmBlobHeaderSize + nindex*rpmEntrySize
 	if len(blob) < indexEnd {
-		return "", "", ""
+		return "", "", "", ""
 	}
 
 	storeStart := indexEnd
 
-	var version, release, license, sourceRPM string
+	var version, release, license, sourceRPM, vendor, packager string
 	var epoch uint32
 
 	for i := 0; i < nindex; i++ {
@@ -114,7 +119,7 @@ func parseRPMHeader(blob []byte) (string, string, string) {
 			continue
 		}
 		if tag != rpmTagVersion && tag != rpmTagRelease && tag != rpmTagLicense &&
-			tag != rpmTagSourceRPM {
+			tag != rpmTagSourceRPM && tag != rpmTagVendor && tag != rpmTagPackager {
 			continue
 		}
 
@@ -144,6 +149,10 @@ func parseRPMHeader(blob []byte) (string, string, string) {
 			license = s
 		case rpmTagSourceRPM:
 			sourceRPM = s
+		case rpmTagVendor:
+			vendor = s
+		case rpmTagPackager:
+			packager = s
 		}
 	}
 
@@ -160,5 +169,13 @@ func parseRPMHeader(blob []byte) (string, string, string) {
 		}
 	}
 
-	return versionStr, license, sourceNameFromSourceRPM(sourceRPM)
+	// VENDOR is the organization that built the package (e.g. "Red Hat, Inc.",
+	// "Fedora Project"); PACKAGER is the person/team. Prefer VENDOR as the more
+	// stable supplier identity, fall back to PACKAGER.
+	supplier := vendor
+	if supplier == "" {
+		supplier = packager
+	}
+
+	return versionStr, license, sourceNameFromSourceRPM(sourceRPM), supplier
 }

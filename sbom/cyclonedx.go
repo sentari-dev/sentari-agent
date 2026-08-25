@@ -138,8 +138,15 @@ type CycloneDXComponent struct {
 	Name       string                   `json:"name"`
 	Version    string                   `json:"version,omitempty"`
 	Purl       string                   `json:"purl,omitempty"`
+	Supplier   *CycloneDXSupplier       `json:"supplier,omitempty"`
 	Licenses   []CycloneDXLicenseChoice `json:"licenses,omitempty"`
 	Properties []CycloneDXProperty      `json:"properties,omitempty"`
+}
+
+// CycloneDXSupplier is the CycloneDX supplier object; only the NTIA-required
+// name is populated from locally readable metadata (PackageRecord.Supplier).
+type CycloneDXSupplier struct {
+	Name string `json:"name"`
 }
 
 // generateUUIDv4 returns a random RFC 4122 version-4 UUID string using
@@ -176,6 +183,9 @@ func GenerateCycloneDX(result *scanner.ScanResult) ([]byte, error) {
 			Name:    pkg.Name,
 			Version: pkg.Version,
 			Purl:    plan.purl,
+		}
+		if pkg.Supplier != "" {
+			comp.Supplier = &CycloneDXSupplier{Name: pkg.Supplier}
 		}
 		comp.Licenses = resolveComponentLicenses(pkg, licenses).cyclonedx
 		if pkg.InstallPath != "" {

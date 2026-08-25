@@ -49,6 +49,7 @@ type packageManifest struct {
 	License    interface{} `json:"license"`  // string or object (SPDX-ish)
 	Licenses   interface{} `json:"licenses"` // legacy: array of {type, url}
 	Deprecated interface{} `json:"deprecated"`
+	Author     interface{} `json:"author"` // string "Name <email> (url)" or object {name,...}
 }
 
 // scanNodeModules walks one `node_modules/` directory one level
@@ -462,7 +463,27 @@ func parsePackageDir(envRoot, pkgDir string) (*scanner.PackageRecord, error) {
 		Environment: envRoot,
 		LicenseRaw:  extractLicense(m),
 		InstallDate: mtime.Format(time.RFC3339),
+		// Supplier (NTIA element) from the manifest `author` field —
+		// SBOM-completeness v2 Gap 1.
+		Supplier: scanner.NormalizeSupplier(extractAuthor(m)),
 	}, nil
+}
+
+// extractAuthor returns the raw author name from a package.json manifest.
+// npm's `author` field is legally either a string ("Name <email> (url)") or
+// an object ({"name":…,"email":…,"url":…}); both shapes are handled. The
+// caller runs scanner.NormalizeSupplier to strip the email/URL noise. "" when
+// absent or nameless.
+func extractAuthor(m packageManifest) string {
+	switch a := m.Author.(type) {
+	case string:
+		return a
+	case map[string]interface{}:
+		if name, _ := a["name"].(string); name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 // extractLicense returns a best-effort string representation of

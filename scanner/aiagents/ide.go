@@ -170,6 +170,11 @@ func scanIDEExtensions(root string) ([]scanner.PackageRecord, []scanner.ScanErro
 			EnvType:     EnvAIAgent,
 			Environment: root,
 			InstallDate: installDate,
+			// The manifest publisher is the extension's supplier (NTIA
+			// element); it is also folded into the record name above, but
+			// surfacing it here lets the SBOM emit a proper supplier field
+			// (SBOM-completeness v2 Gap 1).
+			Supplier: scanner.NormalizeSupplier(m.Publisher),
 		})
 	}
 	return records, errs

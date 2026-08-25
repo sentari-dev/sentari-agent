@@ -29,6 +29,13 @@ import (
 // EPOCH is emitted as an INT32; the remaining tags as null-terminated
 // strings.  Empty strings and a zero epoch are omitted entirely.
 func buildRPMHeaderBlob(epoch uint32, version, release, license, sourceRPM string) []byte {
+	return buildRPMHeaderBlobFull(epoch, version, release, license, sourceRPM, "", "")
+}
+
+// buildRPMHeaderBlobFull is buildRPMHeaderBlob plus the optional VENDOR and
+// PACKAGER supplier tags (SBOM-completeness v2 Gap 1). Empty vendor/packager
+// omit their tags, so buildRPMHeaderBlob delegates here unchanged.
+func buildRPMHeaderBlobFull(epoch uint32, version, release, license, sourceRPM, vendor, packager string) []byte {
 	type entry struct {
 		tag, typ uint32
 		data     []byte
@@ -50,6 +57,8 @@ func buildRPMHeaderBlob(epoch uint32, version, release, license, sourceRPM strin
 	addStr(rpmTagRelease, release)
 	addStr(rpmTagLicense, license)
 	addStr(rpmTagSourceRPM, sourceRPM)
+	addStr(rpmTagVendor, vendor)
+	addStr(rpmTagPackager, packager)
 
 	var store, index []byte
 	for _, e := range entries {

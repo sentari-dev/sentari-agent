@@ -112,6 +112,17 @@ type PackageRecord struct {
 	LicenseRaw    string `json:"license_raw"`
 	LicenseSPDX   string `json:"license_spdx"`
 	LicenseTier   string `json:"license_tier"`
+	// Supplier is the package's supplier/author read from LOCALLY readable
+	// metadata only (deb Maintainer:, rpm VENDOR/PACKAGER, pypi Author:, the
+	// installed package.json `author`, the nuspec <authors>, the IDE-extension
+	// Publisher) — never a registry lookup (air-gap, constraint #2). Sanitized
+	// by NormalizeSupplier before emission: email/URL segments stripped, cap
+	// 255. Empty (omitted on the wire) means "not derivable" — common for
+	// language ecosystems and always for go/go_binary. Self-declared and
+	// unauthenticated: descriptive metadata, NOT a provenance attestation.
+	// The server maps it to the NTIA "supplier" SBOM element (CycloneDX
+	// supplier.name / SPDX "Organization: <value>").
+	Supplier string `json:"supplier,omitempty"`
 	// Container-origin fields — populated only when the scan was
 	// performed inside a container's merged rootfs (Sprint-17
 	// container-image scanner, opt-in via Config.ScanContainers).

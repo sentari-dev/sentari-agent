@@ -177,14 +177,20 @@ func parsePackageVersionDir(envRoot, idDirName, pkgDir string) (*scanner.Package
 		return nil, nil //nolint:nilnil
 	}
 	return &scanner.PackageRecord{
-		Name:          m.Metadata.ID,
-		Version:       m.Metadata.Version,
-		InstallPath:   pkgDir,
-		EnvType:       EnvNuGet,
-		Environment:   envRoot,
-		LicenseRaw:    extractLicense(m),
-		InstallerUser: strings.TrimSpace(m.Metadata.Authors),
-		InstallDate:   mtime.Format(time.RFC3339),
+		Name:        m.Metadata.ID,
+		Version:     m.Metadata.Version,
+		InstallPath: pkgDir,
+		EnvType:     EnvNuGet,
+		Environment: envRoot,
+		LicenseRaw:  extractLicense(m),
+		// nuspec <authors> is the package's supplier (the NTIA element), not
+		// the OS account that ran the install — it is now routed to Supplier
+		// (SBOM-completeness v2 Gap 1, OQ-5 clean break). InstallerUser is
+		// left empty for nuget: there is no reliable local install-owner
+		// signal in the global-packages layout, and overloading it with the
+		// authors string was misleading.
+		Supplier:    scanner.NormalizeSupplier(m.Metadata.Authors),
+		InstallDate: mtime.Format(time.RFC3339),
 	}, nil
 }
 

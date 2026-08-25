@@ -53,10 +53,21 @@ type SPDXPackage struct {
 	VersionInfo      string            `json:"versionInfo"`
 	DownloadLocation string            `json:"downloadLocation"`
 	FilesAnalyzed    bool              `json:"filesAnalyzed"`
+	Supplier         string            `json:"supplier,omitempty"`
 	LicenseConcluded string            `json:"licenseConcluded"`
 	LicenseDeclared  string            `json:"licenseDeclared"`
 	CopyrightText    string            `json:"copyrightText"`
 	ExternalRefs     []SPDXExternalRef `json:"externalRefs,omitempty"`
+}
+
+// spdxSupplier formats a supplier name into the SPDX 2.3 grammar
+// ("Organization: <name>"); "" when there is no supplier, so the field is
+// omitted rather than emitting a bare or malformed value.
+func spdxSupplier(name string) string {
+	if name == "" {
+		return ""
+	}
+	return "Organization: " + name
 }
 
 // GenerateSPDX creates an SPDX 2.3 JSON document from scan results.
@@ -87,6 +98,7 @@ func GenerateSPDX(result *scanner.ScanResult) ([]byte, error) {
 			VersionInfo:      pkg.Version,
 			DownloadLocation: "NOASSERTION",
 			FilesAnalyzed:    false,
+			Supplier:         spdxSupplier(pkg.Supplier),
 			LicenseConcluded: lic.concluded,
 			LicenseDeclared:  lic.declared,
 			CopyrightText:    lic.copyright,

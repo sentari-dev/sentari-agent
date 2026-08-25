@@ -502,6 +502,10 @@ func parseDistInfo(distInfoPath, envPath string) (PackageRecord, error) {
 	pkg.LicenseSPDX = spdx
 	pkg.LicenseTier = tier
 
+	// Supplier (NTIA element) from the METADATA Author/Maintainer headers —
+	// SBOM-completeness v2 Gap 1.
+	pkg.Supplier = extractSupplierFromMetadata(string(data))
+
 	return pkg, nil
 }
 
@@ -569,6 +573,9 @@ func parseEggInfo(eggInfoPath, envPath string) (PackageRecord, error) {
 		pkg.LicenseSPDX = spdx
 		pkg.LicenseTier = tier
 	}
+
+	// Supplier (NTIA element) from the PKG-INFO Author/Maintainer headers.
+	pkg.Supplier = extractSupplierFromMetadata(string(data))
 
 	return pkg, nil
 }

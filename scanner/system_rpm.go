@@ -190,7 +190,7 @@ func scanRpmViaDatabase() ([]PackageRecord, []ScanError) {
 		if pythonOnly && !isPythonPackage(name) {
 			continue
 		}
-		version, license, source := parseRPMHeader(blob)
+		version, license, source, supplier := parseRPMHeader(blob)
 		if version == "" {
 			version = "unknown"
 		}
@@ -203,6 +203,9 @@ func scanRpmViaDatabase() ([]PackageRecord, []ScanError) {
 			Name:          name,
 			Version:       version,
 			SourcePackage: source,
+			// VENDOR/PACKAGER header tag → NTIA supplier element
+			// (SBOM-completeness v2 Gap 1).
+			Supplier: NormalizeSupplier(supplier),
 		}
 		if license != "" {
 			pkg.LicenseRaw = license
