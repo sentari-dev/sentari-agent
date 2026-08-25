@@ -3,10 +3,47 @@ package scanner
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// resetArtifactHashMemo clears the process-global memo so a test's memo
+// behaviour is not perturbed by earlier tests (go test runs a package's tests
+// sequentially, so this is race-free).
+func resetArtifactHashMemo() {
+	artifactHashMemoMu.Lock()
+	artifactHashMemo = make(map[artifactHashMemoKey]string)
+	artifactHashMemoMu.Unlock()
+}
+
+// TestHashArtifactMemoSkipsRehash proves the memo short-circuits the expensive
+// hash on the second call (the assertion a same-value check cannot make).
+func TestHashArtifactMemoSkipsRehash(t *testing.T) {
+	resetArtifactHashMemo()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "memo.bin")
+	if err := os.WriteFile(path, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	orig := artifactHasher
+	artifactHasher = func(r io.Reader, max int64) (string, error) {
+		calls++
+		return orig(r, max)
+	}
+	defer func() { artifactHasher = orig }()
+
+	first := HashArtifact(path, 1<<20)
+	second := HashArtifact(path, 1<<20)
+	if first == "" || first != second {
+		t.Fatalf("hash mismatch: %q vs %q", first, second)
+	}
+	if calls != 1 {
+		t.Errorf("hasher invoked %d times, want 1 (memo must short-circuit)", calls)
+	}
+}
 
 func TestHashArtifact(t *testing.T) {
 	dir := t.TempDir()

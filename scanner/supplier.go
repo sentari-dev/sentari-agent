@@ -57,8 +57,12 @@ func NormalizeSupplier(raw string) string {
 		}
 	}
 
-	out := strings.Trim(strings.Join(segments, ", "), " \t\"'")
-	if out == "" || strings.EqualFold(out, "UNKNOWN") {
+	// Trim surrounding whitespace and double-quotes only — NOT single-quotes,
+	// which are legitimate leading characters in names (e.g. "'t Hooft").
+	out := strings.Trim(strings.Join(segments, ", "), " \t\"")
+	// Drop the common self-declared "nothing here" placeholders some packaging
+	// tools emit verbatim (pypi "UNKNOWN", setuptools "None").
+	if out == "" || strings.EqualFold(out, "UNKNOWN") || strings.EqualFold(out, "None") {
 		return ""
 	}
 	if runes := []rune(out); len(runes) > maxSupplierLen {
