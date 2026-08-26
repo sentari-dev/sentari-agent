@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
@@ -252,6 +253,12 @@ func buildMeta(path string, matcher filenameMatcher) (deptree.LockfileMeta, erro
 	sum := sha256.Sum256(raw)
 
 	count := declaredCountFromBytes(raw, matcher.basename)
+	// Workspace Phase 5 §A — extract the .NET Target Framework Monikers a
+	// project.assets.json declares, for server-side TFM EOL correlation.
+	var tfms []string
+	if matcher.basename == "project.assets.json" {
+		tfms = targetFrameworksFromAssets(raw)
+	}
 	return deptree.LockfileMeta{
 		Path:                  path,
 		Format:                format,
@@ -260,7 +267,34 @@ func buildMeta(path string, matcher filenameMatcher) (deptree.LockfileMeta, erro
 		LastModified:          st.ModTime().UTC(),
 		DeclaredPackagesCount: count,
 		DriftStatus:           "unknown", // server stamps the real value during ingest
+		TargetFrameworks:      tfms,
 	}, nil
+}
+
+// targetFrameworksFromAssets pulls the short-form TFMs a project targets from a
+// NuGet project.assets.json. The `project.frameworks` object is keyed by the
+// short moniker (`net8.0`, `netstandard2.0`) — exactly what the server's
+// tfm_map expects — so we return its sorted key set. Falls back to nil (never a
+// partial guess) when the structure is absent or unparseable. Returns nil for
+// an empty set so the omitempty JSON tag drops the field entirely.
+func targetFrameworksFromAssets(raw []byte) []string {
+	var p struct {
+		Project struct {
+			Frameworks map[string]json.RawMessage `json:"frameworks"`
+		} `json:"project"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil
+	}
+	if len(p.Project.Frameworks) == 0 {
+		return nil
+	}
+	tfms := make([]string, 0, len(p.Project.Frameworks))
+	for tfm := range p.Project.Frameworks {
+		tfms = append(tfms, tfm)
+	}
+	sort.Strings(tfms)
+	return tfms
 }
 
 // packageLockFormat inspects the lockfileVersion field of an npm

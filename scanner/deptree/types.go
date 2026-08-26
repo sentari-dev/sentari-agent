@@ -55,6 +55,12 @@ type LockfileMeta struct {
 	LastModified          time.Time `json:"last_modified"`
 	DeclaredPackagesCount int       `json:"declared_packages_count"`
 	DriftStatus           string    `json:"drift_status"`
+	// TargetFrameworks (Workspace Phase 5 §A) — the .NET Target Framework
+	// Monikers a project targets, from a NuGet project.assets.json's
+	// `project.frameworks` keys (e.g. "net8.0"). Optional + omitempty: absent
+	// for every non-NuGet lockfile. The server maps each TFM to its dotnet EOL
+	// cycle to flag projects targeting an end-of-life framework.
+	TargetFrameworks []string `json:"target_frameworks,omitempty"`
 }
 
 // SupplyChainSignal is one agent-detected supply-chain risk for a

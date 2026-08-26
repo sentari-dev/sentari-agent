@@ -103,6 +103,15 @@ Format enum: `package_lock_v2`, `package_lock_v3`, `yarn_v1`,
 `project_assets_json`, `poetry_lock`, `uv_lock`, `pipfile_lock`,
 `requirements_txt`.
 
+**Optional** `target_frameworks: string[]` (Phase 5 §A) — the .NET Target
+Framework Monikers a project targets, extracted from `project.assets.json`
+(`targets` / `project.frameworks`). NuGet lockfiles only; absent for every
+other ecosystem and for agents older than the Phase 5 detector. The server
+maps each TFM to its `dotnet` EOL cycle (`net8.0`→`8.0`, `netcoreapp3.1`→`3.1`;
+`netstandard2.0` / `net48` are unmapped) to flag projects targeting an
+end-of-life framework even on hosts with no installed .NET runtime. Example:
+`"target_frameworks": ["net8.0", "netstandard2.0"]`.
+
 ### `supply_chain_signals: SupplyChainSignal[]`
 
 One entry per agent-detected supply-chain signal. Agent-side signals
@@ -178,11 +187,16 @@ ingests these rows directly — see `services/license_ingest.py`.
 ### `installed_runtimes: InstalledRuntime[]`
 
 Per-device runtime detections. Covers language runtimes (`python`, `node`,
-`jdk`), JVM application servers (`wildfly`, `jboss-eap`, `tomcat`,
+`jdk`, `dotnet`), JVM application servers (`wildfly`, `jboss-eap`, `tomcat`,
 `jetty`, `payara`, `glassfish`, and presence-only `weblogic`/`websphere`),
 web servers (`nginx`, `apache-httpd`, `iis`), and message brokers
 (`rabbitmq`, `kafka`, `activemq`, `activemq-artemis`).
 Other runtimes are reserved for future phases.
+
+For **`dotnet`** (Phase 5 §A) the `distro` column carries the .NET **component**
+rather than a vendor: `runtime` (Microsoft.NETCore.App), `aspnetcore`
+(Microsoft.AspNetCore.App), or `sdk`. One endoflife.date `dotnet` product
+covers all three.
 
 ```json
 {
@@ -199,6 +213,7 @@ Other runtimes are reserved for future phases.
 | Runtime | Version example | Cycle | Rule |
 |---------|-----------------|-------|------|
 | python  | `3.11.5`        | `3.11` | First two dot-separated components. |
+| dotnet  | `8.0.8`         | `8.0`  | First two dot-separated components. |
 | node    | `20.10.0`       | `20`   | Major version only. |
 | jdk     | `17.0.5+8`      | `17`   | Major version only. |
 | jdk     | `1.8.0_392`     | `8`    | Legacy `1.X` → `X`. |
