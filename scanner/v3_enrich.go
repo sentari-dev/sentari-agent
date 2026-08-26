@@ -545,6 +545,16 @@ func enrichWithV3(ctx context.Context, result *ScanResult, roots []string, scanR
 		}
 	})
 
+	// --- .NET runtimes / SDKs (Workspace Phase 5 §A) ---
+	// Directory enumeration of the fixed dotnet install tree; correlated to the
+	// endoflife.date `dotnet` product server-side.
+	safeCall("runtimeversions.DotNet", func() {
+		roots := dotnetCandidateRoots()
+		if len(roots) > 0 {
+			result.InstalledRuntimes = append(result.InstalledRuntimes, runtimeversions.DetectAllDotNet(ctx, roots)...)
+		}
+	})
+
 	// --- application servers (WildFly/EAP, Tomcat, Jetty, Payara, …) ---
 	// Detected for runtime-EOL correlation. Env-var homes are read inside
 	// the detector, so this fires even when no well-known parent exists.
@@ -652,6 +662,44 @@ func jdkCandidateRoots() []string {
 				filepath.Join(pf, "Amazon Corretto"),
 			)
 		}
+	}
+	return existingDirs(candidates)
+}
+
+// dotnetCandidateRoots returns the well-known .NET install roots for the host
+// OS, plus a DOTNET_ROOT override, filtered to those that exist. The dotnet
+// detector enumerates the fixed shared/{Microsoft.NETCore.App,
+// Microsoft.AspNetCore.App}/<v> and sdk/<v> tree under each.
+//
+// macOS note: Homebrew installs the `dotnet` cask into /usr/local/share/dotnet,
+// and Apple-Silicon native installs land there too; the Rosetta x64 build sits
+// in the `x64/` sub-root — both are probed (remember the Node lesson: a missing
+// Homebrew path cost us Apple-Silicon coverage).
+func dotnetCandidateRoots() []string {
+	var candidates []string
+	switch runtime.GOOS {
+	case "darwin":
+		candidates = []string{
+			"/usr/local/share/dotnet",
+			filepath.Join("/usr/local/share/dotnet", "x64"), // Rosetta x64 sub-root
+			"/usr/share/dotnet",
+		}
+	case "windows":
+		for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)"} {
+			if pf := os.Getenv(env); pf != "" {
+				candidates = append(candidates, filepath.Join(pf, "dotnet"))
+			}
+		}
+	default: // linux and friends
+		candidates = []string{
+			"/usr/share/dotnet", // Microsoft apt/tarball default
+			"/usr/lib/dotnet",   // Debian/Ubuntu distro package layout
+			"/opt/dotnet",
+		}
+	}
+	// DOTNET_ROOT override — the canonical env the .NET host itself honours.
+	if r := os.Getenv("DOTNET_ROOT"); r != "" {
+		candidates = append(candidates, r)
 	}
 	return existingDirs(candidates)
 }

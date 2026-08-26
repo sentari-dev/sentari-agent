@@ -15,12 +15,16 @@ const (
 	RuntimePython = "python"
 	RuntimeNode   = "node"
 	RuntimeJDK    = "jdk"
+	// RuntimeDotNet (Workspace Phase 5 §A) — a detected .NET runtime/SDK. The
+	// component (runtime / aspnetcore / sdk) rides the Distro column; the cycle
+	// is deterministic major.minor, so it joins the language branch.
+	RuntimeDotNet = "dotnet"
 )
 
 // LanguageRuntimeNames returns the language-runtime names the agent can emit,
 // in stable display order.
 func LanguageRuntimeNames() []string {
-	return []string{RuntimePython, RuntimeNode, RuntimeJDK}
+	return []string{RuntimePython, RuntimeNode, RuntimeJDK, RuntimeDotNet}
 }
 
 // AppServerRuntimeNames returns the sorted set of JVM application-server
@@ -42,6 +46,7 @@ func AppServerRuntimeNames() []string {
 
 var (
 	pythonRe     = regexp.MustCompile(`^(\d+)\.(\d+)`)
+	dotnetRe     = regexp.MustCompile(`^(\d+)\.(\d+)`)
 	nodeRe       = regexp.MustCompile(`^(\d+)`)
 	jdkLegacyRe  = regexp.MustCompile(`^1\.(\d+)`)
 	jdkModernRe  = regexp.MustCompile(`^(\d+)`)
@@ -117,6 +122,10 @@ func CycleFor(runtime, version string) string {
 	switch runtime {
 	case "python":
 		if m := pythonRe.FindStringSubmatch(version); m != nil {
+			return m[1] + "." + m[2]
+		}
+	case "dotnet":
+		if m := dotnetRe.FindStringSubmatch(version); m != nil {
 			return m[1] + "." + m[2]
 		}
 	case "node":

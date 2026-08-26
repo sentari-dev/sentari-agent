@@ -44,7 +44,8 @@
         "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "last_modified": { "type": "string", "format": "date-time" },
         "declared_packages_count": { "type": "integer", "minimum": 0 },
-        "drift_status": { "type": "string", "enum": ["in_sync", "drift_detected", "unknown"] }
+        "drift_status": { "type": "string", "enum": ["in_sync", "drift_detected", "unknown"] },
+        "target_frameworks": { "type": "array", "items": { "type": "string" }, "description": "Optional (Phase 5 §A): .NET Target Framework Monikers from project.assets.json (NuGet only); absent for other ecosystems." }
       }
     },
     "SupplyChainSignal": {
@@ -80,7 +81,7 @@
       "additionalProperties": false,
       "required": ["name", "version", "cycle", "install_path"],
       "properties": {
-        "name": { "type": "string", "enum": ["python", "node", "jdk", "wildfly", "jboss-eap", "tomcat", "jetty", "payara", "glassfish", "weblogic", "websphere", "nginx", "apache-httpd", "iis", "rabbitmq", "kafka", "activemq", "activemq-artemis"] },
+        "name": { "type": "string", "enum": ["python", "node", "jdk", "dotnet", "wildfly", "jboss-eap", "tomcat", "jetty", "payara", "glassfish", "weblogic", "websphere", "nginx", "apache-httpd", "iis", "rabbitmq", "kafka", "activemq", "activemq-artemis"] },
         "version": { "type": "string" },
         "cycle": { "type": "string" },
         "distro": { "type": ["string", "null"] },
