@@ -109,19 +109,32 @@ func normalizePEP503(name string) string {
 //     so the server sees both versions and CVE correlation covers whichever is
 //     actually on disk.
 func mergeCondaPipPackages(condaPkgs, pipPkgs []PackageRecord) []PackageRecord {
-	// PEP 503 name -> set of conda-meta versions recorded under that name.
+	// PEP 503 name -> set of conda-meta versions recorded under that name, plus
+	// an index (name,version) -> position so an equal-version pip duplicate can
+	// enrich the winning conda-meta record with metadata conda-meta lacks.
+	type nameVer struct{ key, version string }
 	condaVersions := make(map[string]map[string]struct{}, len(condaPkgs))
-	for _, p := range condaPkgs {
+	condaIndex := make(map[nameVer]int, len(condaPkgs))
+	for i, p := range condaPkgs {
 		key := normalizePEP503(p.Name)
 		if condaVersions[key] == nil {
 			condaVersions[key] = make(map[string]struct{}, 1)
 		}
 		condaVersions[key][p.Version] = struct{}{}
+		condaIndex[nameVer{key, p.Version}] = i
 	}
 	for _, p := range pipPkgs {
 		key := normalizePEP503(p.Name)
 		if vers, ok := condaVersions[key]; ok {
 			if _, sameVersion := vers[p.Version]; sameVersion {
+				// True duplicate: the conda-meta record wins, but conda-meta JSON
+				// carries no author — inherit the Supplier the pip .dist-info
+				// parsed, else a conda-installed package would ship without a
+				// supplier and silently reopen the NTIA gap (SBOM-completeness v2
+				// §4.2, which lists conda under the pypi row).
+				if idx, ok := condaIndex[nameVer{key, p.Version}]; ok && condaPkgs[idx].Supplier == "" {
+					condaPkgs[idx].Supplier = p.Supplier
+				}
 				continue // true duplicate: the conda-meta record already covers it
 			}
 			// Versions differ — keep both so the on-disk version is not hidden.

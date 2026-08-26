@@ -19,6 +19,11 @@ import (
 // hostile or corrupt file OOM us.
 const maxNuspecBytes = 512 * 1024
 
+// maxNupkgHashBytes bounds the .nupkg SHA-256 stream (SBOM-completeness v2
+// §4.5). Real packages are well under this; the cap only stops a hostile or
+// corrupt archive from pinning CPU — an over-cap file is simply left unhashed.
+const maxNupkgHashBytes = 512 * 1024 * 1024
+
 // maxNuGetConfigBytes / maxPackagesConfigBytes cap the two XML config
 // reads.  Both are tiny in practice (a few KiB); the generous caps
 // bound a hostile or corrupt file without letting it OOM us.
@@ -176,15 +181,27 @@ func parsePackageVersionDir(envRoot, idDirName, pkgDir string) (*scanner.Package
 	if m.Metadata.ID == "" || m.Metadata.Version == "" {
 		return nil, nil //nolint:nilnil
 	}
+	// The retained package archive is one file for this one coordinate, so its
+	// SHA-256 is a valid artifact hash (SBOM-completeness v2 §4.5). NuGet names
+	// it "<lower-id>.<version>.nupkg" beside the nuspec; HashArtifact returns ""
+	// when it is absent (a restore-only cache without the archive).
+	nupkgPath := filepath.Join(pkgDir, idDirName+"."+filepath.Base(pkgDir)+".nupkg")
 	return &scanner.PackageRecord{
-		Name:          m.Metadata.ID,
-		Version:       m.Metadata.Version,
-		InstallPath:   pkgDir,
-		EnvType:       EnvNuGet,
-		Environment:   envRoot,
-		LicenseRaw:    extractLicense(m),
-		InstallerUser: strings.TrimSpace(m.Metadata.Authors),
-		InstallDate:   mtime.Format(time.RFC3339),
+		Name:        m.Metadata.ID,
+		Version:     m.Metadata.Version,
+		Sha256:      scanner.HashArtifact(nupkgPath, maxNupkgHashBytes),
+		InstallPath: pkgDir,
+		EnvType:     EnvNuGet,
+		Environment: envRoot,
+		LicenseRaw:  extractLicense(m),
+		// nuspec <authors> is the package's supplier (the NTIA element), not
+		// the OS account that ran the install — it is now routed to Supplier
+		// (SBOM-completeness v2 Gap 1, OQ-5 clean break). InstallerUser is
+		// left empty for nuget: there is no reliable local install-owner
+		// signal in the global-packages layout, and overloading it with the
+		// authors string was misleading.
+		Supplier:    scanner.NormalizeSupplier(m.Metadata.Authors),
+		InstallDate: mtime.Format(time.RFC3339),
 	}, nil
 }
 

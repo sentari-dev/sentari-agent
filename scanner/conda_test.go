@@ -263,3 +263,49 @@ func TestNormalizePEP503Conda(t *testing.T) {
 		}
 	}
 }
+
+// TestCondaSupplierInheritedFromPipDistInfo proves an equal-version pip
+// duplicate donates its supplier to the winning conda-meta record, which
+// carries none of its own (SBOM-completeness v2 §4.2 — conda is a pypi source).
+func TestCondaSupplierInheritedFromPipDistInfo(t *testing.T) {
+	env := t.TempDir()
+	condaMeta := filepath.Join(env, "conda-meta")
+	if err := os.MkdirAll(condaMeta, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCondaMeta(t, condaMeta, "numpy", "1.26.2")
+
+	site := filepath.Join(env, "lib", "python3.11", "site-packages")
+	distInfo := filepath.Join(site, "numpy-1.26.2.dist-info")
+	if err := os.MkdirAll(distInfo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := "Metadata-Version: 2.1\nName: numpy\nVersion: 1.26.2\nAuthor: NumPy Developers\n"
+	if err := os.WriteFile(filepath.Join(distInfo, "METADATA"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pkgs, errs := condaScanner{}.Scan(context.Background(), Environment{EnvType: EnvConda, Path: env})
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	var numpy *PackageRecord
+	var count int
+	for i := range pkgs {
+		if pkgs[i].Name == "numpy" {
+			numpy = &pkgs[i]
+			count++
+		}
+	}
+	if numpy == nil {
+		t.Fatal("numpy not emitted")
+	}
+	if count != 1 {
+		t.Fatalf("numpy emitted %d times, want 1 (equal-version duplicate collapses)", count)
+	}
+	// The winning conda-meta record (its InstallPath is conda-meta, not
+	// site-packages) inherited the pip .dist-info supplier.
+	if numpy.Supplier != "NumPy Developers" {
+		t.Errorf("supplier = %q, want %q (inherited from pip dist-info)", numpy.Supplier, "NumPy Developers")
+	}
+}

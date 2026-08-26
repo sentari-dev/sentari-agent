@@ -119,3 +119,32 @@ func TestProbeBinary_OversizeSkippedWithScanError(t *testing.T) {
 		t.Fatalf("oversize binary must emit exactly one ScanError; got %d: %+v", len(errs), errs)
 	}
 }
+
+// TestProbeBinary_MainModuleCarriesSha256 proves the binary file's SHA-256 is
+// attached to the MAIN-module record only — the file is that module's single
+// artifact — while embedded dependency and stdlib records carry no hash
+// (SBOM-completeness v2 §4.5).
+func TestProbeBinary_MainModuleCarriesSha256(t *testing.T) {
+	bin := hostFixtureBinary(t)
+	recs, errs := probeBinary(bin)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+	var mainSha, depSha, stdlibSha string
+	for _, r := range recs {
+		switch r.Name {
+		case fixtureMainModule:
+			mainSha = r.Sha256
+		case fixtureReplacePath:
+			depSha = r.Sha256
+		case "stdlib":
+			stdlibSha = r.Sha256
+		}
+	}
+	if len(mainSha) != 64 {
+		t.Errorf("main-module sha256 = %q, want 64-hex", mainSha)
+	}
+	if depSha != "" || stdlibSha != "" {
+		t.Errorf("embedded records must carry no hash: dep=%q stdlib=%q", depSha, stdlibSha)
+	}
+}
