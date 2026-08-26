@@ -438,6 +438,20 @@ func initSchema(db *sql.DB) error {
 			uploaded_at TEXT
 		);
 		CREATE INDEX IF NOT EXISTS idx_scan_queue_uploaded ON scan_queue(uploaded);
+
+		-- Persistent artifact-hash cache (SBOM-completeness v2 §4.5): one row per
+		-- artifact PATH so a changed file (new mtime/size) overwrites its own row
+		-- and stale entries never accumulate — the table is naturally bounded by
+		-- the number of distinct hashable artifacts on the host. updated_at drives
+		-- the coarse row-cap eviction in PutHash so pathological churn (a CI box
+		-- producing endlessly unique paths) still can't grow it without limit.
+		CREATE TABLE IF NOT EXISTS artifact_hashes (
+			path       TEXT    PRIMARY KEY,
+			mtime      INTEGER NOT NULL,
+			size       INTEGER NOT NULL,
+			sha256     TEXT    NOT NULL,
+			updated_at TEXT    NOT NULL DEFAULT (datetime('now'))
+		);
 	`); err != nil {
 		return err
 	}
@@ -941,6 +955,108 @@ func (c *Cache) PurgeUploaded(olderThan time.Duration) (int64, error) {
 		return 0, fmt.Errorf("purge uploaded: %w", err)
 	}
 	return res.RowsAffected()
+}
+
+// artifactHashCacheMaxRows bounds the persistent artifact-hash cache. One row
+// per distinct artifact path already bounds it to the host's hashable-artifact
+// count in the common case; this cap is the backstop against pathological churn
+// (a build box producing endlessly unique paths). A var so tests can shrink it.
+var artifactHashCacheMaxRows = 50_000
+
+// GetHash returns the cached SHA-256 for the artifact at path when the stored
+// entry's (mtime, size) match the supplied signature, else ("", false). It
+// implements scanner.ArtifactHashCache: a miss (no row, changed file, or any DB
+// error) simply makes HashArtifact recompute — the cache is a pure optimization,
+// never a correctness dependency, so errors are swallowed as misses.
+//
+// GetHash/PutHash assume the same single-threaded serve-loop discipline the rest
+// of *Cache relies on (see the needsReopen note): the scan that calls
+// HashArtifact runs synchronously inside the sequential ensureCacheOpen→runUpload
+// cycle, so a concurrent Reopen handle-swap can never overlap a scan. A future
+// async-scan refactor must preserve that or add its own synchronisation.
+func (c *Cache) GetHash(path string, mtime, size int64) (string, bool) {
+	var (
+		storedMtime, storedSize int64
+		sha                     string
+	)
+	err := c.db.QueryRow(
+		"SELECT mtime, size, sha256 FROM artifact_hashes WHERE path = ?", path,
+	).Scan(&storedMtime, &storedSize, &sha)
+	if err != nil || storedMtime != mtime || storedSize != size {
+		return "", false
+	}
+	return sha, true
+}
+
+// PutHash records sha for the artifact at (path, mtime, size). INSERT OR REPLACE
+// on the path primary key means a changed file overwrites its own row (and
+// refreshes updated_at, giving LRU-on-write semantics), so stale entries never
+// accumulate. After the write, oldest-updated rows beyond artifactHashCacheMaxRows
+// are evicted. Best-effort: a DB error is logged and dropped — a failed cache
+// write must never break the scan (HashArtifact just recomputes next time).
+//
+// The LRU key is refresh-on-WRITE only — GetHash does not touch updated_at — so
+// a stable, frequently-read artifact carries an old timestamp. This is a
+// deliberate simplification: the cap is a 50k backstop against pathological
+// unique-path churn (which writes fresh rows), not a working-set optimiser, and
+// an evicted-but-still-present artifact just gets re-hashed and re-put on the
+// next scan. A read-side updated_at bump would add a write to the hot read path
+// for no benefit at this scale.
+func (c *Cache) PutHash(path string, mtime, size int64, sha string) {
+	if _, err := c.db.Exec(
+		"INSERT OR REPLACE INTO artifact_hashes (path, mtime, size, sha256) VALUES (?, ?, ?, ?)",
+		path, mtime, size, sha,
+	); err != nil {
+		slog.Warn("cache: artifact-hash put failed (recompute next scan)",
+			slog.String("path", path), slog.String("err", err.Error()))
+		return
+	}
+	c.evictExcessArtifactHashes()
+}
+
+// evictExcessArtifactHashes deletes the least-recently-updated artifact_hashes
+// rows above the row cap. Best-effort cap maintenance layered on PutHash — a
+// failure is logged and dropped (the cap is re-enforced on the next PutHash).
+//
+// The COUNT and DELETE run inside one BEGIN IMMEDIATE transaction (cacheDSN's
+// _txlock=immediate) so the read-modify-write is atomic across PROCESSES, not
+// just goroutines — the same rationale as evictExcessPending: SetMaxOpenConns(1)
+// only serialises writers within one process, but two agent processes sharing
+// the cache DB (overlapping --upload cron runs) could otherwise interleave the
+// count and the delete and over-evict. Taking the write lock up front makes the
+// second waiter re-read the committed count.
+func (c *Cache) evictExcessArtifactHashes() {
+	tx, err := c.db.Begin()
+	if err != nil {
+		slog.Warn("cache: artifact-hash eviction begin failed (cap re-enforced next put)",
+			slog.String("err", err.Error()))
+		return
+	}
+	defer tx.Rollback() // no-op after a successful Commit.
+
+	var count int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM artifact_hashes").Scan(&count); err != nil {
+		slog.Warn("cache: artifact-hash eviction count failed", slog.String("err", err.Error()))
+		return
+	}
+	excess := count - artifactHashCacheMaxRows
+	if excess <= 0 {
+		_ = tx.Commit() // release the write lock promptly rather than lean on Rollback.
+		return
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM artifact_hashes WHERE path IN (
+			SELECT path FROM artifact_hashes ORDER BY updated_at ASC, path ASC LIMIT ?
+		)`,
+		excess,
+	); err != nil {
+		slog.Warn("cache: artifact-hash eviction delete failed (cap re-enforced next put)",
+			slog.String("err", err.Error()))
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		slog.Warn("cache: artifact-hash eviction commit failed", slog.String("err", err.Error()))
+	}
 }
 
 // Close closes the cache database.

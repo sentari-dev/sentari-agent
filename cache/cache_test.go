@@ -1601,3 +1601,127 @@ func TestReopenSuccessClearsNeedsReopenViaCorruptPath(t *testing.T) {
 		t.Fatalf("EnqueueScan after Reopen: %v", err)
 	}
 }
+
+// Compile-time proof the cache backs the scanner's persistent hash cache.
+var _ scanner.ArtifactHashCache = (*Cache)(nil)
+
+func newArtifactHashTestCache(t *testing.T) *Cache {
+	t.Helper()
+	c, err := NewCache(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatalf("NewCache: %v", err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+func TestArtifactHashCacheRoundTrip(t *testing.T) {
+	c := newArtifactHashTestCache(t)
+	if _, ok := c.GetHash("/opt/lib/guava.jar", 111, 2048); ok {
+		t.Fatal("expected miss on empty cache")
+	}
+	c.PutHash("/opt/lib/guava.jar", 111, 2048, "deadbeef")
+	sha, ok := c.GetHash("/opt/lib/guava.jar", 111, 2048)
+	if !ok || sha != "deadbeef" {
+		t.Errorf("GetHash = (%q,%v), want (deadbeef,true)", sha, ok)
+	}
+}
+
+func TestArtifactHashCacheStaleSignatureMisses(t *testing.T) {
+	c := newArtifactHashTestCache(t)
+	c.PutHash("/opt/lib/a.jar", 111, 2048, "sha-v1")
+	if _, ok := c.GetHash("/opt/lib/a.jar", 222, 2048); ok {
+		t.Error("changed mtime must miss")
+	}
+	if _, ok := c.GetHash("/opt/lib/a.jar", 111, 4096); ok {
+		t.Error("changed size must miss")
+	}
+	// A re-PutHash for the same path overwrites its single row (no accumulation).
+	c.PutHash("/opt/lib/a.jar", 222, 2048, "sha-v2")
+	sha, ok := c.GetHash("/opt/lib/a.jar", 222, 2048)
+	if !ok || sha != "sha-v2" {
+		t.Errorf("after overwrite GetHash = (%q,%v), want (sha-v2,true)", sha, ok)
+	}
+	var rows int
+	if err := c.db.QueryRow("SELECT COUNT(*) FROM artifact_hashes WHERE path = ?", "/opt/lib/a.jar").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Errorf("path row count = %d, want 1 (one row per path)", rows)
+	}
+}
+
+// TestArtifactHashCachePersistsAcrossReopen is the headline behaviour: rows
+// written by one process are served to a FRESH process. Proven by a real
+// Close + NewCache on the same file (not a shared handle), so a future
+// "recreate on open" regression would fail here.
+func TestArtifactHashCachePersistsAcrossReopen(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	c1, err := NewCache(dbPath)
+	if err != nil {
+		t.Fatalf("NewCache: %v", err)
+	}
+	c1.PutHash("/opt/lib/guava.jar", 111, 2048, "cafebabe")
+	if err := c1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Simulate the next cron --upload invocation: a brand-new process opens the
+	// same on-disk cache.
+	c2, err := NewCache(dbPath)
+	if err != nil {
+		t.Fatalf("reopen NewCache: %v", err)
+	}
+	t.Cleanup(func() { c2.Close() })
+	sha, ok := c2.GetHash("/opt/lib/guava.jar", 111, 2048)
+	if !ok || sha != "cafebabe" {
+		t.Errorf("after reopen GetHash = (%q,%v), want (cafebabe,true)", sha, ok)
+	}
+}
+
+// TestArtifactHashCacheEvictsOldestByTime proves eviction is ordered by
+// updated_at (time-LRU), NOT by the path tie-break: the time-old rows are given
+// LATE-sorting paths and the time-new rows EARLY-sorting paths, so a fallback to
+// path order would evict exactly the wrong set.
+func TestArtifactHashCacheEvictsOldestByTime(t *testing.T) {
+	c := newArtifactHashTestCache(t)
+
+	orig := artifactHashCacheMaxRows
+	t.Cleanup(func() { artifactHashCacheMaxRows = orig })
+	// High cap during setup so no eviction fires mid-insert (which would run
+	// against uniform insert-time timestamps and defeat the discrimination).
+	artifactHashCacheMaxRows = 1000
+
+	fresh := []string{"/p/a", "/p/b", "/p/c"} // early paths, kept fresh -> survive
+	stale := []string{"/p/x", "/p/y", "/p/z"} // late paths, backdated  -> evicted
+	for i, p := range append(append([]string{}, fresh...), stale...) {
+		c.PutHash(p, int64(i), 1, fmt.Sprintf("sha%d", i))
+	}
+	if _, err := c.db.Exec(
+		"UPDATE artifact_hashes SET updated_at = datetime('now','-1 hour') WHERE path IN (?, ?, ?)",
+		stale[0], stale[1], stale[2],
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cap to the fresh set and run a single eviction against the backdated times.
+	artifactHashCacheMaxRows = len(fresh)
+	c.evictExcessArtifactHashes()
+
+	exists := func(p string) bool {
+		var n int
+		if err := c.db.QueryRow("SELECT COUNT(*) FROM artifact_hashes WHERE path = ?", p).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n > 0
+	}
+	for _, p := range stale {
+		if exists(p) {
+			t.Errorf("time-old %s should have been evicted", p)
+		}
+	}
+	for _, p := range fresh {
+		if !exists(p) {
+			t.Errorf("time-new %s should have survived (eviction fell back to path order?)", p)
+		}
+	}
+}
