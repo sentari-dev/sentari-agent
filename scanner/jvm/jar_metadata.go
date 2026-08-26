@@ -334,7 +334,18 @@ func extractFromJar(jarPath string) ([]scanner.PackageRecord, []scanner.ScanErro
 	// by reference into the recursion so pom records + nested-jar records
 	// together respect maxRecordsPerJAR (see the const's doc comment).
 	remaining := maxRecordsPerJAR
-	return extractFromReader(zr, jarPath, 0, &budget, &remaining)
+	records, errs := extractFromReader(zr, jarPath, 0, &budget, &remaining)
+	// A jar that yields EXACTLY ONE coordinate is a plain library jar: the file
+	// hashes cleanly to that single coordinate (SBOM-completeness v2 §4.5). An
+	// uber/shaded jar (or one bundling nested jars) yields multiple embedded
+	// coordinates whose artifact hash is NOT the outer file's — those are left
+	// unhashed rather than stamped with a wrong hash.
+	if len(records) == 1 {
+		if sum := scanner.HashArtifact(jarPath, maxJARBytes); sum != "" {
+			records[0].Sha256 = sum
+		}
+	}
+	return records, errs
 }
 
 // extractFromReader is the recursion core.  Given an already-opened

@@ -75,6 +75,20 @@ func TestScanIDEExtensions_VersionFromManifest(t *testing.T) {
 	}
 }
 
+// TestScanIDEExtensions_SupplierIsPublisher: the emitted record's Supplier
+// is the manifest publisher (the NTIA supplier element) — SBOM-completeness v2.
+func TestScanIDEExtensions_SupplierIsPublisher(t *testing.T) {
+	tmp := t.TempDir()
+	writeExt(t, tmp, "github", "copilot", "1.200.0")
+	records, _ := scanIDEExtensions(tmp)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record; got %+v", records)
+	}
+	if records[0].Supplier != "github" {
+		t.Errorf("supplier: got %q want %q", records[0].Supplier, "github")
+	}
+}
+
 // TestScanIDEExtensions_MalformedManifestSkipped: a directory with
 // an invalid package.json produces a ScanError but doesn't block
 // the walk.  Other valid extensions still surface.

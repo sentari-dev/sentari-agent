@@ -177,6 +177,11 @@ func scanDebianViaStatusFile() ([]PackageRecord, []ScanError) {
 				src = strings.TrimSpace(src[:idx])
 			}
 			currentPkg.SourcePackage = src
+		} else if strings.HasPrefix(line, "Maintainer:") {
+			// dpkg "Maintainer:" is "Name <email>" — the NTIA supplier
+			// element. NormalizeSupplier strips the email so maintainer PII
+			// stays out of auditor-facing SBOMs (SBOM-completeness v2 Gap 1).
+			currentPkg.Supplier = NormalizeSupplier(strings.TrimSpace(strings.TrimPrefix(line, "Maintainer:")))
 		}
 	}
 

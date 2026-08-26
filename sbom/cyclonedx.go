@@ -138,8 +138,23 @@ type CycloneDXComponent struct {
 	Name       string                   `json:"name"`
 	Version    string                   `json:"version,omitempty"`
 	Purl       string                   `json:"purl,omitempty"`
+	Hashes     []CycloneDXHash          `json:"hashes,omitempty"`
+	Supplier   *CycloneDXSupplier       `json:"supplier,omitempty"`
 	Licenses   []CycloneDXLicenseChoice `json:"licenses,omitempty"`
 	Properties []CycloneDXProperty      `json:"properties,omitempty"`
+}
+
+// CycloneDXSupplier is the CycloneDX supplier object; only the NTIA-required
+// name is populated from locally readable metadata (PackageRecord.Supplier).
+type CycloneDXSupplier struct {
+	Name string `json:"name"`
+}
+
+// CycloneDXHash is one artifact hash; only SHA-256 of a single-file coordinate
+// is emitted (PackageRecord.Sha256).
+type CycloneDXHash struct {
+	Alg     string `json:"alg"`
+	Content string `json:"content"`
 }
 
 // generateUUIDv4 returns a random RFC 4122 version-4 UUID string using
@@ -176,6 +191,12 @@ func GenerateCycloneDX(result *scanner.ScanResult) ([]byte, error) {
 			Name:    pkg.Name,
 			Version: pkg.Version,
 			Purl:    plan.purl,
+		}
+		if pkg.Sha256 != "" {
+			comp.Hashes = []CycloneDXHash{{Alg: "SHA-256", Content: pkg.Sha256}}
+		}
+		if pkg.Supplier != "" {
+			comp.Supplier = &CycloneDXSupplier{Name: pkg.Supplier}
 		}
 		comp.Licenses = resolveComponentLicenses(pkg, licenses).cyclonedx
 		if pkg.InstallPath != "" {

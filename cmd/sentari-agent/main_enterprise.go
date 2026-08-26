@@ -314,6 +314,12 @@ func main() {
 		logAudit(auditLog, "cache.recreated",
 			fmt.Sprintf("corrupt_db_quarantined=%s", cacheCorruptPath))
 	}
+	// Back the artifact-hash cache with the persistent scan cache so a one-shot
+	// ``--upload`` cron run (a fresh process each invocation) skips re-hashing
+	// unchanged JARs/.nupkg/Go binaries (SBOM-completeness v2 §4.5). The daemon
+	// path benefits across restarts too. ``--scan`` never reaches here, so its
+	// stateless diagnostic keeps using only the in-memory memo.
+	scanner.SetArtifactHashCache(scanCache)
 
 	hostname, _ := os.Hostname()
 

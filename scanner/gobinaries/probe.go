@@ -103,7 +103,23 @@ func probeBinary(path string) ([]scanner.PackageRecord, []scanner.ScanError) {
 		// a non-Go binary sitting in an install directory. Skip silently.
 		return nil, nil
 	}
-	return recordsFromBuildInfo(bi, path)
+	records, errs := recordsFromBuildInfo(bi, path)
+	// SHA-256 of the binary FILE belongs on the MAIN-module record only (the
+	// binary *is* the main module). Dependency and stdlib records are embedded
+	// coordinates with no separate file, so they get no hash — a wrong hash is
+	// worse than none (SBOM-completeness v2 §4.5). Hashing is capped by the same
+	// maxGoBinaryBytes gate already applied to the file above.
+	if bi.Main.Path != "" {
+		if sum := scanner.HashArtifact(path, maxGoBinaryBytes); sum != "" {
+			for i := range records {
+				if records[i].Name == bi.Main.Path {
+					records[i].Sha256 = sum
+					break
+				}
+			}
+		}
+	}
+	return records, errs
 }
 
 // stampless builds a ScanError with a zero timestamp; the caller stamps it at

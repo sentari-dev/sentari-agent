@@ -53,10 +53,39 @@ type SPDXPackage struct {
 	VersionInfo      string            `json:"versionInfo"`
 	DownloadLocation string            `json:"downloadLocation"`
 	FilesAnalyzed    bool              `json:"filesAnalyzed"`
+	Checksums        []SPDXChecksum    `json:"checksums,omitempty"`
+	Supplier         string            `json:"supplier,omitempty"`
 	LicenseConcluded string            `json:"licenseConcluded"`
 	LicenseDeclared  string            `json:"licenseDeclared"`
 	CopyrightText    string            `json:"copyrightText"`
 	ExternalRefs     []SPDXExternalRef `json:"externalRefs,omitempty"`
+}
+
+// SPDXChecksum is one artifact checksum; only SHA256 of a single-file
+// coordinate is emitted (PackageRecord.Sha256).
+type SPDXChecksum struct {
+	Algorithm     string `json:"algorithm"`
+	ChecksumValue string `json:"checksumValue"`
+}
+
+// spdxSupplier formats a supplier name into the SPDX 2.3 grammar
+// ("Organization: <name>"); "" when there is no supplier, so the field is
+// omitted rather than emitting a bare or malformed value.
+func spdxSupplier(name string) string {
+	if name == "" {
+		return ""
+	}
+	return "Organization: " + name
+}
+
+// spdxChecksums returns the single SHA256 checksum entry when a hash is present,
+// else nil (the field is omitted — no fake placeholder for an unhashed
+// multi-file coordinate).
+func spdxChecksums(sha256 string) []SPDXChecksum {
+	if sha256 == "" {
+		return nil
+	}
+	return []SPDXChecksum{{Algorithm: "SHA256", ChecksumValue: sha256}}
 }
 
 // GenerateSPDX creates an SPDX 2.3 JSON document from scan results.
@@ -87,6 +116,8 @@ func GenerateSPDX(result *scanner.ScanResult) ([]byte, error) {
 			VersionInfo:      pkg.Version,
 			DownloadLocation: "NOASSERTION",
 			FilesAnalyzed:    false,
+			Checksums:        spdxChecksums(pkg.Sha256),
+			Supplier:         spdxSupplier(pkg.Supplier),
 			LicenseConcluded: lic.concluded,
 			LicenseDeclared:  lic.declared,
 			CopyrightText:    lic.copyright,

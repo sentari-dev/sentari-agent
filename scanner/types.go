@@ -112,6 +112,28 @@ type PackageRecord struct {
 	LicenseRaw    string `json:"license_raw"`
 	LicenseSPDX   string `json:"license_spdx"`
 	LicenseTier   string `json:"license_tier"`
+	// Supplier is the package's supplier/author read from LOCALLY readable
+	// metadata only (deb Maintainer:, rpm VENDOR/PACKAGER, pypi Author:, the
+	// installed package.json `author`, the nuspec <authors>, the IDE-extension
+	// Publisher) — never a registry lookup (air-gap, constraint #2). Sanitized
+	// by NormalizeSupplier before emission: email/URL segments stripped, cap
+	// 255. Empty (omitted on the wire) means "not derivable" — common for
+	// language ecosystems and always for go/go_binary. Self-declared and
+	// unauthenticated: descriptive metadata, NOT a provenance attestation.
+	// The server maps it to the NTIA "supplier" SBOM element (CycloneDX
+	// supplier.name / SPDX "Organization: <value>").
+	Supplier string `json:"supplier,omitempty"`
+	// Sha256 is the lowercase-hex SHA-256 of the installed ARTIFACT FILE,
+	// emitted ONLY where exactly one concrete file maps to this coordinate (a
+	// plain library JAR, a .nupkg, a single-file Go binary's main module).
+	// Omitted for multi-file installs (deb/rpm/pip trees — a file set, no single
+	// artifact) and unhashable installs. The server validates and lowercases it
+	// at persist time (bad value → NULL, scan never rejected) and emits it as
+	// CycloneDX hashes[SHA-256] / SPDX checksums[SHA256]; on a fleet SBOM a
+	// coordinate's hash is emitted only when every device that reported one
+	// agrees (consensus). Computed via scanner.HashArtifact (SBOM-completeness
+	// v2 §4.5).
+	Sha256 string `json:"sha256,omitempty"`
 	// Container-origin fields — populated only when the scan was
 	// performed inside a container's merged rootfs (Sprint-17
 	// container-image scanner, opt-in via Config.ScanContainers).
