@@ -1,0 +1,4 @@
+# login.defs
+PASS_MAX_DAYS   90
+PASS_MIN_DAYS   7
+UMASK           022

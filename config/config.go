@@ -21,6 +21,23 @@ type AgentConfig struct {
 	Agent       AgentSection
 	Cache       CacheConfig
 	Audit       AuditConfig
+	Hardening   HardeningConfig
+}
+
+// HardeningConfig holds the v4 hardening-posture collector settings.
+//
+// INI section:
+//
+//	[hardening]
+//	enabled = true
+//
+// Off by default (install-gate-style dormant opt-in): when disabled the agent
+// runs no hardening collectors and emits no `hardening_observations` block nor
+// the v4 payload header, keeping a default agent's wire shape byte-identical to
+// a v3 agent. Operators flip this on once the fleet catalog is staged.
+type HardeningConfig struct {
+	// Enabled gates the entire hardening-posture feature on the agent.
+	Enabled bool
 }
 
 // CacheConfig holds local scan-queue (offline cache) settings.
@@ -549,6 +566,20 @@ func (c *AgentConfig) set(section, key, value string) error {
 				return fmt.Errorf("max_audit_bytes must be non-negative, got %d", v)
 			}
 			c.Audit.MaxAuditBytes = v
+		default:
+			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
+		}
+	case "hardening":
+		switch key {
+		case "enabled":
+			switch strings.ToLower(value) {
+			case "true", "1", "yes", "on":
+				c.Hardening.Enabled = true
+			case "false", "0", "no", "off", "":
+				c.Hardening.Enabled = false
+			default:
+				return fmt.Errorf("invalid enabled value %q (want true/false)", value)
+			}
 		default:
 			slog.Warn("config: unknown key ignored", slog.String("section", section), slog.String("key", key))
 		}

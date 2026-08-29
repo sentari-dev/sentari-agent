@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>unicodeName</key>
+	<string>café—Zürich</string>
+	<key>ratio</key>
+	<real>0.5</real>
+	<key>count</key>
+	<integer>300</integer>
+	<key>flags</key>
+	<array>
+		<true/>
+		<false/>
+		<integer>7</integer>
+		<string>ok</string>
+	</array>
+	<key>nested</key>
+	<dict>
+		<key>inner</key>
+		<integer>42</integer>
+	</dict>
+</dict>
+</plist>

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sentari-dev/sentari-agent/scanner/deptree"
+	"github.com/sentari-dev/sentari-agent/scanner/hardening"
 	"github.com/sentari-dev/sentari-agent/scanner/runtimeversions"
 )
 
@@ -221,6 +222,14 @@ type ScanResult struct {
 	// scanner/runtimeversions/. Empty when no detectors find anything
 	// or when the relevant install dirs aren't accessible.
 	InstalledRuntimes []runtimeversions.InstalledRuntime `json:"installed_runtimes,omitempty"`
+
+	// --- v4 (Hardening posture) ---
+	// HardeningObservations is the v4 additive block of raw host
+	// security-configuration facts (SSH/TLS/firewall/disk-encryption/…),
+	// collected by scanner/hardening only when `[hardening] enabled = true`.
+	// nil/omitted on a dormant agent (default), keeping the v3 wire shape
+	// byte-identical. See docs/contracts/agent-scan-payload-v4.{md,json}.
+	HardeningObservations []hardening.Observation `json:"hardening_observations,omitempty"`
 }
 
 // ContainerTargetSummary is the informational shape of a discovered
@@ -279,4 +288,9 @@ type Config struct {
 	// volume.  Empty for bare OSS one-shot runs (`--scan`), which then
 	// fall back to os.TempDir().
 	DataDir string
+	// HardeningEnabled turns on the v4 hardening-posture collectors
+	// (scanner/hardening). Off by default (install-gate-style dormant
+	// opt-in): when false the scan emits no hardening_observations and no
+	// v4 payload header. Wired from `[hardening] enabled` in agent.conf.
+	HardeningEnabled bool
 }
