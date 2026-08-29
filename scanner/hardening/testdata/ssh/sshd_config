@@ -1,0 +1,10 @@
+# main sshd config
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+X11Forwarding yes
+Include sshd_config.d/*.conf
+MaxAuthTries 4
+
+Match User deploy
+    PasswordAuthentication yes
+    PermitTunnel yes

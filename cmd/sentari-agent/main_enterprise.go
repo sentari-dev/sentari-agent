@@ -172,10 +172,11 @@ func main() {
 			}
 		}
 		cfg := scanner.Config{
-			ScanRoot:       agentCfgLocal.Scanner.ScanRoot,
-			MaxDepth:       agentCfgLocal.Scanner.MaxDepth,
-			MaxWorkers:     8,
-			ScanContainers: agentCfgLocal.Scanner.ScanContainers,
+			ScanRoot:         agentCfgLocal.Scanner.ScanRoot,
+			MaxDepth:         agentCfgLocal.Scanner.MaxDepth,
+			MaxWorkers:       8,
+			ScanContainers:   agentCfgLocal.Scanner.ScanContainers,
+			HardeningEnabled: agentCfgLocal.Hardening.Enabled,
 		}
 		if v := os.Getenv("SENTARI_SCAN_CONTAINERS"); v == "true" || v == "1" {
 			cfg.ScanContainers = true

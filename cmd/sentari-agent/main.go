@@ -75,10 +75,11 @@ func main() {
 
 	// Map agent config to scanner config.
 	cfg := scanner.Config{
-		ScanRoot:       agentCfg.Scanner.ScanRoot,
-		MaxDepth:       agentCfg.Scanner.MaxDepth,
-		MaxWorkers:     8,
-		ScanContainers: agentCfg.Scanner.ScanContainers,
+		ScanRoot:         agentCfg.Scanner.ScanRoot,
+		MaxDepth:         agentCfg.Scanner.MaxDepth,
+		MaxWorkers:       8,
+		ScanContainers:   agentCfg.Scanner.ScanContainers,
+		HardeningEnabled: agentCfg.Hardening.Enabled,
 	}
 	// Allow SENTARI_SCAN_CONTAINERS=true to flip the flag at
 	// runtime without touching the config file.  Common for "I

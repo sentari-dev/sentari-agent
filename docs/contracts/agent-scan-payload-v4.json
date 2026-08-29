@@ -1,0 +1,501 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sentari.dev/contracts/agent-scan-payload-v4.json",
+  "title": "Sentari agent scan payload v4 \u2014 additions",
+  "description": "Schema for the v4 additive blocks over v3. Per the compliance-expansion index R1 the shared v4 payload = v3 + host_facts + os_applications (asset-register spec) + hardening_observations (this spec). This file currently defines the v3 fields plus the hardening_observations block only; the host_facts / os_applications blocks are appended by the asset-register PR when it lands (same pair, no v5). All blocks are OPTIONAL and shape-gated at ingest (has_v4_payload per-block), so a mixed v3/v4 fleet coexists. The .json is the source of truth and must stay byte-identical in both repos.",
+  "type": "object",
+  "properties": {
+    "dep_edges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DepEdge"
+      }
+    },
+    "lockfiles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/LockfileMeta"
+      }
+    },
+    "supply_chain_signals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/SupplyChainSignal"
+      }
+    },
+    "license_evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/LicenseEvidence"
+      }
+    },
+    "installed_runtimes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/InstalledRuntime"
+      }
+    },
+    "os_release": {
+      "$ref": "#/definitions/OsRelease"
+    },
+    "container_targets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ContainerTargetSummary"
+      }
+    },
+    "hardening_observations": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/definitions/HardeningObservation"
+      },
+      "description": "Optional v4 block (hardening-posture spec). Flat list of raw agent-observed security-configuration facts (SSH/TLS/firewall/disk-encryption/etc keyword values read directly from config files / /proc / registry / plists \u2014 never a binary invocation, constraint #7). Facts only, no verdicts: the server evaluates them against the bundled hardening-v1 catalog. Absent on v3 agents => empty list. Capped at 256 entries; the server also enforces this defensively."
+    },
+    "tags": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "runtime": {
+      "type": "string",
+      "enum": [
+        "bare_metal",
+        "container",
+        "k8s",
+        "unknown"
+      ]
+    }
+  },
+  "definitions": {
+    "DepEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parent_name",
+        "parent_version",
+        "child_name",
+        "child_version",
+        "ecosystem",
+        "type",
+        "scope",
+        "depth",
+        "introduced_by_path",
+        "resolved"
+      ],
+      "properties": {
+        "parent_name": {
+          "type": "string"
+        },
+        "parent_version": {
+          "type": "string"
+        },
+        "child_name": {
+          "type": "string"
+        },
+        "child_version": {
+          "type": "string"
+        },
+        "ecosystem": {
+          "type": "string",
+          "enum": [
+            "pypi",
+            "npm",
+            "maven",
+            "nuget"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "direct",
+            "transitive",
+            "peer",
+            "optional",
+            "dev",
+            "test"
+          ]
+        },
+        "scope": {
+          "type": "string"
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "introduced_by_path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2
+        },
+        "resolved": {
+          "type": "boolean"
+        }
+      }
+    },
+    "LockfileMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "format",
+        "ecosystem",
+        "sha256",
+        "last_modified",
+        "declared_packages_count",
+        "drift_status"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "package_lock_v2",
+            "package_lock_v3",
+            "yarn_v1",
+            "yarn_berry",
+            "pnpm_lock",
+            "pom_xml",
+            "packages_lock_json",
+            "project_assets_json",
+            "poetry_lock",
+            "uv_lock",
+            "pipfile_lock",
+            "requirements_txt"
+          ]
+        },
+        "ecosystem": {
+          "type": "string",
+          "enum": [
+            "pypi",
+            "npm",
+            "maven",
+            "nuget"
+          ]
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "last_modified": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "declared_packages_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "drift_status": {
+          "type": "string",
+          "enum": [
+            "in_sync",
+            "drift_detected",
+            "unknown"
+          ]
+        },
+        "target_frameworks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional (Phase 5 \u00a7A): .NET Target Framework Monikers from project.assets.json (NuGet only); absent for other ecosystems."
+        }
+      }
+    },
+    "SupplyChainSignal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "package_name",
+        "package_version",
+        "ecosystem",
+        "signal_type",
+        "severity",
+        "source"
+      ],
+      "properties": {
+        "package_name": {
+          "type": "string"
+        },
+        "package_version": {
+          "type": "string"
+        },
+        "ecosystem": {
+          "type": "string",
+          "enum": [
+            "pypi",
+            "npm",
+            "maven",
+            "nuget"
+          ]
+        },
+        "signal_type": {
+          "type": "string",
+          "enum": [
+            "postinstall_script",
+            "preinstall_script",
+            "install_script",
+            "unsigned",
+            "provenance_attested",
+            "yanked",
+            "deprecated",
+            "maintainer_changed",
+            "typosquat_suspect",
+            "npm_malware_advisory",
+            "pypi_malware_advisory",
+            "maven_malware_advisory",
+            "nuget_malware_advisory",
+            "maven_checksum_mismatch",
+            "maven_snapshot_in_release",
+            "maven_untrusted_repo"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "raw": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "LicenseEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "package_name",
+        "package_version",
+        "ecosystem",
+        "source",
+        "confidence"
+      ],
+      "properties": {
+        "package_name": {
+          "type": "string"
+        },
+        "package_version": {
+          "type": "string"
+        },
+        "ecosystem": {
+          "type": "string",
+          "enum": [
+            "pypi",
+            "npm",
+            "maven",
+            "nuget"
+          ]
+        },
+        "spdx_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "trove",
+            "spdx_pkg",
+            "pom",
+            "nuspec",
+            "copyright_file",
+            "rpm_header",
+            "server_enriched"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "raw_text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "InstalledRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "cycle",
+        "install_path"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": [
+            "python",
+            "node",
+            "jdk",
+            "dotnet",
+            "wildfly",
+            "jboss-eap",
+            "tomcat",
+            "jetty",
+            "payara",
+            "glassfish",
+            "weblogic",
+            "websphere",
+            "nginx",
+            "apache-httpd",
+            "iis",
+            "rabbitmq",
+            "kafka",
+            "activemq",
+            "activemq-artemis"
+          ]
+        },
+        "version": {
+          "type": "string"
+        },
+        "cycle": {
+          "type": "string"
+        },
+        "distro": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "install_path": {
+          "type": "string"
+        }
+      }
+    },
+    "OsRelease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version_id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version_id": {
+          "type": "string"
+        },
+        "kernel": {
+          "type": "string"
+        }
+      }
+    },
+    "ContainerTargetSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime",
+        "image_id",
+        "layer_count"
+      ],
+      "properties": {
+        "runtime": {
+          "type": "string"
+        },
+        "image_id": {
+          "type": "string"
+        },
+        "image_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "container_id": {
+          "type": "string"
+        },
+        "container_name": {
+          "type": "string"
+        },
+        "layer_count": {
+          "type": "integer"
+        },
+        "layer_digests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "HardeningObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "family"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Namespaced observation id '<family>.<slug>'. The v1 vocabulary is documented in the .md but the enum is NOT closed: an unknown key is dropped-with-warning at ingest, never 422 (a newer agent must never lose a whole scan to an older server)."
+        },
+        "family": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Check family: one of disk_encryption, ssh, tls, firewall, auth_policy, audit_daemon, auto_update, screen_lock, kernel. Free-form at ingest (length-capped, no server CHECK) so a future family never 500s a scan."
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2048,
+          "description": "Observed value as a canonical string (booleans 'true'/'false', lists comma-joined in source order). null when the source was unreadable (see error). Server clamps to 2048, never rejects."
+        },
+        "default_assumed": {
+          "type": "boolean",
+          "description": "true when the keyword was ABSENT and value is the documented platform default (e.g. modern-OpenSSH default). Lets an auditor distinguish explicitly-configured from inherited-default. Defaults false when omitted."
+        },
+        "source_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Provenance path of the observed value (e.g. /etc/ssh/sshd_config). Registry/API-sourced observations carry a stable pseudo-path like 'registry:HKLM\\...'. Nullable. NO FILE CONTENTS cross the wire \u2014 only the named keyword value + this path + the sha below."
+        },
+        "source_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "Lowercase 64-hex SHA-256 of the parsed source file, for drift detection without the file body ever leaving the device (the v3 lockfiles metadata pattern). Nullable; a malformed value is stored NULL at ingest, never rejected."
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 255,
+          "description": "Short reason when value is null ('permission denied', 'not found', 'conditional (Match block)'). => the check evaluates to 'unknown', never a guess."
+        }
+      }
+    }
+  }
+}

@@ -335,10 +335,11 @@ func runUpload(ctx context.Context, client *comms.Client, auditLog *audit.AuditL
 	logAudit(auditLog, "scan.started", fmt.Sprintf("hostname=%s", hostname))
 
 	cfg := scanner.Config{
-		ScanRoot:       agentCfg.Scanner.ScanRoot,
-		MaxDepth:       agentCfg.Scanner.MaxDepth,
-		MaxWorkers:     8,
-		ScanContainers: agentCfg.Scanner.ScanContainers,
+		ScanRoot:         agentCfg.Scanner.ScanRoot,
+		MaxDepth:         agentCfg.Scanner.MaxDepth,
+		MaxWorkers:       8,
+		ScanContainers:   agentCfg.Scanner.ScanContainers,
+		HardeningEnabled: agentCfg.Hardening.Enabled,
 		// Container materialisation lands under the agent's disk-backed
 		// data dir (never tmpfs) — see scanner.Config.DataDir.
 		DataDir: dataDir,

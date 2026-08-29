@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sentari-dev/sentari-agent/scanner/hardening"
 	"github.com/sentari-dev/sentari-agent/scanner/osrelease"
 	"github.com/sentari-dev/sentari-agent/scanner/pathfilter"
 	"github.com/sentari-dev/sentari-agent/scanner/safeio"
@@ -190,6 +191,12 @@ func (r *Runner) Run(ctx context.Context) (*ScanResult, error) {
 	}
 	v3Roots := v3DiscoveryRoots(r.cfg.ScanRoot)
 	enrichWithV3(ctx, result, v3Roots, r.cfg.ScanRoot)
+
+	// Phase 4b (v4 hardening posture): collect raw host security-configuration
+	// facts. Dormant unless the operator opted in via `[hardening] enabled`;
+	// hardening.Collect returns nil when disabled so the v3 wire shape and the
+	// upload header are byte-identical for a default agent.
+	result.HardeningObservations = hardening.Collect(ctx, r.cfg.HardeningEnabled)
 
 	// Re-check after enrichment: a cancellation that landed during (or
 	// just as) enrichment finished must surface as an error rather than a
